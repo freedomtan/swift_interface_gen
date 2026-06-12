@@ -47,8 +47,8 @@ class TypeNode {
     private func defaultReturnValue(for type: String) -> String {
         let t = type.trimmingCharacters(in: .whitespaces)
         if t == "Bool" { return "false" }
-        if t.starts(with: "Int") || t.starts(with: "UInt") || t == "Double" || t == "Float" || t == "CGFloat" { return "0" }
-        if t == "String" { return "\"\"" }
+        if ["Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64", "Double", "Float", "Float16", "CGFloat"].contains(t) { return "0" }
+        if t == "String" || t == "StaticString" { return "\"\"" }
         if t.starts(with: "Array<") || t.starts(with: "[") { return "[]" }
         if t.starts(with: "Dictionary<") || (t.starts(with: "[") && t.contains(":")) { return "[:]" }
         if t.starts(with: "Optional<") || t.hasSuffix("?") { return "nil" }
