@@ -1,0 +1,32 @@
+# Binaries
+swift-interface-gen
+*_run
+
+# Swift Build Artifacts
+.build/
+*.o
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+*.abi.json
+*.dSYM/
+
+# Generated Frameworks
+LocalFrameworks/
+
+# Logs and Temps
+*.log
+all_symbols*.txt
+tbd_chunk.txt
+disassembled.txt
+foo.swift
+Bridge.swift
+parser_debug.log
+debug_catalog.log
+sample.tbd
+test.sil
+test.swift
+GeneratedInterface_temp.swift
+GeneratedInterface_raw.swift
+GeneratedInterface_head.swift
+GeneratedInterface_test.swift
