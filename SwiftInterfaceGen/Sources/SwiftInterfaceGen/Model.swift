@@ -44,6 +44,20 @@ class TypeNode {
         return name
     }
 
+    private func defaultReturnValue(for type: String) -> String {
+        let t = type.trimmingCharacters(in: .whitespaces)
+        if t == "Bool" { return "false" }
+        if t.starts(with: "Int") || t.starts(with: "UInt") || t == "Double" || t == "Float" || t == "CGFloat" { return "0" }
+        if t == "String" { return "\"\"" }
+        if t.starts(with: "Array<") || t.starts(with: "[") { return "[]" }
+        if t.starts(with: "Dictionary<") || (t.starts(with: "[") && t.contains(":")) { return "[:]" }
+        if t.starts(with: "Optional<") || t.hasSuffix("?") { return "nil" }
+        if t.starts(with: "Set<") { return "[]" }
+        if t == "Void" || t == "()" { return "" }
+        if t == "Data" { return "Data()" }
+        return "fatalError()"
+    }
+
     func generateCode(indent: String = "", nameOverride: String? = nil) -> String {
         var lines = [String]()
         let actualKind = kind == "unknown" ? "struct" : kind
@@ -155,7 +169,9 @@ class TypeNode {
                     let suffix = isReadOnly ? "{ get }" : "{ get set }"
                     lines.append("\(nextIndent)\(staticMod)var \(n): \(cleanT) \(suffix)")
                 } else {
-                    let suffix = isReadOnly ? "{ get { fatalError() } }" : "{ get { fatalError() } set { fatalError() } }"
+                    let defaultVal = defaultReturnValue(for: cleanT)
+                    let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : "{ \(defaultVal) }"
+                    let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set { fatalError() } }"
                     lines.append("\(nextIndent)public \(overrideMod)\(staticMod)var \(n): \(cleanT) \(suffix)")
                 }
             case .method(let n, let sig, let isStatic):
@@ -238,7 +254,7 @@ class TypeNode {
                         if left.hasSuffix(".Type") && !left.contains("`Type`") { left = left.replacingOccurrences(of: ".Type", with: ".`Type`") }
                         if right.hasSuffix(".Type") && !right.contains("`Type`") { right = right.replacingOccurrences(of: ".Type", with: ".`Type`") }
 
-                        lines.append("\(nextIndent)public static func == (lhs: \(left), rhs: \(right)) -> \(returnType) { fatalError() }")
+                        lines.append("\(nextIndent)public static func == (lhs: \(left), rhs: \(right)) -> \(returnType) { \(returnType == "Bool" ? "true" : "fatalError()") }")
                         continue
                     }
                 }
@@ -247,7 +263,14 @@ class TypeNode {
                 if isProtocol { 
                     lines.append("\(nextIndent)\(staticMod)func \(cleanedSig)") 
                 } else { 
-                    lines.append("\(nextIndent)public \(overrideMod)\(staticMod)func \(cleanedSig) { fatalError() }") 
+                    var returnType = "Void"
+                    if let arrowRange = cleanedSig.range(of: " -> ") {
+                        returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                    }
+                    let defaultVal = defaultReturnValue(for: returnType)
+                    let body = defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }"
+                    let finalBody = defaultVal == "fatalError()" ? "{ fatalError() }" : body
+                    lines.append("\(nextIndent)public \(overrideMod)\(staticMod)func \(cleanedSig) \(finalBody)") 
                 }
             case .other(let desc):
                 lines.append("\(nextIndent)// \(desc)")
