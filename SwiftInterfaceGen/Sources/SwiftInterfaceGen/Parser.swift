@@ -191,7 +191,7 @@ class Parser {
         if cleanD.contains(" : ") {
             let parts = cleanD.components(separatedBy: " : ")
             var fullMemberPath = parts[0].trimmingCharacters(in: .whitespaces)
-            var type = simplifyType(parts[1])
+            let type = simplifyType(parts[1])
             
             var isReadOnly = d_orig.contains(" { get }") || !d_orig.contains(" { get set }")
             if fullMemberPath.hasSuffix(".getter") {

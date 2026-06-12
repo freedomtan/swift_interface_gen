@@ -10,7 +10,7 @@ struct SwiftInterfaceGen {
         }
 
         let tbdPath = args[1]
-        guard let content = try? String(contentsOfFile: tbdPath) else {
+        guard let content = try? String(contentsOfFile: tbdPath, encoding: .utf8) else {
             print("Error: Could not read TBD file at \(tbdPath)")
             return
         }
@@ -23,7 +23,7 @@ struct SwiftInterfaceGen {
         let reexportedLibraries = extractReexportedLibraries(from: content)
         for lib in reexportedLibraries {
             let libPath = resolveLibraryPath(lib)
-            if let libContent = try? String(contentsOfFile: libPath) {
+            if let libContent = try? String(contentsOfFile: libPath, encoding: .utf8) {
                 print("Discovered dependency: \(lib) -> \(libPath)", to: &Self.standardError)
                 let libSymbols = extractSymbols(from: libContent)
                 let libModule = (lib as NSString).lastPathComponent.replacingOccurrences(of: ".framework", with: "")
@@ -49,7 +49,7 @@ struct SwiftInterfaceGen {
                     if demangled.contains(fw + ".") && fw != module {
                         if parser.modules[fw] == nil {
                              let fwPath = "/Library/Developer/CommandLineTools/SDKs/MacOSX27.0.sdk/System/Library/PrivateFrameworks/\(fw).framework/\(fw).tbd"
-                             if let fwContent = try? String(contentsOfFile: fwPath) {
+                             if let fwContent = try? String(contentsOfFile: fwPath, encoding: .utf8) {
                                  print("Smart-discovered dependency: \(fw) -> \(fwPath)", to: &Self.standardError)
                                  let fwSymbols = extractSymbols(from: fwContent)
                                  processSymbols(fwSymbols, parser: parser, module: fw)

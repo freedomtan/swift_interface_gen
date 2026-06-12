@@ -58,7 +58,7 @@ class TypeNode {
         var hasCases = false
         for member in members.values {
             if case .enumCase(_) = member { hasCases = true; break }
-            if case .property(let n, let t, _, let isStatic) = member {
+            if case .property(_, let t, _, let isStatic) = member {
                 if isEnum && isStatic && (t == self.name || t.hasSuffix("." + self.name)) {
                     hasCases = true
                     break
