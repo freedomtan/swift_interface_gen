@@ -315,9 +315,16 @@ class Parser {
         t = t.replacingOccurrences(of: "[0-9]{5,}", with: "", options: .regularExpression)
         t = t.replacingOccurrences(of: "\\)[0-9]+", with: ")", options: .regularExpression)
 
-        let otherFrameworks = ["GenerativeModelsFoundation", "TokenGeneration", "TokenGenerationCore", "PromptKit", "GenerativeFunctionsFoundation", "GenerativeFunctions", "ModelCatalog", "GenerativeModels"]
-        for mod in otherFrameworks {
-             t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "\(mod)_", options: .regularExpression)
+        var frameworks = ["GenerativeModelsFoundation", "TokenGeneration", "TokenGenerationCore", "PromptKit", "GenerativeFunctionsFoundation", "GenerativeFunctions", "ModelCatalog", "GenerativeModels"]
+        if !frameworks.contains(defaultModule) && !defaultModule.isEmpty {
+            frameworks.append(defaultModule)
+        }
+        for mod in frameworks {
+             if mod == defaultModule {
+                 t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "", options: .regularExpression)
+             } else {
+                 t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "\(mod)_", options: .regularExpression)
+             }
         }
         
         t = t.replacingOccurrences(of: "\\.Array\\b", with: ".JSONArray", options: .regularExpression)
@@ -644,13 +651,16 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
                 let flattenedName = "\(moduleName)_\(type.name)"
                 if definedTypes.contains(flattenedName) { continue }
                 
+                let shimsSet = Set(["NSCoder", "NSZone", "NSXPCConnection", "CoherenceToken", "UAFAssetSetConsistencyToken", "PlaceholderA1", "PlaceholderB1", "A", "B", "A1", "B1", "C1", "D1", "A2", "IOSurface", "ResourceBundle", "ResourceBundleIdentifier", "CatalogResourceResult", "CatalogResource", "CatalogAsset", "AppleIntelligenceReporting", "ModelManagerServices", "GenerativeFunctionsInstrumentation", "CMTime", "UUID", "CVBufferRef", "XPC", "Network", "TokenStream", "Prompt", "FeatureFlags", "ResourceMetadata", "UAFSubscriptionDownloadStatus", "GenericA", "GenericB", "GenericC", "GenericD", "GMAvailabilityStatus", "NSUserDefaults", "OS_os_activity", "os_activity_flag_t"])
+                
                 // Always skip fundamental shims if they collide by name
-                if ["NSCoder", "NSZone", "NSXPCConnection", "CoherenceToken", "UAFAssetSetConsistencyToken", "PlaceholderA1", "PlaceholderB1", "A", "B", "A1", "B1", "C1", "D1", "A2", "IOSurface", "ResourceBundle", "ResourceBundleIdentifier", "CatalogResourceResult", "CatalogResource", "CatalogAsset", "AppleIntelligenceReporting", "ModelManagerServices", "GenerativeFunctionsInstrumentation", "CMTime", "UUID", "CVBufferRef", "XPC", "Network", "TokenStream", "Prompt", "FeatureFlags", "ResourceMetadata", "UAFSubscriptionDownloadStatus", "GenericA", "GenericB", "GenericC", "GenericD", "GMAvailabilityStatus", "NSUserDefaults", "OS_os_activity", "os_activity_flag_t"].contains(type.name) {
+                if shimsSet.contains(type.name) {
                      continue 
                 }
                 
                 definedTypes.insert(flattenedName)
-                output += type.generateCode(indent: "", nameOverride: flattenedName) + "\n\n"
+                let actualName = (moduleName == defaultModule) ? type.name : flattenedName
+                output += type.generateCode(indent: "", nameOverride: actualName) + "\n\n"
             }
         }
         
@@ -662,13 +672,16 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
                 let flattenedName = "\(moduleName)_\(type.name)"
                 if !definedTypes.contains(flattenedName) { continue }
                 
-                output += type.generateExtensions(defaultModule: defaultModule, path: "\(moduleName)_")
+                let pathPrefix = (moduleName == defaultModule) ? "" : "\(moduleName)_"
+                output += type.generateExtensions(defaultModule: defaultModule, path: pathPrefix)
             }
         }
 
         // Generate namespaces and default module aliases
         for moduleName in sortedModuleNames {
             if ["Swift", "Foundation", "ObjectiveC"].contains(moduleName) { continue }
+            if moduleName == defaultModule { continue }
+            
             guard let module = modules[moduleName] else { continue }
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             if sortedTypes.isEmpty { continue }
@@ -676,24 +689,14 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
             output += "public enum \(moduleName)_Namespace {\n"
             for type in sortedTypes {
                 let flattenedName = "\(moduleName)_\(type.name)"
+                if !definedTypes.contains(flattenedName) { continue }
                 output += "    public typealias \(type.name) = \(flattenedName)\n"
             }
             output += "}\n\n"
             
             // If the module name doesn't collide with a type, provide it as a convenient namespace alias
-            if !definedTypes.contains(moduleName) && moduleName != defaultModule {
+            if !definedTypes.contains(moduleName) {
                 output += "public typealias \(moduleName) = \(moduleName)_Namespace\n"
-            }
-
-            if moduleName == defaultModule {
-                let shimsSet = Set(["NSCoder", "NSZone", "NSXPCConnection", "CoherenceToken", "UAFAssetSetConsistencyToken", "PlaceholderA1", "PlaceholderB1", "A", "B", "A1", "B1", "C1", "D1", "A2", "IOSurface", "ResourceBundle", "ResourceBundleIdentifier", "CatalogResourceResult", "CatalogResource", "CatalogAsset", "AppleIntelligenceReporting", "ModelManagerServices", "GenerativeFunctionsInstrumentation", "CMTime", "UUID", "CVBufferRef", "XPC", "Network", "FeatureFlags", "ResourceMetadata", "UAFSubscriptionDownloadStatus", "GenericA", "GenericB", "GenericC", "GenericD", "GMAvailabilityStatus", "NSUserDefaults", "OS_os_activity", "os_activity_flag_t"])
-                for type in sortedTypes {
-                    let flattenedName = "\(moduleName)_\(type.name)"
-                    if type.name != moduleName && definedTypes.contains(flattenedName) && !shimsSet.contains(type.name) {
-                        output += "public typealias \(type.name) = \(flattenedName)\n"
-                    }
-                }
-                output += "\n"
             }
         }
         

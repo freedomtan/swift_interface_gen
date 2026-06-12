@@ -150,7 +150,7 @@ struct SwiftInterfaceGen {
     static func postProcess(_ code: String) -> String {
         var c = code
         // Remove redundant module prefixes, but be careful not to create self-referencing typealiases
-        let prefixes = ["ModelCatalog.", "GenerativeModelsFoundation.", "GenerativeModels.", "TokenGeneration.", "TokenGenerationCore.", "PromptKit.", "GenerativeFunctionsFoundation.", "GenerativeFunctions.", "ObjectiveC."]
+        let prefixes = ["ObjectiveC."]
         for p in prefixes {
             c = c.replacingOccurrences(of: p, with: "")
         }
