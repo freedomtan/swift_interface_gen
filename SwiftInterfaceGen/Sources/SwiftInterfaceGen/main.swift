@@ -37,7 +37,7 @@ struct SwiftInterfaceGen {
         let allCode = parser.generateAll()
         let finalCode = postProcess(allCode)
         
-        let imports = resolveImports(from: finalCode)
+        let imports = resolveImports(from: allCode, currentModule: currentModule)
         for imp in imports {
             if !["Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC"].contains(imp) {
                 print("import \(imp)")
@@ -47,7 +47,7 @@ struct SwiftInterfaceGen {
         print(finalCode)
     }
 
-    static func resolveImports(from code: String) -> [String] {
+    static func resolveImports(from code: String, currentModule: String) -> [String] {
         var imports = Set(["Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC"])
         if code.contains("MTL") { imports.insert("Metal") }
         if code.contains("IOSurface") { imports.insert("IOSurface") }
@@ -57,6 +57,14 @@ struct SwiftInterfaceGen {
         if code.contains("CIImage") { imports.insert("CoreImage") }
         if code.contains("MLModel") { imports.insert("CoreML") }
         if code.contains("DispatchQueue") { imports.insert("Dispatch") }
+        
+        let otherFrameworks = ["GenerativeModelsFoundation", "TokenGeneration", "TokenGenerationCore", "PromptKit", "GenerativeFunctionsFoundation", "GenerativeFunctions", "ModelCatalog", "GenerativeModels", "CoreAICommon", "CoreAICompiler"]
+        for mod in otherFrameworks {
+            if code.contains("\(mod).") && mod != currentModule {
+                imports.insert(mod)
+            }
+        }
+        
         return Array(imports).sorted()
     }
 
@@ -150,7 +158,7 @@ struct SwiftInterfaceGen {
     static func postProcess(_ code: String) -> String {
         var c = code
         // Remove redundant module prefixes, but be careful not to create self-referencing typealiases
-        let prefixes = ["ObjectiveC."]
+        let prefixes = ["ObjectiveC.", "CoreAICommon."]
         for p in prefixes {
             c = c.replacingOccurrences(of: p, with: "")
         }
@@ -203,12 +211,12 @@ struct SwiftInterfaceGen {
         // Clean up invalid nested generic applications
         c = c.replacingOccurrences(of: "\\.View<[^>]+>", with: ".View", options: .regularExpression)
         
-        // Fallbacks for missing nested types in ODIE
+        // Fallbacks for missing nested types or unavailable modules
         let missingNested = ["Module", "Options", "SharedBytecode", "TargetSpecification", "BinaryGenerator", "CompiledBytecodeConfig", "BreakpointLocation", "Buffer", "MLIRDumpConfiguration", "ResourceBlobManager", "CompilationContext", "TargetInformation"]
         for m in missingNested {
             c = c.replacingOccurrences(of: "\\b([a-zA-Z0-9_]+\\.)+\(m)\\b", with: "PlaceholderB1", options: .regularExpression)
         }
-        
+
         // Fix unnamed parameters
         c = c.replacingOccurrences(of: "(_: ", with: "(arg1: ")
         c = c.replacingOccurrences(of: ", _: ", with: ", arg2: ")
