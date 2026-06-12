@@ -87,6 +87,8 @@ codesign --force -s - test_types_run
 DYLD_FRAMEWORK_PATH=LocalFrameworks ./test_types_run
 ```
 
+**Note on Codesigning & AMFI:** Ad-hoc codesigning (`-s -`) with private entitlements is primarily required for integration tests like `test_ModelCatalog.swift` that interact with system services. This is generally only effective for execution on devices where **AMFI (Apple Mobile File Integrity)** has been disabled. On standard systems, these binaries may be killed by the kernel (`Killed: 9`).
+
 ## Known Limitations
 - **Private Framework Dependencies:** Some frameworks depend on other private frameworks. The tool currently supports smart discovery of these dependencies if they are in the same search path.
 - **Complex Variadic Generics:** Rare Swift symbols involving variadic generics may still produce malformed signatures.
