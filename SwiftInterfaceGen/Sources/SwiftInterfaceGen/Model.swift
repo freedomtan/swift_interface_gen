@@ -59,6 +59,8 @@ class TypeNode {
     }
 
     func generateCode(indent: String = "", nameOverride: String? = nil) -> String {
+        let n = nameOverride ?? name
+        if n.contains(" ") { return "" }
         var lines = [String]()
         let actualKind = kind == "unknown" ? "struct" : kind
         let isProtocol = actualKind == "protocol"
@@ -128,6 +130,7 @@ class TypeNode {
         })
 
         for member in sortedMembers {
+            let isClassOrProtocol = actualKind == "class" || actualKind == "protocol"
             let isOverride: Bool
             switch member {
             case .initializer(let sig):
@@ -157,8 +160,18 @@ class TypeNode {
                     lines.append("\(nextIndent)case \(escapeKeyword(n))")
                     continue
                 }
-
+                
                 var cleanT = t
+                if !isClassOrProtocol {
+                    let selfPattern1 = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)<[^>]+>"
+                    cleanT = cleanT.replacingOccurrences(of: selfPattern1, with: "Self", options: .regularExpression)
+                    let selfPattern2 = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\b"
+                    cleanT = cleanT.replacingOccurrences(of: selfPattern2, with: "Self", options: .regularExpression)
+                } else {
+                    let prefixPattern = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\b"
+                    cleanT = cleanT.replacingOccurrences(of: prefixPattern, with: "\(self.name)", options: .regularExpression)
+                }
+
                 if let brace = cleanT.firstIndex(of: "{") {
                     cleanT = String(cleanT[..<brace]).trimmingCharacters(in: .whitespaces)
                 }
@@ -176,6 +189,25 @@ class TypeNode {
                 }
             case .method(let n, let sig, let isStatic):
                 var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
+                
+                var fixModifier = ""
+                if cleanedSig.contains(" prefix(") {
+                    cleanedSig = cleanedSig.replacingOccurrences(of: " prefix(", with: "(")
+                    fixModifier = "prefix "
+                } else if cleanedSig.contains(" postfix(") {
+                    cleanedSig = cleanedSig.replacingOccurrences(of: " postfix(", with: "(")
+                    fixModifier = "postfix "
+                }
+                
+                if !isClassOrProtocol {
+                    let selfPattern1 = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)<[^>]+>"
+                    cleanedSig = cleanedSig.replacingOccurrences(of: selfPattern1, with: "Self", options: .regularExpression)
+                    let selfPattern2 = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\b"
+                    cleanedSig = cleanedSig.replacingOccurrences(of: selfPattern2, with: "Self", options: .regularExpression)
+                } else {
+                    let prefixPattern = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\b"
+                    cleanedSig = cleanedSig.replacingOccurrences(of: prefixPattern, with: "\(self.name)", options: .regularExpression)
+                }
                 
                 if n == "==" && (sig.contains(".Type") || sig.contains(".`Type`")) {
                     continue
@@ -261,16 +293,16 @@ class TypeNode {
                 
                 let staticMod = isStatic ? "static " : ""
                 if isProtocol { 
-                    lines.append("\(nextIndent)\(staticMod)func \(cleanedSig)") 
+                    lines.append("\(nextIndent)\(staticMod)\(fixModifier)func \(cleanedSig)") 
                 } else { 
                     var returnType = "Void"
-                    if let arrowRange = cleanedSig.range(of: " -> ") {
+                    if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
                         returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
                     }
                     let defaultVal = defaultReturnValue(for: returnType)
                     let body = defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }"
                     let finalBody = defaultVal == "fatalError()" ? "{ fatalError() }" : body
-                    lines.append("\(nextIndent)public \(overrideMod)\(staticMod)func \(cleanedSig) \(finalBody)") 
+                    lines.append("\(nextIndent)public \(overrideMod)\(staticMod)\(fixModifier)func \(cleanedSig) \(finalBody)") 
                 }
             case .other(let desc):
                 lines.append("\(nextIndent)// \(desc)")

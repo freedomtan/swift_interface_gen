@@ -464,6 +464,10 @@ public struct CoherenceToken: Hashable, Codable, Sendable {}
 public struct UAFAssetSetConsistencyToken: Hashable, Codable, Sendable {}
 
 public protocol AnyProtocol {}
+public struct _Span<T>: Hashable, Codable, Sendable {}
+public struct _MutableSpan<T>: Hashable, Codable, Sendable {}
+public struct _RawSpan: Hashable, Codable, Sendable {}
+public struct _MutableRawSpan: Hashable, Codable, Sendable {}
 public struct PlaceholderA1<T>: AnyProtocol, Hashable, Codable, Sendable { 
     public struct Interface {} 
     public struct C {}
@@ -616,7 +620,7 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
         var definedTypes = Set<String>()
         
         func markGenericRecursive(node: TypeNode) {
-            if ["ResourceBundleIdentifier", "CatalogAsset", "SupportedArgument", "GenerationGuide", "FailureRecord", "OverrideHint", "Criteria", "UserDefault", "__LoadedUseCaseConfigurations", "GenerativeStream"].contains(node.name) {
+            if ["ResourceBundleIdentifier", "CatalogAsset", "SupportedArgument", "GenerationGuide", "FailureRecord", "OverrideHint", "Criteria", "UserDefault", "__LoadedUseCaseConfigurations", "GenerativeStream", "Float4", "Float8", "BFloat16", "Tensor", "TensorRequirements", "UnsafeArrayPointer", "UnsafeMutableArrayPointer"].contains(node.name) {
                  if !node.name.hasPrefix("JSON") {
                       node.isGeneric = true
                  }

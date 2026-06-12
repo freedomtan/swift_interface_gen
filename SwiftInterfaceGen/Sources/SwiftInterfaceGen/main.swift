@@ -19,6 +19,7 @@ struct SwiftInterfaceGen {
         let symbols = extractSymbols(from: content)
         
         let parser = Parser()
+        parser.defaultModule = currentModule
         
         let reexportedLibraries = extractReexportedLibraries(from: content)
         for lib in reexportedLibraries {
@@ -34,7 +35,29 @@ struct SwiftInterfaceGen {
         processSymbols(symbols, parser: parser, module: currentModule)
 
         let allCode = parser.generateAll()
-        print(postProcess(allCode))
+        let finalCode = postProcess(allCode)
+        
+        let imports = resolveImports(from: finalCode)
+        for imp in imports {
+            if !["Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC"].contains(imp) {
+                print("import \(imp)")
+            }
+        }
+        
+        print(finalCode)
+    }
+
+    static func resolveImports(from code: String) -> [String] {
+        var imports = Set(["Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC"])
+        if code.contains("MTL") { imports.insert("Metal") }
+        if code.contains("IOSurface") { imports.insert("IOSurface") }
+        if code.contains("CGImage") || code.contains("CGRect") || code.contains("CGSize") || code.contains("CGFloat") { imports.insert("CoreGraphics") }
+        if code.contains("CVPixelBuffer") || code.contains("CVBuffer") { imports.insert("CoreVideo") }
+        if code.contains("CMTime") { imports.insert("CoreMedia") }
+        if code.contains("CIImage") { imports.insert("CoreImage") }
+        if code.contains("MLModel") { imports.insert("CoreML") }
+        if code.contains("DispatchQueue") { imports.insert("Dispatch") }
+        return Array(imports).sorted()
     }
 
     static func processSymbols(_ symbols: [String], parser: Parser, module: String) {
@@ -154,6 +177,37 @@ struct SwiftInterfaceGen {
         let criteriaPattern = "\\b([A-Z][a-zA-Z0-9_\\.]*Criteria)([^<a-zA-Z0-9_])"
         let criteriaRegex = try! NSRegularExpression(pattern: criteriaPattern, options: [])
         c = criteriaRegex.stringByReplacingMatches(in: c, options: [], range: NSRange(c.startIndex..., in: c), withTemplate: "$1<Any>$2")
+        
+        // Handle AnySequence
+        c = c.replacingOccurrences(of: "\\bAnySequence\\b(?!<)", with: "AnySequence<Any>", options: .regularExpression)
+        
+        // Handle ~Escapable types
+        c = c.replacingOccurrences(of: "\\bSpan\\b", with: "_Span", options: .regularExpression)
+        c = c.replacingOccurrences(of: "\\bMutableSpan\\b", with: "_MutableSpan", options: .regularExpression)
+        c = c.replacingOccurrences(of: "\\bRawSpan\\b", with: "_RawSpan", options: .regularExpression)
+        c = c.replacingOccurrences(of: "\\bMutableRawSpan\\b", with: "_MutableRawSpan", options: .regularExpression)
+        
+        // Fix prefix/postfix operators
+        c = c.replacingOccurrences(of: "func ([^ ]+) prefix\\(", with: "prefix func $1(", options: .regularExpression)
+        c = c.replacingOccurrences(of: "func ([^ ]+) postfix\\(", with: "postfix func $1(", options: .regularExpression)
+        
+        // Add generic placeholders for specific advanced numeric/tensor types
+        let genericTypes = ["Tensor", "TensorRequirements", "BFloat16", "Float4", "Float8", "UnsafeArrayPointer", "UnsafeMutableArrayPointer"]
+        for t in genericTypes {
+            c = c.replacingOccurrences(of: "\\b\(t)\\b(?!<)", with: "\(t)<Any>", options: .regularExpression)
+        }
+        
+        // Clean up invalid generic typealiases
+        c = c.replacingOccurrences(of: "public typealias ([^<]+)<Any> =", with: "public typealias $1 =", options: .regularExpression)
+        
+        // Clean up invalid nested generic applications
+        c = c.replacingOccurrences(of: "\\.View<[^>]+>", with: ".View", options: .regularExpression)
+        
+        // Fallbacks for missing nested types in ODIE
+        let missingNested = ["Module", "Options", "SharedBytecode", "TargetSpecification", "BinaryGenerator", "CompiledBytecodeConfig", "BreakpointLocation", "Buffer", "MLIRDumpConfiguration", "ResourceBlobManager", "CompilationContext", "TargetInformation"]
+        for m in missingNested {
+            c = c.replacingOccurrences(of: "\\b([a-zA-Z0-9_]+\\.)+\(m)\\b", with: "PlaceholderB1", options: .regularExpression)
+        }
         
         // Fix unnamed parameters
         c = c.replacingOccurrences(of: "(_: ", with: "(arg1: ")
