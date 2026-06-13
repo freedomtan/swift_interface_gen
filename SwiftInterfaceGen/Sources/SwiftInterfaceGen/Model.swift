@@ -148,6 +148,10 @@ class TypeNode {
             }
         })
 
+        if isEnum && !hasCases {
+            lines.append("\(nextIndent)case _mock")
+        }
+
         for member in sortedMembers {
             let isClassOrProtocol = actualKind == "class" || actualKind == "protocol"
             let isOverride: Bool
@@ -207,7 +211,7 @@ class TypeNode {
                 } else {
                     let defaultVal = defaultReturnValue(for: cleanT)
                     let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : "{ \(defaultVal) }"
-                    let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set { fatalError() } }"
+                    let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set {} }"
                     lines.append("\(nextIndent)public \(overrideMod)\(staticMod)var \(n): \(cleanT) \(suffix)")
                 }
             case .method(let n, let sig, let isStatic):
