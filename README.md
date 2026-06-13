@@ -80,7 +80,9 @@ DYLD_FRAMEWORK_PATH=LocalFrameworks ./test_run
 
 ## Configuration (`config.json`)
 
-To keep the source code clean and framework-agnostic, we externalize manual override rules and system-level fallback arrays into `SwiftInterfaceGen/config.json`. 
+*Note: The long-term goal of this project is to rely entirely on 100% dynamic inference. Hopefully, we can eliminate the need for `config.json` entirely in the future as the inference engine becomes smarter.*
+
+To keep the source code clean and framework-agnostic, we currently externalize manual override rules and system-level fallback arrays into `SwiftInterfaceGen/config.json`. 
 
 You can pass a custom configuration using the `--config` parameter:
 ```bash
