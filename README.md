@@ -78,6 +78,26 @@ swiftc -F LocalFrameworks test_ModelCatalog.swift \
 DYLD_FRAMEWORK_PATH=LocalFrameworks ./test_run
 ```
 
+## Configuration (`config.json`)
+
+To keep the source code clean and framework-agnostic, we externalize manual override rules and system-level fallback arrays into `SwiftInterfaceGen/config.json`. 
+
+You can pass a custom configuration using the `--config` parameter:
+```bash
+./swift-interface-gen path/to.tbd --config path/to/config.json
+```
+
+### Configuration Keys:
+
+| Key | Type | Description |
+| :--- | :--- | :--- |
+| `systemModules` | `[String]` | A list of standard/system modules (e.g., `Swift`, `Foundation`, `ObjectiveC`) whose prefixes will be stripped from types (e.g., `Swift.Int` becomes `Int`). |
+| `fundamentalShims` | `[String]` | Core platform types (like `NSCoder`, `NSZone`, `UUID`, `CMTime`) that are excluded from normal generation and stubbed with safe global aliases. |
+| `missingNestedTypes` | `[String]` | A list of nested types (such as `Module`, `Options`, `SharedBytecode`) that may be referenced in method signatures but are not publicly defined in the TBD. The tool replaces these with `PlaceholderB1` to prevent compilation errors. |
+| `protocolShims` | `[String]` | Protocols (like `ChatLanguageModelResponse`) that should be shimmed globally so they conform to standard protocols in multiple modules. |
+| `forceGenerics` | `[String: Int]` | A dictionary mapping short type names to their expected generic parameter count (e.g., `"Tensor": 1`, `"CatalogAsset": 2`). This forces the type definition and all generic expansions to use the correct number of generic placeholders even if they cannot be dynamically inferred from the demangled symbols. |
+| `simpleReplacements` | `[String: String]` | Global string replacements performed on the final output (e.g., swapping complex nested namespaces like `TestCatalog.Resource.ResourceMetadata` to just `ResourceMetadata`). |
+
 ## Security, Entitlements, and AMFI
 
 When writing integration tests that actually invoke methods requiring XPC services or secure enclaves (rather than just inspecting types), you must link against the *real* system framework and sign your binary with private entitlements.
