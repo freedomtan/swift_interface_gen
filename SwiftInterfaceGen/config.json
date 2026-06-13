@@ -1,0 +1,33 @@
+{
+    "systemModules": ["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "__C"],
+    "fundamentalShims": [
+        "NSCoder", "NSZone", "NSXPCConnection", "CoherenceToken", "UAFAssetSetConsistencyToken",
+        "PlaceholderA1", "PlaceholderB1", "A", "B", "A1", "B1", "C1", "D1", "A2", "IOSurface",
+        "ResourceBundle", "ResourceBundleIdentifier", "CatalogResourceResult", "CatalogResource",
+        "CatalogAsset", "AppleIntelligenceReporting", "ModelManagerServices", "GenerativeFunctionsInstrumentation",
+        "CMTime", "UUID", "CVBufferRef", "XPC", "Network", "FeatureFlags", "ResourceMetadata",
+        "UAFSubscriptionDownloadStatus", "GenericA", "GenericB", "GenericC", "GenericD",
+        "GMAvailabilityStatus", "NSUserDefaults", "OS_os_activity", "os_activity_flag_t"
+    ],
+    "missingNestedTypes": [
+        "Module", "Options", "SharedBytecode", "TargetSpecification", "BinaryGenerator", 
+        "CompiledBytecodeConfig", "BreakpointLocation", "Buffer", "MLIRDumpConfiguration", 
+        "ResourceBlobManager", "CompilationContext", "TargetInformation", "Profiler",
+        "AppleIntelligenceError", "AppleIntelligenceErrorCategory", "FeatureFlagsKey"
+    ],
+    "protocolShims": [
+        "ChatLanguageModelResponse", "ChatLanguageModelProviding", "ChatLanguageModelProvidingStreamable",
+        "ChatMessageResponse", "CompletionResponse", "CompletionLanguageModelProviding",
+        "CompletionLanguageModelResponse", "CompletionLanguageModelProvidingStreamable"
+    ],
+    "forceGenerics": {
+        "Tensor": 1,
+        "TensorRequirements": 1,
+        "BFloat16": 1,
+        "CatalogAsset": 2
+    },
+    "simpleReplacements": {
+        "TestCatalog.Resource.ResourceMetadata": "ResourceMetadata",
+        "Catalog.Resource.ResourceMetadata": "ResourceMetadata"
+    }
+}
