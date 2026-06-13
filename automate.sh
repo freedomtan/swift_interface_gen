@@ -41,11 +41,11 @@ fi
 
 echo "--- Building Generator ---"
 cd SwiftInterfaceGen/Sources/SwiftInterfaceGen
-swiftc -parse-as-library main.swift Parser.swift Model.swift -o ../../../swift-interface-gen
+swiftc -parse-as-library main.swift Parser.swift Model.swift Config.swift -o ../../../swift-interface-gen
 cd ../../../
 
 echo "--- Generating Interface for $FRAMEWORK ---"
-./swift-interface-gen "$TBD_PATH" | python3 -c "import sys; print(sys.stdin.read().replace('\\\\n', '\n'))" > "${FRAMEWORK}Interface.swift"
+./swift-interface-gen "$TBD_PATH" | python3 -c "import sys; print(sys.stdin.read().replace('\\\\n', '\n').replace('(Optional,', '(Optional<Any>,').replace('(Optional ,', '(Optional<Any>,'))" > "${FRAMEWORK}Interface.swift"
 
 echo "--- Preparing Local Framework ---"
 MODULE_DIR="LocalFrameworks/${FRAMEWORK}.framework/Modules/${FRAMEWORK}.swiftmodule"

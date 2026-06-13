@@ -58,7 +58,7 @@ class TypeNode {
         return "fatalError()"
     }
 
-    func generateCode(indent: String = "", nameOverride: String? = nil) -> String {
+    func generateCode(indent: String = "", nameOverride: String? = nil, parser: Parser? = nil) -> String {
         let n = nameOverride ?? name
         if n.contains(" ") { return "" }
         var lines = [String]()
@@ -102,7 +102,26 @@ class TypeNode {
         let typeName = nameOverride ?? name
         var displayTypeName = escapeKeyword(typeName)
         if isGeneric && !displayTypeName.contains("<") && actualKind != "protocol" {
-            displayTypeName += "<T>"
+            var count = 1
+            if let parser = parser {
+                let fullPath1 = parser.defaultModule + "." + name
+                let fullPath2 = name
+                if let inferredCount = parser.discoveredGenerics[fullPath1] {
+                    count = inferredCount
+                } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
+                    count = inferredCount
+                }
+            }
+            let placeholders = ["T", "U", "V", "W", "X", "Y", "Z"]
+            var params = [String]()
+            for i in 0..<count {
+                if i < placeholders.count {
+                    params.append(placeholders[i])
+                } else {
+                    params.append("T\(i)")
+                }
+            }
+            displayTypeName += "<\(params.joined(separator: ", "))>"
         }
         
         lines.append("\(indent)public \(actualKind) \(displayTypeName)\(inheritance) {")
@@ -112,7 +131,7 @@ class TypeNode {
         if !isProtocol {
             let sortedNested = nestedTypes.values.sorted(by: { $0.name < $1.name })
             for nested in sortedNested {
-                lines.append(nested.generateCode(indent: nextIndent))
+                lines.append(nested.generateCode(indent: nextIndent, parser: parser))
             }
         }
         
@@ -162,6 +181,10 @@ class TypeNode {
                 }
                 
                 var cleanT = t
+                // Strip the parent's fully qualified prefix from any nested types
+                let parentPrefixPattern = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\."
+                cleanT = cleanT.replacingOccurrences(of: parentPrefixPattern, with: "", options: .regularExpression)
+
                 if !isClassOrProtocol {
                     let selfPattern1 = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)<[^>]+>"
                     cleanT = cleanT.replacingOccurrences(of: selfPattern1, with: "Self", options: .regularExpression)
@@ -198,6 +221,10 @@ class TypeNode {
                     cleanedSig = cleanedSig.replacingOccurrences(of: " postfix(", with: "(")
                     fixModifier = "postfix "
                 }
+                
+                // Strip the parent's fully qualified prefix from any nested types
+                let parentPrefixPattern = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\."
+                cleanedSig = cleanedSig.replacingOccurrences(of: parentPrefixPattern, with: "", options: .regularExpression)
                 
                 if !isClassOrProtocol {
                     let selfPattern1 = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)<[^>]+>"

@@ -14,7 +14,91 @@ class Parser {
         "true", "try", "Type", "Protocol", "Array", "Dictionary", "Set", "String", "Int", "Bool", "Double", "Float", "AnyHashable"
     ]
 
+    var discoveredGenerics = [String: Int]() // [DottedType: Count]
+    var discoveredProtocols = Set<String>() // [DottedType]
+    var discoveredNamespaces = Set<String>()
+    var discoveredConcreteTypes = Set<String>()
+    var processedModules = Set<String>()
+    var currentPrecomputeModule = "ModelCatalog"
+
     init() {}
+
+    func precompute(demangled: String) {
+        func countTopLevelCommas(in s: String) -> Int {
+            var commas = 0
+            var depth = 0
+            var parenDepth = 0
+            for char in s {
+                if char == "<" { depth += 1 }
+                else if char == ">" { depth -= 1 }
+                else if char == "(" { parenDepth += 1 }
+                else if char == ")" { parenDepth -= 1 }
+                else if char == "," {
+                    if depth == 0 && parenDepth == 0 {
+                        commas += 1
+                    }
+                }
+            }
+            return commas + 1
+        }
+
+        // Infer generic types and their max parameter count using fully qualified names
+        let genericPattern = "\\b([a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)<([^>]+)>"
+        if let regex = try? NSRegularExpression(pattern: genericPattern, options: []) {
+            let matches = regex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
+            for match in matches {
+                if let range1 = Range(match.range(at: 1), in: demangled),
+                   let range2 = Range(match.range(at: 2), in: demangled) {
+                    let name = String(demangled[range1])
+                    let params = String(demangled[range2])
+                    
+                    let shortName = name.components(separatedBy: ".").last!
+                    // Skip standard library types and single-letter generic parameter placeholders
+                    if shortName.count == 1 || ["Optional", "Array", "Dictionary", "Set", "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer"].contains(shortName) {
+                        continue
+                    }
+                    
+                    let count = countTopLevelCommas(in: params)
+                    let currentMax = discoveredGenerics[name] ?? 0
+                    discoveredGenerics[name] = max(currentMax, count)
+                }
+            }
+        }
+        
+        // Infer namespaces and verify they actually exist as frameworks in the SDK
+        let namespacePattern = "\\b([A-Z][a-zA-Z0-9_$]*)\\."
+        if let regex = try? NSRegularExpression(pattern: namespacePattern, options: []) {
+            let matches = regex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
+            for match in matches {
+                if let range = Range(match.range(at: 1), in: demangled) {
+                    let ns = String(demangled[range])
+                    if !["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "__C"].contains(ns) {
+                        let path1 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/PrivateFrameworks/\(ns).framework"
+                        let path2 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/SubFrameworks/\(ns).framework"
+                        if FileManager.default.fileExists(atPath: path1) || FileManager.default.fileExists(atPath: path2) {
+                            discoveredNamespaces.insert(ns)
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Infer protocols and preserve their dotted namespaces
+        if demangled.contains("protocol descriptor for ") {
+            let name = demangled.replacingOccurrences(of: "protocol descriptor for ", with: "")
+            discoveredProtocols.insert(name)
+        }
+        let protocolPattern = "\\bany ([a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)\\b"
+        if let regex = try? NSRegularExpression(pattern: protocolPattern, options: []) {
+            let matches = regex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
+            for match in matches {
+                if let range = Range(match.range(at: 1), in: demangled) {
+                    let proto = String(demangled[range])
+                    discoveredProtocols.insert(proto)
+                }
+            }
+        }
+    }
 
     private func demangle(_ symbol: String) -> String? {
         return SwiftInterfaceGen.demangle(symbol: symbol)
@@ -33,10 +117,23 @@ class Parser {
                  node.kind = kind
              }
         }
+        if ["struct", "class", "enum"].contains(node.kind) {
+            discoveredConcreteTypes.insert(node.name)
+        }
     }
 
     func parse(mangled: String, demangled: String, currentModule: String) {
         self.defaultModule = currentModule
+        self.currentPrecomputeModule = currentModule
+        
+        // Populate forced generics for the current module
+        for (t, count) in ConfigManager.shared.forceGenerics {
+            let fullPath = currentModule + "." + t
+            if discoveredGenerics[fullPath] == nil {
+                discoveredGenerics[fullPath] = count
+            }
+        }
+        
         var d = demangled
         let d_orig = demangled
         
@@ -249,10 +346,8 @@ class Parser {
 
     private func findOrCreateType(name: String) -> TypeNode {
         var parts = name.components(separatedBy: ".")
-        let standardModules = ["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC"]
-        let knownFrameworks = ["GenerativeModelsFoundation", "TokenGeneration", "TokenGenerationCore", "PromptKit", "GenerativeFunctionsFoundation", "GenerativeFunctions", "ModelCatalog", "GenerativeModels"]
 
-        if !standardModules.contains(parts[0]) && !knownFrameworks.contains(parts[0]) {
+        if !ConfigManager.shared.systemModules.contains(parts[0]) && !discoveredNamespaces.contains(parts[0]) && parts[0] != defaultModule {
             parts.insert(defaultModule, at: 0)
         }
         
@@ -285,8 +380,7 @@ class Parser {
         var n = name
         n = n.replacingOccurrences(of: "[0-9]{5,}", with: "", options: .regularExpression)
         
-        let extensions = ["ModelCatalog", "GenerativeModels", "GenerativeModelsFoundation", "TokenGeneration", "TokenGenerationCore", "PromptKit", "GenerativeFunctions", "GenerativeFunctionsFoundation"]
-        for ext in extensions {
+        for ext in discoveredNamespaces {
             n = n.replacingOccurrences(of: "\\(extension in \(ext)\\):", with: "", options: .regularExpression)
         }
         
@@ -301,11 +395,14 @@ class Parser {
     func simplifyType(_ type: String) -> String {
         var t = type
         
+        for p in discoveredProtocols {
+             t = t.replacingOccurrences(of: "\\b\(p)\\b", with: "any \(p)", options: .regularExpression)
+        }
+        
         t = t.replacingOccurrences(of: "Sequence<[^>]+>", with: "Sequence", options: .regularExpression)
         t = t.replacingOccurrences(of: "[^\\s(,<>]+\\.\\[", with: "[", options: .regularExpression)
         
-        let standardMods = ["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "__C"]
-        for mod in standardMods {
+        for mod in ConfigManager.shared.systemModules {
             t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "", options: .regularExpression)
         }
         
@@ -315,7 +412,7 @@ class Parser {
         t = t.replacingOccurrences(of: "[0-9]{5,}", with: "", options: .regularExpression)
         t = t.replacingOccurrences(of: "\\)[0-9]+", with: ")", options: .regularExpression)
 
-        var frameworks = ["GenerativeModelsFoundation", "TokenGeneration", "TokenGenerationCore", "PromptKit", "GenerativeFunctionsFoundation", "GenerativeFunctions", "ModelCatalog", "GenerativeModels"]
+        var frameworks = Array(discoveredNamespaces)
         if !frameworks.contains(defaultModule) && !defaultModule.isEmpty {
             frameworks.append(defaultModule)
         }
@@ -331,11 +428,6 @@ class Parser {
         t = t.replacingOccurrences(of: "\\.Dictionary\\b", with: ".JSONDictionary", options: .regularExpression)
         t = t.replacingOccurrences(of: "\\.Object\\b", with: ".JSONObject", options: .regularExpression)
         t = t.replacingOccurrences(of: "\\.String\\b", with: ".JSONString", options: .regularExpression)
-
-        let protocols = ["CatalogResource", "AssetBackedResource", "LLMAdapter", "LLMModel", "ManagedResource", "ResourceBundle", "SafetyFailureWrapper", "UseCaseStatusesWrapper", "AsyncSequence", "PromptRetrieverProtocol", "CatalogClientProtocol", "InferenceSessionProtocol", "AttachmentTokenizer", "ChatLanguageModelResponse", "ChatLanguageModelProviding", "ChatLanguageModelProvidingStreamable", "ChatMessageResponse", "CompletionResponse", "CompletionLanguageModelProviding", "CompletionLanguageModelResponse", "CompletionLanguageModelProvidingStreamable"]
-        for p in protocols {
-             t = t.replacingOccurrences(of: "\\b([a-zA-Z0-9_$]+_)?\(p)\\b(?!\\.)", with: "any $1\(p)", options: .regularExpression)
-        }
 
         var prevT = ""
         while prevT != t {
@@ -627,7 +719,10 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
         var definedTypes = Set<String>()
         
         func markGenericRecursive(node: TypeNode) {
-            if ["ResourceBundleIdentifier", "CatalogAsset", "SupportedArgument", "GenerationGuide", "FailureRecord", "OverrideHint", "Criteria", "UserDefault", "__LoadedUseCaseConfigurations", "GenerativeStream", "Float4", "Float8", "BFloat16", "Tensor", "TensorRequirements", "UnsafeArrayPointer", "UnsafeMutableArrayPointer"].contains(node.name) {
+            if node.kind == "protocol" { return }
+            let fullPath1 = defaultModule + "." + node.name
+            let fullPath2 = node.name
+            if discoveredGenerics[fullPath1] != nil || discoveredGenerics[fullPath2] != nil {
                  if !node.name.hasPrefix("JSON") {
                       node.isGeneric = true
                  }
@@ -651,7 +746,7 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
                 let flattenedName = "\(moduleName)_\(type.name)"
                 if definedTypes.contains(flattenedName) { continue }
                 
-                let shimsSet = Set(["NSCoder", "NSZone", "NSXPCConnection", "CoherenceToken", "UAFAssetSetConsistencyToken", "PlaceholderA1", "PlaceholderB1", "A", "B", "A1", "B1", "C1", "D1", "A2", "IOSurface", "ResourceBundle", "ResourceBundleIdentifier", "CatalogResourceResult", "CatalogResource", "CatalogAsset", "AppleIntelligenceReporting", "ModelManagerServices", "GenerativeFunctionsInstrumentation", "CMTime", "UUID", "CVBufferRef", "XPC", "Network", "TokenStream", "Prompt", "FeatureFlags", "ResourceMetadata", "UAFSubscriptionDownloadStatus", "GenericA", "GenericB", "GenericC", "GenericD", "GMAvailabilityStatus", "NSUserDefaults", "OS_os_activity", "os_activity_flag_t"])
+                let shimsSet = Set(ConfigManager.shared.fundamentalShims)
                 
                 // Always skip fundamental shims if they collide by name
                 if shimsSet.contains(type.name) {
@@ -660,7 +755,7 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
                 
                 definedTypes.insert(flattenedName)
                 let actualName = (moduleName == defaultModule) ? type.name : flattenedName
-                output += type.generateCode(indent: "", nameOverride: actualName) + "\n\n"
+                output += type.generateCode(indent: "", nameOverride: actualName, parser: self) + "\n\n"
             }
         }
         
@@ -700,9 +795,10 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
             }
         }
         
-        let shims = ["NSCoder", "NSZone", "NSXPCConnection", "CoherenceToken", "UAFAssetSetConsistencyToken", "PlaceholderA1", "PlaceholderB1", "A", "B", "A1", "B1", "C1", "D1", "A2", "IOSurface", "ResourceBundle", "ResourceBundleIdentifier", "CatalogResourceResult", "CatalogResource", "CatalogAsset", "AppleIntelligenceReporting", "ModelManagerServices", "GenerativeFunctionsInstrumentation", "CMTime", "UUID", "CVBufferRef", "XPC", "Network", "FeatureFlags", "ResourceMetadata", "UAFSubscriptionDownloadStatus", "GenericA", "GenericB", "GenericC", "GenericD", "GMAvailabilityStatus", "NSUserDefaults", "OS_os_activity", "os_activity_flag_t"]
-        let otherFrameworks = ["GenerativeModelsFoundation", "TokenGeneration", "TokenGenerationCore", "PromptKit", "GenerativeFunctionsFoundation", "GenerativeFunctions", "ModelCatalog", "GenerativeModels"]
+        let shims = ConfigManager.shared.fundamentalShims
+        let otherFrameworks = Array(discoveredNamespaces).sorted()
         for mod in otherFrameworks {
+             if mod == defaultModule { continue }
              for shim in shims {
                  if !definedTypes.contains("\(mod)_\(shim)") {
                      output += "public typealias \(mod)_\(shim) = \(shim)\n"
@@ -718,17 +814,16 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
              }
         }
 
-        output = output.replacingOccurrences(of: "TestCatalog.Resource.ResourceMetadata", with: "ResourceMetadata")
-        output = output.replacingOccurrences(of: "Catalog.Resource.ResourceMetadata", with: "ResourceMetadata")
+        for (old, new) in ConfigManager.shared.simpleReplacements {
+            output = output.replacingOccurrences(of: old, with: new)
+        }
         
         // Final alias resolution for protocol shims
-        let protoShims = ["ChatLanguageModelResponse", "ChatLanguageModelProviding", "ChatLanguageModelProvidingStreamable", "ChatMessageResponse", "CompletionResponse", "CompletionLanguageModelProviding", "CompletionLanguageModelResponse", "CompletionLanguageModelProvidingStreamable"]
-        for p in protoShims {
-             if !definedTypes.contains("GenerativeFunctionsFoundation_\(p)") {
-                 output += "public typealias GenerativeFunctionsFoundation_\(p)<T> = SHIM_\(p)<T>\n"
-             }
-             if !definedTypes.contains("PromptKit_\(p)") {
-                 output += "public typealias PromptKit_\(p)<T> = SHIM_\(p)<T>\n"
+        for p in ConfigManager.shared.protocolShims {
+             for mod in otherFrameworks {
+                 if !definedTypes.contains("\(mod)_\(p)") {
+                     output += "public typealias \(mod)_\(p)<T> = SHIM_\(p)<T>\n"
+                 }
              }
         }
 

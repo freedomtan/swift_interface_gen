@@ -5,11 +5,16 @@ struct SwiftInterfaceGen {
     static func main() {
         let args = CommandLine.arguments
         if args.count < 2 {
-            print("Usage: swift-interface-gen <path_to_tbd>")
+            print("Usage: swift-interface-gen <path_to_tbd> [--config <path_to_config.json>]")
             return
         }
 
         let tbdPath = args[1]
+        
+        if let configIndex = args.firstIndex(of: "--config"), configIndex + 1 < args.count {
+            ConfigManager.load(from: args[configIndex + 1])
+        }
+
         guard let content = try? String(contentsOfFile: tbdPath, encoding: .utf8) else {
             print("Error: Could not read TBD file at \(tbdPath)")
             return
@@ -20,6 +25,7 @@ struct SwiftInterfaceGen {
         
         let parser = Parser()
         parser.defaultModule = currentModule
+        parser.currentPrecomputeModule = currentModule
         
         let reexportedLibraries = extractReexportedLibraries(from: content)
         for lib in reexportedLibraries {
@@ -28,16 +34,16 @@ struct SwiftInterfaceGen {
                 print("Discovered dependency: \(lib) -> \(libPath)", to: &Self.standardError)
                 let libSymbols = extractSymbols(from: libContent)
                 let libModule = (lib as NSString).lastPathComponent.replacingOccurrences(of: ".framework", with: "")
-                processSymbols(libSymbols, parser: parser, module: libModule)
+                processSymbols(libSymbols, parser: parser, module: libModule, depth: 1)
             }
         }
         
-        processSymbols(symbols, parser: parser, module: currentModule)
+        processSymbols(symbols, parser: parser, module: currentModule, depth: 0)
 
         let allCode = parser.generateAll()
-        let finalCode = postProcess(allCode)
+        let finalCode = postProcess(allCode, parser: parser)
         
-        let imports = resolveImports(from: allCode, currentModule: currentModule)
+        let imports = resolveImports(from: allCode, currentModule: currentModule, parser: parser)
         for imp in imports {
             if !["Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC"].contains(imp) {
                 print("import \(imp)")
@@ -47,8 +53,9 @@ struct SwiftInterfaceGen {
         print(finalCode)
     }
 
-    static func resolveImports(from code: String, currentModule: String) -> [String] {
-        var imports = Set(["Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC"])
+    static func resolveImports(from code: String, currentModule: String, parser: Parser) -> [String] {
+        var imports = Set(ConfigManager.shared.systemModules)
+        imports.remove("__C")
         if code.contains("MTL") { imports.insert("Metal") }
         if code.contains("IOSurface") { imports.insert("IOSurface") }
         if code.contains("CGImage") || code.contains("CGRect") || code.contains("CGSize") || code.contains("CGFloat") { imports.insert("CoreGraphics") }
@@ -58,37 +65,45 @@ struct SwiftInterfaceGen {
         if code.contains("MLModel") { imports.insert("CoreML") }
         if code.contains("DispatchQueue") { imports.insert("Dispatch") }
         
-        let otherFrameworks = ["GenerativeModelsFoundation", "TokenGeneration", "TokenGenerationCore", "PromptKit", "GenerativeFunctionsFoundation", "GenerativeFunctions", "ModelCatalog", "GenerativeModels", "CoreAICommon", "CoreAICompiler"]
-        for mod in otherFrameworks {
+        for mod in parser.discoveredNamespaces {
             if code.contains("\(mod).") && mod != currentModule {
-                imports.insert(mod)
+                if mod == "__C" { continue }
+                let path1 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/PrivateFrameworks/\(mod).framework"
+                let path2 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/SubFrameworks/\(mod).framework"
+                if FileManager.default.fileExists(atPath: path1) || FileManager.default.fileExists(atPath: path2) {
+                    imports.insert(mod)
+                }
             }
         }
         
         return Array(imports).sorted()
     }
 
-    static func processSymbols(_ symbols: [String], parser: Parser, module: String) {
+    static func processSymbols(_ symbols: [String], parser: Parser, module: String, depth: Int = 0) {
+        if parser.processedModules.contains(module) { return }
+        parser.processedModules.insert(module)
+        
+        parser.currentPrecomputeModule = module
+        
+        // Ensure module node exists early to prevent re-entry during precompute/parse if needed
+        if parser.modules[module] == nil {
+            parser.modules[module] = TypeNode(name: module)
+        }
+
         let count = symbols.count
-        print("Found \(count) new symbols in \(module). Demangling...", to: &Self.standardError)
-        for (_, mangled) in symbols.enumerated() {
+        print("Found \(count) new symbols in \(module). Demangling and precomputing...", to: &Self.standardError)
+        
+        var demangledMap: [(mangled: String, demangled: String)] = []
+        for mangled in symbols {
             if let demangled = demangle(symbol: mangled) {
-                parser.parse(mangled: mangled, demangled: demangled, currentModule: module)
-                
-                let knownFrameworks = ["ModelCatalog", "GenerativeFunctionsFoundation", "GenerativeFunctions"]
-                for fw in knownFrameworks {
-                    if demangled.contains(fw + ".") && fw != module {
-                        if parser.modules[fw] == nil {
-                             let fwPath = "/Library/Developer/CommandLineTools/SDKs/MacOSX27.0.sdk/System/Library/PrivateFrameworks/\(fw).framework/\(fw).tbd"
-                             if let fwContent = try? String(contentsOfFile: fwPath, encoding: .utf8) {
-                                 print("Smart-discovered dependency: \(fw) -> \(fwPath)", to: &Self.standardError)
-                                 let fwSymbols = extractSymbols(from: fwContent)
-                                 processSymbols(fwSymbols, parser: parser, module: fw)
-                             }
-                        }
-                    }
-                }
+                demangledMap.append((mangled: mangled, demangled: demangled))
+                parser.precompute(demangled: demangled)
             }
+        }
+        
+        print("Parsing symbols for \(module)...", to: &Self.standardError)
+        for entry in demangledMap {
+            parser.parse(mangled: entry.mangled, demangled: entry.demangled, currentModule: module)
         }
     }
 
@@ -155,10 +170,13 @@ struct SwiftInterfaceGen {
         }
     }
 
-    static func postProcess(_ code: String) -> String {
+    static func postProcess(_ code: String, parser: Parser) -> String {
         var c = code
         // Remove redundant module prefixes, but be careful not to create self-referencing typealiases
-        let prefixes = ["ObjectiveC.", "CoreAICommon."]
+        var prefixes = ["ObjectiveC."]
+        for ns in parser.discoveredNamespaces {
+            prefixes.append("\(ns).")
+        }
         for p in prefixes {
             c = c.replacingOccurrences(of: p, with: "")
         }
@@ -174,12 +192,6 @@ struct SwiftInterfaceGen {
         c = c.replacingOccurrences(of: "___FOUNDATION___", with: "Foundation.")
         
         c = c.replacingOccurrences(of: "Swift.", with: "")
-        
-        // Fix Optional and other generic types without parameters
-        c = c.replacingOccurrences(of: "(Optional, ", with: "(Optional<Any>, ")
-        c = c.replacingOccurrences(of: "(Optional)", with: "(Optional<Any>)")
-        c = c.replacingOccurrences(of: "Optional,", with: "Optional<Any>,")
-        c = c.replacingOccurrences(of: "Optional>", with: "Optional<Any>>")
         
         // Handle nested Criteria generic issue
         let criteriaPattern = "\\b([A-Z][a-zA-Z0-9_\\.]*Criteria)([^<a-zA-Z0-9_])"
@@ -199,22 +211,50 @@ struct SwiftInterfaceGen {
         c = c.replacingOccurrences(of: "func ([^ ]+) prefix\\(", with: "prefix func $1(", options: .regularExpression)
         c = c.replacingOccurrences(of: "func ([^ ]+) postfix\\(", with: "postfix func $1(", options: .regularExpression)
         
-        // Add generic placeholders for specific advanced numeric/tensor types
-        let genericTypes = ["Tensor", "TensorRequirements", "BFloat16", "Float4", "Float8", "UnsafeArrayPointer", "UnsafeMutableArrayPointer"]
-        for t in genericTypes {
-            c = c.replacingOccurrences(of: "\\b\(t)\\b(?!<)", with: "\(t)<Any>", options: .regularExpression)
+        // Clean up invalid generic method declarations or erasures (only if followed by '(')
+        c = c.replacingOccurrences(of: "<Any(?:,\\s*Any)*>\\(", with: "(", options: .regularExpression)
+        
+        // Strip invalid 'any' prefixes from concrete types
+        for t in parser.discoveredConcreteTypes {
+            c = c.replacingOccurrences(of: "\\bany (?:[a-zA-Z0-9_$]+_)?\(t)\\b", with: "$1\(t)", options: .regularExpression)
+        }
+        
+        // Fix Optional fallbacks
+        c = c.replacingOccurrences(of: "(Optional,", with: "(Optional<Any>,")
+        c = c.replacingOccurrences(of: "(Optional, ", with: "(Optional<Any>, ")
+        c = c.replacingOccurrences(of: "Optional,", with: "Optional<Any>,")
+        c = c.replacingOccurrences(of: "Optional)", with: "Optional<Any>)")
+        
+        // Add generic placeholders for dynamically discovered generic types (types only!)
+        for (t, count) in parser.discoveredGenerics {
+            if parser.discoveredProtocols.contains(t) { continue } // Protocols are never generic
+            let shortName = t.components(separatedBy: ".").last!
+            guard let firstChar = shortName.first, firstChar.isUppercase else { continue } // Only types!
+            if shortName == "Criteria" { continue } // Criteria has its own custom regex-based replacement
+            
+            let flatName = t.replacingOccurrences(of: ".", with: "_")
+            let placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
+            c = c.replacingOccurrences(of: "\\b\(flatName)\\b(?!<)", with: "\(flatName)<\(placeholders)>", options: .regularExpression)
+            
+            // Only apply shortName replacement to top-level types to protect nested types of generic parents
+            let components = t.components(separatedBy: ".")
+            if components.count <= 2 {
+                c = c.replacingOccurrences(of: "\\b\(shortName)\\b(?!<)", with: "\(shortName)<\(placeholders)>", options: .regularExpression)
+            }
         }
         
         // Clean up invalid generic typealiases
         c = c.replacingOccurrences(of: "public typealias ([^<]+)<Any> =", with: "public typealias $1 =", options: .regularExpression)
         
+        // Clean up protocols that were mistakenly made generic
+        c = c.replacingOccurrences(of: "protocol ([^<]+)<Any>", with: "protocol $1", options: .regularExpression)
+        
         // Clean up invalid nested generic applications
         c = c.replacingOccurrences(of: "\\.View<[^>]+>", with: ".View", options: .regularExpression)
         
         // Fallbacks for missing nested types or unavailable modules
-        let missingNested = ["Module", "Options", "SharedBytecode", "TargetSpecification", "BinaryGenerator", "CompiledBytecodeConfig", "BreakpointLocation", "Buffer", "MLIRDumpConfiguration", "ResourceBlobManager", "CompilationContext", "TargetInformation"]
-        for m in missingNested {
-            c = c.replacingOccurrences(of: "\\b([a-zA-Z0-9_]+\\.)+\(m)\\b", with: "PlaceholderB1", options: .regularExpression)
+        for m in ConfigManager.shared.missingNestedTypes {
+            c = c.replacingOccurrences(of: "\\b(?:[a-zA-Z0-9_]+[._])+\(m)\\b", with: "PlaceholderB1", options: .regularExpression)
         }
 
         // Fix unnamed parameters
