@@ -25,10 +25,6 @@ class Parser {
     var frameworkDefinedTypesCache: [String: Set<String>] = [:]
     private var scannedLocalSwiftFiles = false
 
-    private let genericRegex = try! NSRegularExpression(pattern: "\\b([a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)<([^>]+)>", options: [])
-    private let namespaceRegex = try! NSRegularExpression(pattern: "\\b([A-Z][a-zA-Z0-9_$]*)\\.", options: [])
-    private let protocolRegex = try! NSRegularExpression(pattern: "\\bany ([a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)\\b", options: [])
-
     init() {}
 
     func precompute(demangled: String) {
@@ -51,44 +47,35 @@ class Parser {
         }
 
         // Infer generic types and their max parameter count using fully qualified names
-        let matches = genericRegex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
-        for match in matches {
-            if let range1 = Range(match.range(at: 1), in: demangled),
-               let range2 = Range(match.range(at: 2), in: demangled) {
-                let name = String(demangled[range1])
-                let params = String(demangled[range2])
-                
-                let shortName = name.components(separatedBy: ".").last!
-                // Skip standard library types and single-letter generic parameter placeholders
-                if shortName.count == 1 || ["Optional", "Array", "Dictionary", "Set", "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer"].contains(shortName) {
-                    continue
-                }
-                
-                let count = countTopLevelCommas(in: params)
-                let currentMax = discoveredGenerics[name] ?? 0
-                discoveredGenerics[name] = max(currentMax, count)
+        let genericTypes = demangled.scanGenericTypeApplications()
+        for (name, params) in genericTypes {
+            let shortName = name.components(separatedBy: ".").last!
+            // Skip standard library types and single-letter generic parameter placeholders
+            if shortName.count == 1 || ["Optional", "Array", "Dictionary", "Set", "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer"].contains(shortName) {
+                continue
             }
+            
+            let count = countTopLevelCommas(in: params)
+            let currentMax = discoveredGenerics[name] ?? 0
+            discoveredGenerics[name] = max(currentMax, count)
         }
         
         // Infer namespaces and verify they actually exist as frameworks in the SDK
-        let nsMatches = namespaceRegex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
-        for match in nsMatches {
-            if let range = Range(match.range(at: 1), in: demangled) {
-                let ns = String(demangled[range])
-                if !["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "__C"].contains(ns) {
-                    let isFramework: Bool
-                    if let cached = namespaceFrameworkCache[ns] {
-                        isFramework = cached
-                    } else {
-                        let path1 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/PrivateFrameworks/\(ns).framework"
-                        let path2 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/SubFrameworks/\(ns).framework"
-                        let exists = FileManager.default.fileExists(atPath: path1) || FileManager.default.fileExists(atPath: path2)
-                        namespaceFrameworkCache[ns] = exists
-                        isFramework = exists
-                    }
-                    if isFramework {
-                        discoveredNamespaces.insert(ns)
-                    }
+        let namespaces = demangled.scanNamespaces()
+        for ns in namespaces {
+            if !["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "__C"].contains(ns) {
+                let isFramework: Bool
+                if let cached = namespaceFrameworkCache[ns] {
+                    isFramework = cached
+                } else {
+                    let path1 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/PrivateFrameworks/\(ns).framework"
+                    let path2 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/SubFrameworks/\(ns).framework"
+                    let exists = FileManager.default.fileExists(atPath: path1) || FileManager.default.fileExists(atPath: path2)
+                    namespaceFrameworkCache[ns] = exists
+                    isFramework = exists
+                }
+                if isFramework {
+                    discoveredNamespaces.insert(ns)
                 }
             }
         }
@@ -98,12 +85,9 @@ class Parser {
             let name = demangled.replacingOccurrences(of: "protocol descriptor for ", with: "")
             discoveredProtocols.insert(name)
         }
-        let protoMatches = protocolRegex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
-        for match in protoMatches {
-            if let range = Range(match.range(at: 1), in: demangled) {
-                let proto = String(demangled[range])
-                discoveredProtocols.insert(proto)
-            }
+        let protocols = demangled.scanProtocols()
+        for proto in protocols {
+            discoveredProtocols.insert(proto)
         }
     }
 
@@ -680,19 +664,7 @@ class Parser {
             return cached
         }
         let content = getFrameworkInterfaceContent(module: module)
-        var defined = Set<String>()
-        if !content.isEmpty {
-            let pattern = "\\b(?:struct|class|enum|protocol|typealias)\\s+([a-zA-Z0-9_$]+)\\b"
-            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-                let nsRange = NSRange(content.startIndex..<content.endIndex, in: content)
-                let matches = regex.matches(in: content, options: [], range: nsRange)
-                for match in matches {
-                    if let range = Range(match.range(at: 1), in: content) {
-                        defined.insert(String(content[range]))
-                    }
-                }
-            }
-        }
+        let defined = content.scanFrameworkDefinedTypes()
         frameworkDefinedTypesCache[module] = defined
         return defined
     }
@@ -829,74 +801,57 @@ class Parser {
 
         // Find all referenced but undefined types and generate stubs
         var stubs = ""
-        let typePattern = "(?:\\b(any)\\s+)?\\b(_*[A-Z][a-zA-Z0-9_$]*)\\b(<)?"
-        if let regex = try? NSRegularExpression(pattern: typePattern, options: []) {
-            let nsRange = NSRange(output.startIndex..<output.endIndex, in: output)
-            let matches = regex.matches(in: output, options: [], range: nsRange)
-            
-            var referencedTypes = Set<String>()
-            var protocolRefTypes = Set<String>()
-            var genericRefTypes = Set<String>()
-            
-            for match in matches {
-                guard let typeRange = Range(match.range(at: 2), in: output) else { continue }
-                let typeName = String(output[typeRange])
-                referencedTypes.insert(typeName)
-                
-                if match.range(at: 1).location != NSNotFound {
-                    protocolRefTypes.insert(typeName)
-                }
-                if match.range(at: 3).location != NSNotFound {
-                    genericRefTypes.insert(typeName)
-                }
+        let referenced = output.scanReferencedTypes()
+        var referencedTypes = Set<String>()
+        var protocolRefTypes = Set<String>()
+        var genericRefTypes = Set<String>()
+        
+        for item in referenced {
+            referencedTypes.insert(item.typeName)
+            if item.isProtocol {
+                protocolRefTypes.insert(item.typeName)
             }
-            
-            // Scan output once to find all defined types
-            var allDefinedInOutput = Set<String>()
-            let defPattern = "\\b(?:struct|class|enum|protocol|typealias)\\s+([a-zA-Z0-9_$]+)"
-            if let defRegex = try? NSRegularExpression(pattern: defPattern, options: []) {
-                let defMatches = defRegex.matches(in: output, options: [], range: nsRange)
-                for match in defMatches {
-                    if let range = Range(match.range(at: 1), in: output) {
-                        allDefinedInOutput.insert(String(output[range]))
-                    }
-                }
+            if item.isGeneric {
+                genericRefTypes.insert(item.typeName)
             }
+        }
+        
+        // Find all defined types in output
+        let allDefinedInOutput = output.scanFrameworkDefinedTypes()
+        
+        let systemTypes: Set<String> = [
+            "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
+            "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
+            "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
+            "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
+            "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
+            "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable",
+            "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
+            "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
+            "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
+            "AnySequence", "FloatingPointRoundingRule"
+        ]
+        
+        let sortedTypes = referencedTypes.sorted()
+        for type in sortedTypes {
+            if systemTypes.contains(type) { continue }
+            if type.count == 1 { continue }
+            if type.hasPrefix("JSON") { continue }
             
-            let systemTypes: Set<String> = [
-                "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
-                "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
-                "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
-                "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
-                "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
-                "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable",
-                "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
-                "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
-                "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
-                "AnySequence", "FloatingPointRoundingRule"
-            ]
-            
-            let sortedTypes = referencedTypes.sorted()
-            for type in sortedTypes {
-                if systemTypes.contains(type) { continue }
-                if type.count == 1 { continue }
-                if type.hasPrefix("JSON") { continue }
-                
-                // Check if defined
-                let isDefined = allDefinedInOutput.contains(type)
-                if !isDefined {
-                    // Check if used with "any" or ends with "_P"
-                    let isProtocolRef = protocolRefTypes.contains(type) || type.hasSuffix("_P")
-                    if isProtocolRef {
-                        stubs += "public protocol \(type) {}\n"
+            // Check if defined
+            let isDefined = allDefinedInOutput.contains(type)
+            if !isDefined {
+                // Check if used with "any" or ends with "_P"
+                let isProtocolRef = protocolRefTypes.contains(type) || type.hasSuffix("_P")
+                if isProtocolRef {
+                    stubs += "public protocol \(type) {}\n"
+                } else {
+                    // Check if used as generic in the output
+                    let isGenericRef = genericRefTypes.contains(type)
+                    if isGenericRef {
+                        stubs += "public struct \(type)<T>: Hashable, Codable, Sendable {}\n"
                     } else {
-                        // Check if used as generic in the output
-                        let isGenericRef = genericRefTypes.contains(type)
-                        if isGenericRef {
-                            stubs += "public struct \(type)<T>: Hashable, Codable, Sendable {}\n"
-                        } else {
-                            stubs += "public struct \(type): Hashable, Codable, Sendable {}\n"
-                        }
+                        stubs += "public struct \(type): Hashable, Codable, Sendable {}\n"
                     }
                 }
             }

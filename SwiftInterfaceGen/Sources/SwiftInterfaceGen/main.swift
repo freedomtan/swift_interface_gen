@@ -122,33 +122,51 @@ struct SwiftInterfaceGen {
     }
 
     static func extractSymbols(from tbd: String) -> [String] {
-        let pattern = "(_\\$s[a-zA-Z0-9_$]+|_OBJC_CLASS_\\$_[a-zA-Z0-9_$]+)"
-        let regex = try! NSRegularExpression(pattern: pattern, options: [])
-        let nsRange = NSRange(tbd.startIndex..<tbd.endIndex, in: tbd)
-        let matches = regex.matches(in: tbd, options: [], range: nsRange)
-        
         var symbols = Set<String>()
-        for match in matches {
-            if let range = Range(match.range, in: tbd) {
-                symbols.insert(String(tbd[range]))
+        let chars = Array(tbd)
+        var i = 0
+        let n = chars.count
+        while i < n {
+            let isSymbolChar = chars[i].isLetter || chars[i].isNumber || chars[i] == "_" || chars[i] == "$"
+            if isSymbolChar {
+                let start = i
+                while i < n && (chars[i].isLetter || chars[i].isNumber || chars[i] == "_" || chars[i] == "$") {
+                    i += 1
+                }
+                let token = String(chars[start..<i])
+                if token.hasPrefix("_$s") || token.hasPrefix("_OBJC_CLASS_$_") {
+                    symbols.insert(token)
+                }
+            } else {
+                i += 1
             }
         }
         return Array(symbols).sorted()
     }
 
     static func extractReexportedLibraries(from tbd: String) -> [String] {
-        let pattern = "reexported-libraries:\\s*\\[([^\\]]+)\\]"
-        let regex = try! NSRegularExpression(pattern: pattern, options: [])
-        let nsRange = NSRange(tbd.startIndex..<tbd.endIndex, in: tbd)
-        
-        var libs = [String]()
-        if let match = regex.firstMatch(in: tbd, options: [], range: nsRange) {
-            if let range = Range(match.range(at: 1), in: tbd) {
-                let list = String(tbd[range])
-                libs = list.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "\"", with: "").replacingOccurrences(of: "'", with: "") }
-            }
+        guard let range = tbd.range(of: "reexported-libraries:") else { return [] }
+        var scanIdx = range.upperBound
+        // Find the opening bracket '['
+        while scanIdx < tbd.endIndex && tbd[scanIdx] != "[" {
+            scanIdx = tbd.index(after: scanIdx)
         }
-        return libs
+        guard scanIdx < tbd.endIndex else { return [] }
+        let openBracketIdx = scanIdx
+        scanIdx = tbd.index(after: scanIdx)
+        // Find the closing bracket ']'
+        while scanIdx < tbd.endIndex && tbd[scanIdx] != "]" {
+            scanIdx = tbd.index(after: scanIdx)
+        }
+        guard scanIdx < tbd.endIndex else { return [] }
+        let closeBracketIdx = scanIdx
+        
+        let list = String(tbd[tbd.index(after: openBracketIdx)..<closeBracketIdx])
+        return list.components(separatedBy: ",").map {
+            $0.trimmingCharacters(in: .whitespaces)
+              .replacingOccurrences(of: "\"", with: "")
+              .replacingOccurrences(of: "'", with: "")
+        }
     }
 
     static func resolveLibraryPath(_ lib: String) -> String {
@@ -202,46 +220,23 @@ struct SwiftInterfaceGen {
         
         c = c.replacingOccurrences(of: "Swift.", with: "")
         
-        // Handle nested Criteria generic issue
-        let criteriaPattern = "\\b([A-Z][a-zA-Z0-9_\\.]*Criteria)([^<a-zA-Z0-9_])"
-        let criteriaRegex = try! NSRegularExpression(pattern: criteriaPattern, options: [])
-        c = criteriaRegex.stringByReplacingMatches(in: c, options: [], range: NSRange(c.startIndex..., in: c), withTemplate: "$1<Any>$2")
-        
         // Handle AnySequence
-        c = c.replacingOccurrences(of: "\\bAnySequence\\b(?!<)", with: "AnySequence<Any>", options: .regularExpression)
+        c = c.replaceWordWithoutGeneric("AnySequence", with: "AnySequence<Any>")
         
         // Handle ~Escapable types
-        c = c.replacingOccurrences(of: "\\bSpan\\b", with: "_Span", options: .regularExpression)
-        c = c.replacingOccurrences(of: "\\bMutableSpan\\b", with: "_MutableSpan", options: .regularExpression)
-        c = c.replacingOccurrences(of: "\\bRawSpan\\b", with: "_RawSpan", options: .regularExpression)
-        c = c.replacingOccurrences(of: "\\bMutableRawSpan\\b", with: "_MutableRawSpan", options: .regularExpression)
+        c = c.replaceWord("Span", with: "_Span")
+        c = c.replaceWord("MutableSpan", with: "_MutableSpan")
+        c = c.replaceWord("RawSpan", with: "_RawSpan")
+        c = c.replaceWord("MutableRawSpan", with: "_MutableRawSpan")
         
         // Fix prefix/postfix operators
-        c = c.replacingOccurrences(of: "func ([^ ]+) prefix\\(", with: "prefix func $1(", options: .regularExpression)
-        c = c.replacingOccurrences(of: "func ([^ ]+) postfix\\(", with: "postfix func $1(", options: .regularExpression)
+        c = c.fixPrefixAndPostfixOperators()
         
         // Clean up invalid generic method declarations or erasures (only if followed by '(')
-        c = c.replacingOccurrences(of: "<Any(?:,\\s*Any)*>\\(", with: "(", options: .regularExpression)
+        c = c.stripAnyGenericApplicationBeforeParen()
         
         // Strip invalid 'any' prefixes from concrete types
-        let anyRegex = try! NSRegularExpression(pattern: "\\bany (?:([a-zA-Z0-9_$]+_)?([a-zA-Z0-9_$]+))\\b", options: [])
-        let matches = anyRegex.matches(in: c, options: [], range: NSRange(c.startIndex..<c.endIndex, in: c))
-        var newC = ""
-        var lastIdx = c.startIndex
-        for match in matches {
-                guard let matchRange = Range(match.range, in: c) else { continue }
-                let prefix = match.range(at: 1).location != NSNotFound ? String(c[Range(match.range(at: 1), in: c)!]) : ""
-                let baseType = String(c[Range(match.range(at: 2), in: c)!])
-                let fullType = prefix + baseType
-                if parser.discoveredConcreteTypes.contains(baseType) || parser.discoveredConcreteTypes.contains(fullType) {
-                    let replacement = prefix + baseType
-                    newC.append(contentsOf: c[lastIdx..<matchRange.lowerBound])
-                    newC.append(replacement)
-                    lastIdx = matchRange.upperBound
-                }
-            }
-            newC.append(contentsOf: c[lastIdx..<c.endIndex])
-            c = newC
+        c = c.stripInvalidAnyPrefixes(concreteTypes: parser.discoveredConcreteTypes)
         
         // Fix Optional fallbacks
         c = c.replacingOccurrences(of: "(Optional,", with: "(Optional<Any>,")
@@ -257,7 +252,6 @@ struct SwiftInterfaceGen {
             if parser.discoveredProtocols.contains(t) { continue } // Protocols are never generic
             let shortName = t.components(separatedBy: ".").last!
             guard let firstChar = shortName.first, firstChar.isUppercase else { continue } // Only types!
-            if shortName == "Criteria" { continue } // Criteria has its own custom regex-based replacement
             
             let flatName = t.replacingOccurrences(of: ".", with: "_")
             flatGenerics[flatName] = max(flatGenerics[flatName] ?? 0, count)
@@ -268,51 +262,25 @@ struct SwiftInterfaceGen {
             }
         }
         
-        let genericTypePattern = "\\b(_*[A-Z][a-zA-Z0-9_$]*)\\b(?!<)"
-        if let genericTypeRegex = try? NSRegularExpression(pattern: genericTypePattern, options: []) {
-            let matches = genericTypeRegex.matches(in: c, options: [], range: NSRange(c.startIndex..<c.endIndex, in: c))
-            var newC = ""
-            var lastIdx = c.startIndex
-            for match in matches {
-                guard let matchRange = Range(match.range, in: c) else { continue }
-                let typeName = String(c[matchRange])
-                
-                var count = 0
-                if let cVal = flatGenerics[typeName] {
-                    count = cVal
-                } else if let cVal = shortGenerics[typeName] {
-                    count = cVal
-                }
-                
-                if count > 0 {
-                    let placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
-                    let replacement = "\(typeName)<\(placeholders)>"
-                    newC.append(contentsOf: c[lastIdx..<matchRange.lowerBound])
-                    newC.append(replacement)
-                    lastIdx = matchRange.upperBound
-                }
-            }
-            newC.append(contentsOf: c[lastIdx..<c.endIndex])
-            c = newC
-        }
+        c = c.applyDiscoveredGenerics(flatGenerics: flatGenerics, shortGenerics: shortGenerics)
         
         // Clean up invalid generic typealiases
-        c = c.replacingOccurrences(of: "public typealias ([^<]+)<Any(?:,\\s*Any)*> =", with: "public typealias $1 =", options: .regularExpression)
+        c = c.stripGenericFromTypealias()
         
         // Clean up protocols that were mistakenly made generic
-        c = c.replacingOccurrences(of: "protocol ([^<]+)<Any(?:,\\s*Any)*>", with: "protocol $1", options: .regularExpression)
+        c = c.stripGenericFromProtocol()
         
         // Clean up invalid nested generic applications
-        c = c.replacingOccurrences(of: "\\.View<[^>]+>", with: ".View", options: .regularExpression)
+        c = c.stripGenericFromView()
         
         // Fallbacks for missing nested types or unavailable modules
         for m in ConfigManager.shared.missingNestedTypes {
             if c.contains(m) {
-                c = c.replacingOccurrences(of: "\\b(?:[a-zA-Z0-9_]+[._])+\(m)\\b", with: "PlaceholderB1", options: .regularExpression)
+                c = c.replaceMissingNestedTypes(missingName: m)
             }
         }
         
-        c = c.replacingOccurrences(of: "\\bResourceBundleIdentifier\\b(?!<)", with: "ResourceBundleIdentifier<Any>", options: .regularExpression)
+        c = c.replaceWordWithoutGeneric("ResourceBundleIdentifier", with: "ResourceBundleIdentifier<Any>")
 
         // Fix unnamed parameters
         c = c.replacingOccurrences(of: "(_: ", with: "(arg1: ")

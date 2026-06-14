@@ -98,7 +98,7 @@ class TypeNode {
             let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
             for p in placeholders {
                 if !inScope.contains(p) {
-                    res = res.replacingOccurrences(of: "\\b\(p)\\b", with: "Any", options: .regularExpression)
+                    res = res.replaceWord(p, with: "Any")
                 }
             }
             return res
@@ -230,10 +230,10 @@ class TypeNode {
             case .initializer(let sig):
                 var cleanedSig = sig
                 if isProtocol {
-                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.", with: "Self.", options: .regularExpression)
-                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\bSelf\\.[a-zA-Z0-9_$]+\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                    cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
+                    cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
                 } else {
-                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
                 }
                 cleanedSig = cleanScope(cleanedSig)
                 if isProtocol { lines.append("\(nextIndent)\(cleanedSig)") }
@@ -250,17 +250,12 @@ class TypeNode {
                 
                 var cleanT = t
                 // Strip the parent's fully qualified prefix from any nested types
-                let parentPrefixPattern = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\."
-                cleanT = cleanT.replacingOccurrences(of: parentPrefixPattern, with: "", options: .regularExpression)
+                cleanT = cleanT.stripParentPrefix(parentName: self.name)
 
                 if !isClassOrProtocol {
-                    let selfPattern1 = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)<[^>]+>"
-                    cleanT = cleanT.replacingOccurrences(of: selfPattern1, with: "Self", options: .regularExpression)
-                    let selfPattern2 = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\b"
-                    cleanT = cleanT.replacingOccurrences(of: selfPattern2, with: "Self", options: .regularExpression)
+                    cleanT = cleanT.replaceSelfPattern(parentName: self.name, replaceWith: "Self")
                 } else {
-                    let prefixPattern = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\b"
-                    cleanT = cleanT.replacingOccurrences(of: prefixPattern, with: "\(self.name)", options: .regularExpression)
+                    cleanT = cleanT.replaceSelfPattern(parentName: self.name, replaceWith: self.name)
                 }
 
                 if let brace = cleanT.firstIndex(of: "{") {
@@ -269,10 +264,10 @@ class TypeNode {
                 cleanT = cleanT.replacingOccurrences(of: "}", with: "")
 
                 if isProtocol {
-                    cleanT = cleanT.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.", with: "Self.", options: .regularExpression)
-                    cleanT = cleanT.replacingOccurrences(of: "\\bSelf\\.[a-zA-Z0-9_$]+\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                    cleanT = cleanT.replacePlaceholderDotsWithSelf()
+                    cleanT = cleanT.replaceMultiSegmentSelfPathsWithAny()
                 } else {
-                    cleanT = cleanT.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                    cleanT = cleanT.replaceGenericPlaceholderPathsWithAny()
                 }
                 cleanT = cleanScope(cleanT)
 
@@ -299,24 +294,19 @@ class TypeNode {
                 }
                 
                 // Strip the parent's fully qualified prefix from any nested types
-                let parentPrefixPattern = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\."
-                cleanedSig = cleanedSig.replacingOccurrences(of: parentPrefixPattern, with: "", options: .regularExpression)
+                cleanedSig = cleanedSig.stripParentPrefix(parentName: self.name)
                 
                 if !isClassOrProtocol {
-                    let selfPattern1 = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)<[^>]+>"
-                    cleanedSig = cleanedSig.replacingOccurrences(of: selfPattern1, with: "Self", options: .regularExpression)
-                    let selfPattern2 = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\b"
-                    cleanedSig = cleanedSig.replacingOccurrences(of: selfPattern2, with: "Self", options: .regularExpression)
+                    cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, replaceWith: "Self")
                 } else {
-                    let prefixPattern = "\\b([a-zA-Z0-9_]+\\.)+\(self.name)\\b"
-                    cleanedSig = cleanedSig.replacingOccurrences(of: prefixPattern, with: "\(self.name)", options: .regularExpression)
+                    cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, replaceWith: self.name)
                 }
                 
                 if isProtocol {
-                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.", with: "Self.", options: .regularExpression)
-                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\bSelf\\.[a-zA-Z0-9_$]+\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                    cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
+                    cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
                 } else {
-                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
                 }
                 cleanedSig = cleanScope(cleanedSig)
                 
@@ -327,10 +317,7 @@ class TypeNode {
                 let genericPlaceholders = ["A", "B", "C", "D"]
                 var paramsToRemove = [String]()
                 for p in genericPlaceholders {
-                    let p_regex = try? NSRegularExpression(pattern: "<.*\\b\(p)[0-9]*\\b.*>", options: [])
-                    let nsRange = NSRange(cleanedSig.startIndex..<cleanedSig.endIndex, in: cleanedSig)
-                    
-                    if let _ = p_regex?.firstMatch(in: cleanedSig, options: [], range: nsRange) {
+                    if cleanedSig.hasGenericPlaceholderInBrackets(p: p) {
                         if cleanedSig.contains("\(p).") || cleanedSig.contains("\(p)1.") {
                              paramsToRemove.append(p)
                              paramsToRemove.append("\(p)1")
@@ -341,14 +328,14 @@ class TypeNode {
                                  cleanedSig = cleanedSig.replacingOccurrences(of: "<\(v),", with: "<Generic\(p),")
                                  cleanedSig = cleanedSig.replacingOccurrences(of: ", \(v)>", with: ", Generic\(p)>")
                                  cleanedSig = cleanedSig.replacingOccurrences(of: ", \(v),", with: ", Generic\(p),")
-                                 cleanedSig = cleanedSig.replacingOccurrences(of: "\\b\(v)\\b", with: "Generic\(p)", options: .regularExpression)
+                                 cleanedSig = cleanedSig.replaceWord(v, with: "Generic\(p)")
                              }
                         }
                     }
                 }
                 
                 for p in paramsToRemove {
-                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\b\(p)\\b", with: "Any", options: .regularExpression)
+                    cleanedSig = cleanedSig.replaceWord(p, with: "Any")
                     if let openBracket = cleanedSig.firstIndex(of: "<"),
                        let closeBracket = cleanedSig.firstIndex(of: ">"),
                        openBracket < closeBracket {
@@ -356,7 +343,7 @@ class TypeNode {
                         var list = String(cleanedSig[cleanedSig.index(after: openBracket)..<closeBracket])
                         let suffix = cleanedSig[closeBracket...]
                         
-                        list = list.replacingOccurrences(of: "\\b\(p)\\b", with: "", options: .regularExpression)
+                        list = list.replaceWord(p, with: "")
                         list = list.replacingOccurrences(of: ",,", with: ",")
                         list = list.trimmingCharacters(in: CharacterSet(charactersIn: ", "))
                         
@@ -390,8 +377,8 @@ class TypeNode {
                         if left.contains(": ") { left = String(left.components(separatedBy: ": ").last!) }
                         if right.contains(": ") { right = String(right.components(separatedBy: ": ").last!) }
                         
-                        left = left.replacingOccurrences(of: "[^\\s(,<>]+\\.\\[", with: "[", options: .regularExpression)
-                        right = right.replacingOccurrences(of: "[^\\s(,<>]+\\.\\[", with: "[", options: .regularExpression)
+                        left = left.stripModuleBeforeSubscriptOrGeneric()
+                        right = right.stripModuleBeforeSubscriptOrGeneric()
                         
                         if left == "Type" { left = "`Type`" }
                         if right == "Type" { right = "`Type`" }

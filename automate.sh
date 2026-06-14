@@ -41,7 +41,7 @@ fi
 
 echo "--- Building Generator ---"
 cd SwiftInterfaceGen/Sources/SwiftInterfaceGen
-swiftc -O -parse-as-library main.swift Parser.swift Model.swift Config.swift -o ../../../swift-interface-gen
+swiftc -O -parse-as-library main.swift Parser.swift Model.swift Config.swift String+RegexFree.swift -o ../../../swift-interface-gen
 cd ../../../
 
 echo "--- Generating Interface for $FRAMEWORK ---"
