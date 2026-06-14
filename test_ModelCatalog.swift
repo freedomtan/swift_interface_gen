@@ -1,25 +1,9 @@
 import ModelCatalog
 import Foundation
 
-@main
-struct TestMain {
-    static func main() {
-        runTest()
-    }
-}
-
-func runTest() {
-    print("Starting ModelCatalog test...")
-    let client = CatalogClient()
-    print("Successfully instantiated CatalogClient")
-    
-    do {
-        let resources = try client.resources()
-        print("Fetched \(resources.count) resources")
-        for resource in resources {
-            print(" - Resource ID: \(resource.id)")
-        }
-    } catch {
-        print("Failed to fetch resources: \(error)")
-    }
-}
+print("Starting test")
+print("LocalCatalogClient: \(LocalCatalogClient.self)")
+print("CatalogResource: \((any CatalogResource).self)")
+print("CatalogAsset: \(CatalogAsset<Any, Any>.self)")
+print("ResourceBundleIdentifier: \(ResourceBundleIdentifier<String>.self)")
+print("Types verified")

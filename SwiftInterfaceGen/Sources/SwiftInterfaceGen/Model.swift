@@ -10,6 +10,7 @@ enum MemberKind {
     case property(name: String, type: String, isReadOnly: Bool, isStatic: Bool)
     case method(name: String, signature: String, isStatic: Bool)
     case enumCase(String)
+    case associatedType(String)
     case other(String)
 }
 
@@ -48,7 +49,8 @@ class TypeNode {
         let t = type.trimmingCharacters(in: .whitespaces)
         if t == "Bool" { return "false" }
         if ["Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64", "Double", "Float", "Float16", "CGFloat"].contains(t) { return "0" }
-        if t == "String" || t == "StaticString" { return "\"\"" }
+        if t == "String" { return "\"\"" }
+        if t == "StaticString" { return "\"\"" }
         if t.starts(with: "Array<") || t.starts(with: "[") { return "[]" }
         if t.starts(with: "Dictionary<") || (t.starts(with: "[") && t.contains(":")) { return "[:]" }
         if t.starts(with: "Optional<") || t.hasSuffix("?") { return "nil" }
@@ -66,6 +68,42 @@ class TypeNode {
         let isProtocol = actualKind == "protocol"
         let isEnum = actualKind == "enum"
         
+        var inScope = Set<String>()
+        if isGeneric {
+            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+            var count = 1
+            if let parser = parser {
+                let fullPath1 = parser.defaultModule + "." + name
+                let fullPath2 = name
+                if let inferredCount = parser.discoveredGenerics[fullPath1] {
+                    count = inferredCount
+                } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
+                    count = inferredCount
+                }
+            }
+            for i in 0..<count {
+                inScope.insert(i < placeholders.count ? placeholders[i] : "A\(i)")
+            }
+        }
+        for member in members.values {
+            if case .associatedType(let code) = member {
+                let parts = code.components(separatedBy: " ")
+                if parts.count >= 2 {
+                    inScope.insert(parts[1].trimmingCharacters(in: .whitespaces))
+                }
+            }
+        }
+        let cleanScope = { (s: String) -> String in
+            var res = s
+            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+            for p in placeholders {
+                if !inScope.contains(p) {
+                    res = res.replacingOccurrences(of: "\\b\(p)\\b", with: "Any", options: .regularExpression)
+                }
+            }
+            return res
+        }
+
         var inherits = [String]()
         if let base = baseClass {
             inherits.append(base)
@@ -101,7 +139,7 @@ class TypeNode {
         
         let typeName = nameOverride ?? name
         var displayTypeName = escapeKeyword(typeName)
-        if isGeneric && !displayTypeName.contains("<") && actualKind != "protocol" {
+        if isGeneric && !displayTypeName.contains("<") {
             var count = 1
             if let parser = parser {
                 let fullPath1 = parser.defaultModule + "." + name
@@ -112,13 +150,13 @@ class TypeNode {
                     count = inferredCount
                 }
             }
-            let placeholders = ["T", "U", "V", "W", "X", "Y", "Z"]
+            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
             var params = [String]()
             for i in 0..<count {
                 if i < placeholders.count {
                     params.append(placeholders[i])
                 } else {
-                    params.append("T\(i)")
+                    params.append("A\(i)")
                 }
             }
             displayTypeName += "<\(params.joined(separator: ", "))>"
@@ -127,6 +165,24 @@ class TypeNode {
         lines.append("\(indent)public \(actualKind) \(displayTypeName)\(inheritance) {")
         
         let nextIndent = indent + "    "
+        
+        if isProtocol && isGeneric {
+            var count = 1
+            if let parser = parser {
+                let fullPath1 = parser.defaultModule + "." + name
+                let fullPath2 = name
+                if let inferredCount = parser.discoveredGenerics[fullPath1] {
+                    count = inferredCount
+                } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
+                    count = inferredCount
+                }
+            }
+            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+            for i in 0..<count {
+                let paramName = i < placeholders.count ? placeholders[i] : "A\(i)"
+                lines.append("\(nextIndent)associatedtype \(paramName)")
+            }
+        }
         
         if !isProtocol {
             let sortedNested = nestedTypes.values.sorted(by: { $0.name < $1.name })
@@ -172,9 +228,17 @@ class TypeNode {
             case .enumCase(let n):
                 lines.append("\(nextIndent)case \(escapeKeyword(n))")
             case .initializer(let sig):
-                if isProtocol { lines.append("\(nextIndent)\(sig)") }
+                var cleanedSig = sig
+                if isProtocol {
+                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.", with: "Self.", options: .regularExpression)
+                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\bSelf\\.[a-zA-Z0-9_$]+\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                } else {
+                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                }
+                cleanedSig = cleanScope(cleanedSig)
+                if isProtocol { lines.append("\(nextIndent)\(cleanedSig)") }
                 else if isEnum { /* skip */ }
-                else { lines.append("\(nextIndent)public \(overrideMod)\(sig) {}") }
+                else { lines.append("\(nextIndent)public \(overrideMod)\(cleanedSig) {}") }
             case .property(let n, let t, let isReadOnly, let isStatic):
                 if n == "allCases" && isEnum { continue }
                 if n == "rawValue" && isEnum { continue }
@@ -204,13 +268,21 @@ class TypeNode {
                 }
                 cleanT = cleanT.replacingOccurrences(of: "}", with: "")
 
+                if isProtocol {
+                    cleanT = cleanT.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.", with: "Self.", options: .regularExpression)
+                    cleanT = cleanT.replacingOccurrences(of: "\\bSelf\\.[a-zA-Z0-9_$]+\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                } else {
+                    cleanT = cleanT.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                }
+                cleanT = cleanScope(cleanT)
+
                 let staticMod = isStatic ? "static " : ""
                 if isProtocol {
                     let suffix = isReadOnly ? "{ get }" : "{ get set }"
                     lines.append("\(nextIndent)\(staticMod)var \(n): \(cleanT) \(suffix)")
                 } else {
                     let defaultVal = defaultReturnValue(for: cleanT)
-                    let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : "{ \(defaultVal) }"
+                    let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
                     let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set {} }"
                     lines.append("\(nextIndent)public \(overrideMod)\(staticMod)var \(n): \(cleanT) \(suffix)")
                 }
@@ -240,6 +312,14 @@ class TypeNode {
                     cleanedSig = cleanedSig.replacingOccurrences(of: prefixPattern, with: "\(self.name)", options: .regularExpression)
                 }
                 
+                if isProtocol {
+                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.", with: "Self.", options: .regularExpression)
+                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\bSelf\\.[a-zA-Z0-9_$]+\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                } else {
+                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\b[A-Z][0-9]?\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*\\b", with: "Any", options: .regularExpression)
+                }
+                cleanedSig = cleanScope(cleanedSig)
+                
                 if n == "==" && (sig.contains(".Type") || sig.contains(".`Type`")) {
                     continue
                 }
@@ -268,6 +348,7 @@ class TypeNode {
                 }
                 
                 for p in paramsToRemove {
+                    cleanedSig = cleanedSig.replacingOccurrences(of: "\\b\(p)\\b", with: "Any", options: .regularExpression)
                     if let openBracket = cleanedSig.firstIndex(of: "<"),
                        let closeBracket = cleanedSig.firstIndex(of: ">"),
                        openBracket < closeBracket {
@@ -335,6 +416,8 @@ class TypeNode {
                     let finalBody = defaultVal == "fatalError()" ? "{ fatalError() }" : body
                     lines.append("\(nextIndent)public \(overrideMod)\(staticMod)\(fixModifier)func \(cleanedSig) \(finalBody)") 
                 }
+            case .associatedType(let code):
+                lines.append("\(nextIndent)\(code)")
             case .other(let desc):
                 lines.append("\(nextIndent)// \(desc)")
             }

@@ -20,6 +20,12 @@ class Parser {
     var discoveredConcreteTypes = Set<String>()
     var processedModules = Set<String>()
     var currentPrecomputeModule = "ModelCatalog"
+    var frameworkInterfaceCache: [String: String] = [:]
+    var namespaceFrameworkCache: [String: Bool] = [:]
+
+    private let genericRegex = try! NSRegularExpression(pattern: "\\b([a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)<([^>]+)>", options: [])
+    private let namespaceRegex = try! NSRegularExpression(pattern: "\\b([A-Z][a-zA-Z0-9_$]*)\\.", options: [])
+    private let protocolRegex = try! NSRegularExpression(pattern: "\\bany ([a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)\\b", options: [])
 
     init() {}
 
@@ -43,41 +49,43 @@ class Parser {
         }
 
         // Infer generic types and their max parameter count using fully qualified names
-        let genericPattern = "\\b([a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)<([^>]+)>"
-        if let regex = try? NSRegularExpression(pattern: genericPattern, options: []) {
-            let matches = regex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
-            for match in matches {
-                if let range1 = Range(match.range(at: 1), in: demangled),
-                   let range2 = Range(match.range(at: 2), in: demangled) {
-                    let name = String(demangled[range1])
-                    let params = String(demangled[range2])
-                    
-                    let shortName = name.components(separatedBy: ".").last!
-                    // Skip standard library types and single-letter generic parameter placeholders
-                    if shortName.count == 1 || ["Optional", "Array", "Dictionary", "Set", "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer"].contains(shortName) {
-                        continue
-                    }
-                    
-                    let count = countTopLevelCommas(in: params)
-                    let currentMax = discoveredGenerics[name] ?? 0
-                    discoveredGenerics[name] = max(currentMax, count)
+        let matches = genericRegex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
+        for match in matches {
+            if let range1 = Range(match.range(at: 1), in: demangled),
+               let range2 = Range(match.range(at: 2), in: demangled) {
+                let name = String(demangled[range1])
+                let params = String(demangled[range2])
+                
+                let shortName = name.components(separatedBy: ".").last!
+                // Skip standard library types and single-letter generic parameter placeholders
+                if shortName.count == 1 || ["Optional", "Array", "Dictionary", "Set", "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer"].contains(shortName) {
+                    continue
                 }
+                
+                let count = countTopLevelCommas(in: params)
+                let currentMax = discoveredGenerics[name] ?? 0
+                discoveredGenerics[name] = max(currentMax, count)
             }
         }
         
         // Infer namespaces and verify they actually exist as frameworks in the SDK
-        let namespacePattern = "\\b([A-Z][a-zA-Z0-9_$]*)\\."
-        if let regex = try? NSRegularExpression(pattern: namespacePattern, options: []) {
-            let matches = regex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
-            for match in matches {
-                if let range = Range(match.range(at: 1), in: demangled) {
-                    let ns = String(demangled[range])
-                    if !["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "__C"].contains(ns) {
+        let nsMatches = namespaceRegex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
+        for match in nsMatches {
+            if let range = Range(match.range(at: 1), in: demangled) {
+                let ns = String(demangled[range])
+                if !["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "__C"].contains(ns) {
+                    let isFramework: Bool
+                    if let cached = namespaceFrameworkCache[ns] {
+                        isFramework = cached
+                    } else {
                         let path1 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/PrivateFrameworks/\(ns).framework"
                         let path2 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/SubFrameworks/\(ns).framework"
-                        if FileManager.default.fileExists(atPath: path1) || FileManager.default.fileExists(atPath: path2) {
-                            discoveredNamespaces.insert(ns)
-                        }
+                        let exists = FileManager.default.fileExists(atPath: path1) || FileManager.default.fileExists(atPath: path2)
+                        namespaceFrameworkCache[ns] = exists
+                        isFramework = exists
+                    }
+                    if isFramework {
+                        discoveredNamespaces.insert(ns)
                     }
                 }
             }
@@ -88,14 +96,11 @@ class Parser {
             let name = demangled.replacingOccurrences(of: "protocol descriptor for ", with: "")
             discoveredProtocols.insert(name)
         }
-        let protocolPattern = "\\bany ([a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)\\b"
-        if let regex = try? NSRegularExpression(pattern: protocolPattern, options: []) {
-            let matches = regex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
-            for match in matches {
-                if let range = Range(match.range(at: 1), in: demangled) {
-                    let proto = String(demangled[range])
-                    discoveredProtocols.insert(proto)
-                }
+        let protoMatches = protocolRegex.matches(in: demangled, options: [], range: NSRange(demangled.startIndex..., in: demangled))
+        for match in protoMatches {
+            if let range = Range(match.range(at: 1), in: demangled) {
+                let proto = String(demangled[range])
+                discoveredProtocols.insert(proto)
             }
         }
     }
@@ -136,6 +141,17 @@ class Parser {
         
         var d = demangled
         let d_orig = demangled
+        
+        if d_orig.starts(with: "associated type descriptor for ") {
+            let fullPath = d_orig.replacingOccurrences(of: "associated type descriptor for ", with: "").trimmingCharacters(in: .whitespaces)
+            let (typeName, assocName) = splitPath(fullPath)
+            if !typeName.isEmpty && !assocName.isEmpty {
+                let node = findOrCreateType(name: cleanType(typeName))
+                setKind("protocol", for: node)
+                node.members[assocName] = .associatedType("associatedtype \(assocName)")
+            }
+            return
+        }
         
         let internalDescriptors = [
             "protocol descriptor for ",
@@ -378,10 +394,14 @@ class Parser {
 
     private func cleanType(_ name: String) -> String {
         var n = name
-        n = n.replacingOccurrences(of: "[0-9]{5,}", with: "", options: .regularExpression)
+        if n.range(of: "[0-9]{5,}", options: .regularExpression) != nil {
+            n = n.replacingOccurrences(of: "[0-9]{5,}", with: "", options: .regularExpression)
+        }
         
-        for ext in discoveredNamespaces {
-            n = n.replacingOccurrences(of: "\\(extension in \(ext)\\):", with: "", options: .regularExpression)
+        if n.contains("(extension in ") {
+            for ext in discoveredNamespaces {
+                n = n.replacingOccurrences(of: "\\(extension in \(ext)\\):", with: "", options: .regularExpression)
+            }
         }
         
         if n.hasSuffix(".Array") { n = n.replacingOccurrences(of: ".Array", with: ".JSONArray") }
@@ -395,19 +415,28 @@ class Parser {
     func simplifyType(_ type: String) -> String {
         var t = type
         
-        for p in discoveredProtocols {
+        let words = discoveredProtocols.filter { t.contains($0) }
+        for p in words {
              t = t.replacingOccurrences(of: "\\b\(p)\\b", with: "any \(p)", options: .regularExpression)
         }
         
-        t = t.replacingOccurrences(of: "Sequence<[^>]+>", with: "Sequence", options: .regularExpression)
-        t = t.replacingOccurrences(of: "[^\\s(,<>]+\\.\\[", with: "[", options: .regularExpression)
-        
-        for mod in ConfigManager.shared.systemModules {
-            t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "", options: .regularExpression)
+        if t.contains("<") || t.contains("[") {
+            t = t.replacingOccurrences(of: "Sequence<[^>]+>", with: "Sequence", options: .regularExpression)
+            t = t.replacingOccurrences(of: "[^\\s(,<>]+\\.\\[", with: "[", options: .regularExpression)
         }
         
-        t = t.replacingOccurrences(of: "OS_dispatch_queue", with: "DispatchQueue")
-        t = t.replacingOccurrences(of: "NSOperatingSystemVersion", with: "OperatingSystemVersion")
+        for mod in ConfigManager.shared.systemModules {
+            if t.contains(mod) {
+                t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "", options: .regularExpression)
+            }
+        }
+        
+        if t.contains("OS_dispatch_queue") {
+            t = t.replacingOccurrences(of: "OS_dispatch_queue", with: "DispatchQueue")
+        }
+        if t.contains("NSOperatingSystemVersion") {
+            t = t.replacingOccurrences(of: "NSOperatingSystemVersion", with: "OperatingSystemVersion")
+        }
 
         t = t.replacingOccurrences(of: "[0-9]{5,}", with: "", options: .regularExpression)
         t = t.replacingOccurrences(of: "\\)[0-9]+", with: ")", options: .regularExpression)
@@ -417,17 +446,21 @@ class Parser {
             frameworks.append(defaultModule)
         }
         for mod in frameworks {
-             if mod == defaultModule {
-                 t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "", options: .regularExpression)
-             } else {
-                 t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "\(mod)_", options: .regularExpression)
+             if t.contains(mod) {
+                 if mod == defaultModule {
+                     t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "", options: .regularExpression)
+                 } else {
+                     t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "\(mod)_", options: .regularExpression)
+                 }
              }
         }
         
-        t = t.replacingOccurrences(of: "\\.Array\\b", with: ".JSONArray", options: .regularExpression)
-        t = t.replacingOccurrences(of: "\\.Dictionary\\b", with: ".JSONDictionary", options: .regularExpression)
-        t = t.replacingOccurrences(of: "\\.Object\\b", with: ".JSONObject", options: .regularExpression)
-        t = t.replacingOccurrences(of: "\\.String\\b", with: ".JSONString", options: .regularExpression)
+        if t.contains(".") {
+            t = t.replacingOccurrences(of: "\\.Array\\b", with: ".JSONArray", options: .regularExpression)
+            t = t.replacingOccurrences(of: "\\.Dictionary\\b", with: ".JSONDictionary", options: .regularExpression)
+            t = t.replacingOccurrences(of: "\\.Object\\b", with: ".JSONObject", options: .regularExpression)
+            t = t.replacingOccurrences(of: "\\.String\\b", with: ".JSONString", options: .regularExpression)
+        }
 
         var prevT = ""
         while prevT != t {
@@ -435,14 +468,22 @@ class Parser {
             t = t.replacingOccurrences(of: "any any ", with: "any ")
         }
 
-        t = t.replacingOccurrences(of: "Optional<", with: "___OPT_T___")
-        t = t.replacingOccurrences(of: "\\bOptional\\b(?!<)", with: "Optional<Any>", options: .regularExpression)
-        t = t.replacingOccurrences(of: "___OPT_T___", with: "Optional<")
+        if t.contains("Optional") {
+            t = t.replacingOccurrences(of: "Optional<", with: "___OPT_T___")
+            t = t.replacingOccurrences(of: "\\bOptional\\b(?!<)", with: "Optional<Any>", options: .regularExpression)
+            t = t.replacingOccurrences(of: "___OPT_T___", with: "Optional<")
+        }
         
-        t = t.replacingOccurrences(of: "\\bany ResourceBundle\\b", with: "any ResourceBundle_P", options: .regularExpression)
+        if t.contains("ResourceBundle") {
+            t = t.replacingOccurrences(of: "\\bany ResourceBundle\\b", with: "any ResourceBundle_P", options: .regularExpression)
+        }
 
-        t = t.replacingOccurrences(of: "\\bDictionary\\b(?![<])", with: "[AnyHashable: Any]", options: .regularExpression)
-        t = t.replacingOccurrences(of: "\\bArray\\b(?![<])", with: "[Any]", options: .regularExpression)
+        if t.contains("Dictionary") {
+            t = t.replacingOccurrences(of: "\\bDictionary\\b(?![<])", with: "[AnyHashable: Any]", options: .regularExpression)
+        }
+        if t.contains("Array") {
+            t = t.replacingOccurrences(of: "\\bArray\\b(?![<])", with: "[Any]", options: .regularExpression)
+        }
         
         while prevT != t {
             prevT = t
@@ -451,15 +492,25 @@ class Parser {
         }
         t = t.replacingOccurrences(of: "\\.\\[", with: "[")
 
-        t = t.replacingOccurrences(of: "\\(async throws\\s*\\)", with: "async throws", options: .regularExpression)
-        t = t.replacingOccurrences(of: "\\(async\\s*\\)", with: "async", options: .regularExpression)
-        t = t.replacingOccurrences(of: "\\(throws\\s*\\)", with: "throws", options: .regularExpression)
+        if t.contains("async") {
+            t = t.replacingOccurrences(of: "\\(async throws\\s*\\)", with: "async throws", options: .regularExpression)
+            t = t.replacingOccurrences(of: "\\(async\\s*\\)", with: "async", options: .regularExpression)
+        }
+        if t.contains("throws") {
+            t = t.replacingOccurrences(of: "\\(throws\\s*\\)", with: "throws", options: .regularExpression)
+        }
         
-        t = t.replacingOccurrences(of: "\\(extension in [^)]+\\):", with: "", options: .regularExpression)
-        t = t.replacingOccurrences(of: "\\(\\bextension\\b[^)]+\\)", with: "Any", options: .regularExpression)
-        t = t.replacingOccurrences(of: "== String>", with: ">")
-        t = t.replacingOccurrences(of: "== A>", with: ">")
-        t = t.replacingOccurrences(of: "\\bsome\\b", with: "Any", options: .regularExpression)
+        if t.contains("extension") {
+            t = t.replacingOccurrences(of: "\\(extension in [^)]+\\):", with: "", options: .regularExpression)
+            t = t.replacingOccurrences(of: "\\(\\bextension\\b[^)]+\\)", with: "Any", options: .regularExpression)
+        }
+        if t.contains("==") {
+            t = t.replacingOccurrences(of: "== String>", with: ">")
+            t = t.replacingOccurrences(of: "== A>", with: ">")
+        }
+        if t.contains("some") {
+            t = t.replacingOccurrences(of: "\\bsome\\b", with: "Any", options: .regularExpression)
+        }
         
         if t.contains("set {") {
             t = String(t.components(separatedBy: "set {").first!).trimmingCharacters(in: .whitespaces)
@@ -547,179 +598,113 @@ class Parser {
         return String(prefix) + newParams.joined(separator: ", ") + String(suffix)
     }
     
+    func isModuleAvailable(_ name: String) -> Bool {
+        let sdkRoot = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+        let paths = [
+            "\(sdkRoot)/System/Library/Frameworks/\(name).framework",
+            "\(sdkRoot)/System/Library/PrivateFrameworks/\(name).framework",
+            "\(sdkRoot)/System/Library/SubFrameworks/\(name).framework",
+            "LocalFrameworks/\(name).framework"
+        ]
+        for path in paths {
+            if FileManager.default.fileExists(atPath: path) {
+                return true
+            }
+        }
+        let system = ["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "CoreVideo", "CoreMedia", "IOSurface"]
+        if system.contains(name) {
+            return true
+        }
+        return false
+    }
+
+    func genericParamsString(for node: TypeNode) -> String {
+        if !node.isGeneric { return "" }
+        var count = 1
+        let fullPath1 = defaultModule + "." + node.name
+        let fullPath2 = node.name
+        if let inferredCount = discoveredGenerics[fullPath1] {
+            count = inferredCount
+        } else if let inferredCount = discoveredGenerics[fullPath2] {
+            count = inferredCount
+        }
+        let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+        var params = [String]()
+        for i in 0..<count {
+            if i < placeholders.count {
+                params.append(placeholders[i])
+            } else {
+                params.append("A\(i)")
+            }
+        }
+        return "<\(params.joined(separator: ", "))>"
+    }
+    
+    private func getFrameworkInterfaceContent(module: String) -> String {
+        if let cached = frameworkInterfaceCache[module] {
+            return cached
+        }
+        var mergedContent = ""
+        let sdkRoot = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+        let searchDirs = [
+            "\(sdkRoot)/System/Library/Frameworks/\(module).framework/Modules/\(module).swiftmodule",
+            "\(sdkRoot)/System/Library/PrivateFrameworks/\(module).framework/Modules/\(module).swiftmodule",
+            "\(sdkRoot)/System/Library/SubFrameworks/\(module).framework/Modules/\(module).swiftmodule",
+            "LocalFrameworks/\(module).framework/Modules/\(module).swiftmodule"
+        ]
+        
+        for dir in searchDirs {
+            guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
+            for file in files {
+                if file.hasSuffix(".swiftinterface") {
+                    let path = "\(dir)/\(file)"
+                    if let content = try? String(contentsOfFile: path, encoding: .utf8) {
+                        mergedContent += content + "\n"
+                    }
+                }
+            }
+        }
+        frameworkInterfaceCache[module] = mergedContent
+        return mergedContent
+    }
+
+    func isTypeDefinedInFramework(module: String, typeName: String) -> Bool {
+        let content = getFrameworkInterfaceContent(module: module)
+        if content.isEmpty { return false }
+        if !content.contains(typeName) { return false }
+        let patterns = [
+            "\\b(?:struct|class|enum|protocol|typealias)\\s+\(typeName)\\b",
+            "\\btypealias\\s+\(typeName)\\b"
+        ]
+        for pat in patterns {
+            if content.range(of: pat, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
     func generateAll() -> String {
-        let shimHeader = """
-import Foundation
-import CoreFoundation
-import UniformTypeIdentifiers
-import os
-import ObjectiveC
+        // Set all referenced but undefined types to struct
+        func defaultUnknownTypes(node: TypeNode) {
+            if node.kind == "unknown" {
+                node.kind = "struct"
+            }
+            for nested in node.nestedTypes.values {
+                defaultUnknownTypes(node: nested)
+            }
+        }
+        for module in modules.values {
+            for type in module.nestedTypes.values {
+                defaultUnknownTypes(node: type)
+            }
+        }
 
-// Fundamental shims
-public typealias NSCoder = Foundation.NSCoder
-public typealias NSZone = Foundation.NSZone
-public typealias NSXPCConnection = Foundation.NSXPCConnection
-public struct CoherenceToken: Hashable, Codable, Sendable {}
-public struct UAFAssetSetConsistencyToken: Hashable, Codable, Sendable {}
-
-public protocol AnyProtocol {}
-public struct _Span<T>: Hashable, Codable, Sendable {}
-public struct _MutableSpan<T>: Hashable, Codable, Sendable {}
-public struct _RawSpan: Hashable, Codable, Sendable {}
-public struct _MutableRawSpan: Hashable, Codable, Sendable {}
-public struct PlaceholderA1<T>: AnyProtocol, Hashable, Codable, Sendable { 
-    public struct Interface {} 
-    public struct C {}
-    public struct M {}
-    public struct ModelType {}
-    public struct TokenizerType {}
-    public struct RemoteService { public struct Interface {} }
-    public struct Service { public struct Interface {} }
-    public struct Builder: Hashable, Codable, Sendable {}
-    public struct RecognizerCache: Hashable, Codable, Sendable {}
-    public struct ModelConfiguration: Hashable, Codable, Sendable {}
-    public struct CustomDataType: Hashable, Codable, Sendable {}
-    public struct RetrievedResult: Hashable, Codable, Sendable {}
-    public struct CatalogAssetType: Hashable, Codable, Sendable {}
-    public struct ValueKind: Hashable, Codable, Sendable {}
-    public struct Value: Hashable, Codable, Sendable {}
-    public struct Component: Hashable, Codable, Sendable {
-        public struct Value: Hashable, Codable, Sendable {}
-        public struct ValueKind: Hashable, Codable, Sendable {}
-    }
-    public struct RunnerConfiguration: Hashable, Codable, Sendable {}
-    public struct Sanitizer: Hashable, Codable, Sendable {}
-    public struct Content: Hashable, Codable, Sendable {}
-    public struct Criteria: Hashable, Codable, Sendable {}
-    public struct Arguments: Hashable, Codable, Sendable {}
-    public struct Output: Hashable, Codable, Sendable {}
-    public struct ChatStringResponse: Hashable, Codable, Sendable {}
-    public struct ChatStringStreamResponse: Hashable, Codable, Sendable { public struct Stream: Hashable, Codable, Sendable {} }
-    public struct CompletionStringParameters: Hashable, Codable, Sendable {}
-    public struct CompletionStringResponse: Hashable, Codable, Sendable {}
-    public struct CompletionStringStreamParameters: Hashable, Codable, Sendable {}
-    public struct CompletionStringStreamResponse: Hashable, Codable, Sendable { public struct Stream: Hashable, Codable, Sendable {} }
-    public typealias ChatStringParameters = PlaceholderA1<Any>
-    public typealias ChatStringStreamParameters = PlaceholderA1<Any>
-    public typealias Stream = PlaceholderA1<Any>
-}
-public struct PlaceholderB1: AnyProtocol, Hashable, Codable, Sendable { 
-    public struct Interface {} 
-    public struct ChatOneShotGenerableResponseAdditionalInfo: Hashable, Codable, Sendable {}
-    public struct CompletionOneShotGenerableResponseAdditionalInfo: Hashable, Codable, Sendable {}
-}
-
-public typealias A = PlaceholderA1<Any>
-public typealias B = PlaceholderB1
-public typealias A1 = PlaceholderA1<Any>
-public typealias B1 = PlaceholderB1
-public typealias C1 = PlaceholderA1<Any>
-public typealias D1 = PlaceholderA1<Any>
-public typealias A2 = PlaceholderA1<Any>
-
-public typealias IOSurface = PlaceholderA1<Any>
-public protocol ResourceBundle: Hashable {}
-public typealias ResourceBundle_P = ResourceBundle
-public struct ResourceBundleIdentifier<T>: Hashable, Codable, Sendable { 
-    public let rawValue: String; public init(rawValue: String) { self.rawValue = rawValue }
-    public var id: String { rawValue }
-}
-public struct CatalogResourceResult: Hashable, Codable, Sendable {
-    public init(from: Decoder) throws { fatalError() }
-    public func encode(to: Encoder) throws { fatalError() }
-}
-public protocol CatalogResource: Hashable { var id: String { get } }
-public struct CatalogAsset<T, U>: Hashable, Codable, Sendable {
-    public init(from: Decoder) throws { fatalError() }
-    public func encode(to: Encoder) throws { fatalError() }
-}
-
-public enum InternalSwiftProtobuf {
-    public struct UnknownStorage: Hashable, Codable, Sendable {}
-    public struct _NameMap { public init() {} }
-}
-
-// Extra frameworks
-public enum AppleIntelligenceReporting {
-    public struct AppleIntelligenceErrorCategory: Hashable, Codable, Sendable {}
-    public struct AppleIntelligenceError: Hashable, Codable, Sendable {}
-}
-public enum ModelManagerServices {
-    public struct InferenceProviderRequestConfiguration: Hashable, Codable, Sendable {}
-    public struct InferenceError: Hashable, Codable, Sendable {}
-    public struct Session: Hashable, Codable, Sendable {}
-    public struct ClientData: Hashable, Codable, Sendable {}
-    public struct Version: Hashable, Codable, Sendable {}
-}
-public enum GenerativeFunctionsInstrumentation {
-    public struct GenerativeFunctionInstrumenter: Hashable, Codable, Sendable {}
-    public struct EventReporter: Hashable, Codable, Sendable {}
-}
-public struct CMTime: Hashable, Codable, Sendable {}
-public struct UUID: Hashable, Codable, Sendable {}
-public typealias CVBufferRef = PlaceholderA1<Any>
-public enum XPC {
-    public struct XPCCodableObject: Hashable, Codable, Sendable {}
-    public struct XPCDictionary: Hashable, Codable, Sendable {}
-}
-public enum Network {
-    public struct NWConnection {
-        public struct ConnectionProgressReport: Hashable, Codable, Sendable {}
-    }
-}
-public struct TokenGeneration_TokenStream<T>: Hashable, Codable, Sendable {
-    public init(from decoder: any Decoder) throws { fatalError() }
-    public func encode(to encoder: any Encoder) throws { fatalError() }
-}
-public struct TokenGeneration_Prompt: Hashable, Codable, Sendable {
-    public struct SpecialToken: Hashable, Codable, Sendable {}
-    public struct Rendering: Hashable, Codable, Sendable {}
-    public struct ImageAttachment: Hashable, Codable, Sendable {}
-    public struct ImageEmbeddingAttachment: Hashable, Codable, Sendable {}
-    public struct MediaCollectionAttachment: Hashable, Codable, Sendable {}
-    public struct ImageSurfaceAttachment: Hashable, Codable, Sendable {}
-    public struct PreprocessedImageAttachment: Hashable, Codable, Sendable {}
-    public struct AudioEmbeddingAttachment: Hashable, Codable, Sendable {}
-    public struct ToolCall: Hashable, Codable, Sendable { public struct Function: Hashable, Codable, Sendable {} }
-    public struct ToolResult: Hashable, Codable, Sendable {}
-    public struct Turn: Hashable, Codable, Sendable { public struct Segment: Hashable, Codable, Sendable {} }
-    public struct ToolCallResult: Hashable, Codable, Sendable {}
-    public struct MediaSegment: Hashable, Codable, Sendable {}
-    public struct ResponseFormat: Hashable, Codable, Sendable {}
-    public struct StringInterpolation: Hashable, Codable, Sendable {}
-    public struct Component: Hashable, Codable, Sendable {
-        public struct Value: Hashable, Codable, Sendable {}
-        public struct ValueKind: Hashable, Codable, Sendable {}
-    }
-}
-public enum FeatureFlags { public struct FeatureFlagsKey: Hashable, Codable, Sendable {} }
-public typealias ResourceMetadata = PlaceholderA1<Any>
-public struct UAFSubscriptionDownloadStatus: Hashable, Codable, Sendable {}
-public typealias GenericA = PlaceholderA1<Any>
-public typealias GenericB = PlaceholderA1<Any>
-public typealias GenericC = PlaceholderA1<Any>
-public typealias GenericD = PlaceholderA1<Any>
-public struct GMAvailabilityStatus: Hashable, Codable, Sendable {}
-public typealias NSUserDefaults = UserDefaults
-public typealias OS_os_activity = PlaceholderA1<Any>
-public typealias os_activity_flag_t = UInt32
-
-// Protocol shims with primary associated types
-public protocol SHIM_ChatLanguageModelResponse<Content>: Hashable { associatedtype Content }
-public protocol SHIM_ChatLanguageModelProviding<Parameters>: Hashable { associatedtype Parameters }
-public protocol SHIM_ChatLanguageModelProvidingStreamable<Parameters>: Hashable { associatedtype Parameters }
-public protocol SHIM_ChatMessageResponse<Content>: Hashable { associatedtype Content }
-public protocol SHIM_CompletionResponse<Content>: Hashable { associatedtype Content }
-public protocol SHIM_CompletionLanguageModelProviding<Parameters>: Hashable { associatedtype Parameters }
-public protocol SHIM_CompletionLanguageModelResponse<Content>: Hashable { associatedtype Content }
-public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Hashable { associatedtype Parameters }
-
-"""
+        let shimHeader = ""
         var output = shimHeader
         var definedTypes = Set<String>()
         
         func markGenericRecursive(node: TypeNode) {
-            if node.kind == "protocol" { return }
             let fullPath1 = defaultModule + "." + node.name
             let fullPath2 = node.name
             if discoveredGenerics[fullPath1] != nil || discoveredGenerics[fullPath2] != nil {
@@ -733,8 +718,13 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
         }
 
         let sortedModuleNames = modules.keys.sorted()
+        
+        // Phase 1: Generate type/class/enum declarations
         for moduleName in sortedModuleNames {
             if ["Swift", "Foundation", "ObjectiveC"].contains(moduleName) { continue }
+            if moduleName != defaultModule && isModuleAvailable(moduleName) {
+                continue
+            }
             guard let module = modules[moduleName] else { continue }
             
             for type in module.nestedTypes.values {
@@ -746,21 +736,18 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
                 let flattenedName = "\(moduleName)_\(type.name)"
                 if definedTypes.contains(flattenedName) { continue }
                 
-                let shimsSet = Set(ConfigManager.shared.fundamentalShims)
-                
-                // Always skip fundamental shims if they collide by name
-                if shimsSet.contains(type.name) {
-                     continue 
-                }
-                
                 definedTypes.insert(flattenedName)
                 let actualName = (moduleName == defaultModule) ? type.name : flattenedName
                 output += type.generateCode(indent: "", nameOverride: actualName, parser: self) + "\n\n"
             }
         }
         
+        // Phase 2: Generate type extensions
         for moduleName in sortedModuleNames {
             if ["Swift", "Foundation", "ObjectiveC"].contains(moduleName) { continue }
+            if moduleName != defaultModule && isModuleAvailable(moduleName) {
+                continue
+            }
             guard let module = modules[moduleName] else { continue }
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             for type in sortedTypes {
@@ -772,9 +759,12 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
             }
         }
 
-        // Generate namespaces and default module aliases
+        // Phase 3: Generate namespace and convenient typealiases
         for moduleName in sortedModuleNames {
             if ["Swift", "Foundation", "ObjectiveC"].contains(moduleName) { continue }
+            if moduleName != defaultModule && isModuleAvailable(moduleName) {
+                continue
+            }
             if moduleName == defaultModule { continue }
             
             guard let module = modules[moduleName] else { continue }
@@ -789,43 +779,99 @@ public protocol SHIM_CompletionLanguageModelProvidingStreamable<Parameters>: Has
             }
             output += "}\n\n"
             
-            // If the module name doesn't collide with a type, provide it as a convenient namespace alias
             if !definedTypes.contains(moduleName) {
                 output += "public typealias \(moduleName) = \(moduleName)_Namespace\n"
             }
         }
         
-        let shims = ConfigManager.shared.fundamentalShims
-        let otherFrameworks = Array(discoveredNamespaces).sorted()
-        for mod in otherFrameworks {
-             if mod == defaultModule { continue }
-             for shim in shims {
-                 if !definedTypes.contains("\(mod)_\(shim)") {
-                     output += "public typealias \(mod)_\(shim) = \(shim)\n"
-                 }
-             }
-             if mod != "TokenGeneration" {
-                 if !definedTypes.contains("\(mod)_TokenStream") {
-                     output += "public typealias \(mod)_TokenStream<T> = TokenGeneration_TokenStream<T>\n"
-                 }
-                 if !definedTypes.contains("\(mod)_Prompt") {
-                     output += "public typealias \(mod)_Prompt = TokenGeneration_Prompt\n"
-                 }
-             }
+        // Phase 4: Generate generic typealiases mapping flattened names to imported module types, OR stubs if missing
+        for moduleName in sortedModuleNames {
+            if ["Swift", "Foundation", "ObjectiveC"].contains(moduleName) { continue }
+            if moduleName == defaultModule { continue }
+            guard let module = modules[moduleName] else { continue }
+            
+            if isModuleAvailable(moduleName) {
+                let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
+                for type in sortedTypes {
+                    let flattenedName = "\(moduleName)_\(type.name)"
+                    if !definedTypes.contains(flattenedName) {
+                        definedTypes.insert(flattenedName)
+                        let gps = genericParamsString(for: type)
+                        
+                        // Check if type is publicly defined in the SDK or Local framework modules
+                        if isTypeDefinedInFramework(module: moduleName, typeName: type.name) {
+                            output += "public typealias \(flattenedName)\(gps) = \(moduleName).\(type.name)\(gps)\n"
+                        } else {
+                            // Leak/Missing type in dependency - generate local stub to compile
+                            output += "public struct \(flattenedName)\(gps): Hashable, Codable, Sendable {}\n"
+                        }
+                    }
+                }
+            }
         }
 
-        for (old, new) in ConfigManager.shared.simpleReplacements {
-            output = output.replacingOccurrences(of: old, with: new)
+        // Find all referenced but undefined types and generate stubs
+        var stubs = ""
+        let typePattern = "\\b(_*[A-Z][a-zA-Z0-9_$]*)\\b"
+        if let regex = try? NSRegularExpression(pattern: typePattern, options: []) {
+            let matches = regex.matches(in: output, options: [], range: NSRange(output.startIndex..., in: output))
+            var referencedTypes = Set<String>()
+            for match in matches {
+                if let range = Range(match.range, in: output) {
+                    referencedTypes.insert(String(output[range]))
+                }
+            }
+            
+            // Scan output once to find all defined types
+            var allDefinedInOutput = Set<String>()
+            let defPattern = "\\b(?:struct|class|enum|protocol|typealias)\\s+([a-zA-Z0-9_$]+)"
+            if let defRegex = try? NSRegularExpression(pattern: defPattern, options: []) {
+                let defMatches = defRegex.matches(in: output, options: [], range: NSRange(output.startIndex..., in: output))
+                for match in defMatches {
+                    if let range = Range(match.range(at: 1), in: output) {
+                        allDefinedInOutput.insert(String(output[range]))
+                    }
+                }
+            }
+            
+            let systemTypes: Set<String> = [
+                "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
+                "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
+                "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
+                "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
+                "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
+                "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable",
+                "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
+                "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
+                "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString"
+            ]
+            
+            let sortedTypes = referencedTypes.sorted()
+            for type in sortedTypes {
+                if systemTypes.contains(type) { continue }
+                if type.count == 1 { continue }
+                if type.hasPrefix("JSON") { continue }
+                
+                // Check if defined
+                let isDefined = allDefinedInOutput.contains(type)
+                if !isDefined {
+                    // Check if used with "any" or ends with "_P"
+                    let isProtocolRef = output.contains("any \(type)") || type.hasSuffix("_P")
+                    if isProtocolRef {
+                        stubs += "public protocol \(type) {}\n"
+                    } else {
+                        // Check if used as generic in the output
+                        let isGenericRef = output.contains("\(type)<")
+                        if isGenericRef {
+                            stubs += "public struct \(type)<T>: Hashable, Codable, Sendable {}\n"
+                        } else {
+                            stubs += "public struct \(type): Hashable, Codable, Sendable {}\n"
+                        }
+                    }
+                }
+            }
         }
-        
-        // Final alias resolution for protocol shims
-        for p in ConfigManager.shared.protocolShims {
-             for mod in otherFrameworks {
-                 if !definedTypes.contains("\(mod)_\(p)") {
-                     output += "public typealias \(mod)_\(p)<T> = SHIM_\(p)<T>\n"
-                 }
-             }
-        }
+        output += "\n" + stubs
 
         return output
     }

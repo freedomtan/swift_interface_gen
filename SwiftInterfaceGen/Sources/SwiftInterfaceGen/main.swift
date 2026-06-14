@@ -45,9 +45,7 @@ struct SwiftInterfaceGen {
         
         let imports = resolveImports(from: allCode, currentModule: currentModule, parser: parser)
         for imp in imports {
-            if !["Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC"].contains(imp) {
-                print("import \(imp)")
-            }
+            print("import \(imp)")
         }
         
         print(finalCode)
@@ -172,14 +170,9 @@ struct SwiftInterfaceGen {
 
     static func postProcess(_ code: String, parser: Parser) -> String {
         var c = code
-        // Remove redundant module prefixes, but be careful not to create self-referencing typealiases
-        var prefixes = ["ObjectiveC."]
-        for ns in parser.discoveredNamespaces {
-            prefixes.append("\(ns).")
-        }
-        for p in prefixes {
-            c = c.replacingOccurrences(of: p, with: "")
-        }
+        // Remove redundant current module prefix to avoid self-referencing, and ObjectiveC.
+        c = c.replacingOccurrences(of: "\(parser.defaultModule).", with: "")
+        c = c.replacingOccurrences(of: "ObjectiveC.", with: "")
         
         // Handle Foundation and Swift more carefully to avoid "typealias NSCoder = NSCoder"
         c = c.replacingOccurrences(of: ": Foundation.", with: ": ___FOUNDATION___")
@@ -216,7 +209,9 @@ struct SwiftInterfaceGen {
         
         // Strip invalid 'any' prefixes from concrete types
         for t in parser.discoveredConcreteTypes {
-            c = c.replacingOccurrences(of: "\\bany (?:[a-zA-Z0-9_$]+_)?\(t)\\b", with: "$1\(t)", options: .regularExpression)
+            if c.contains(t) {
+                c = c.replacingOccurrences(of: "\\bany (?:[a-zA-Z0-9_$]+_)?\(t)\\b", with: "$1\(t)", options: .regularExpression)
+            }
         }
         
         // Fix Optional fallbacks
@@ -233,13 +228,18 @@ struct SwiftInterfaceGen {
             if shortName == "Criteria" { continue } // Criteria has its own custom regex-based replacement
             
             let flatName = t.replacingOccurrences(of: ".", with: "_")
-            let placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
-            c = c.replacingOccurrences(of: "\\b\(flatName)\\b(?!<)", with: "\(flatName)<\(placeholders)>", options: .regularExpression)
+            if c.contains(flatName) {
+                let placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
+                c = c.replacingOccurrences(of: "\\b\(flatName)\\b(?!<)", with: "\(flatName)<\(placeholders)>", options: .regularExpression)
+            }
             
             // Only apply shortName replacement to top-level types to protect nested types of generic parents
             let components = t.components(separatedBy: ".")
             if components.count <= 2 {
-                c = c.replacingOccurrences(of: "\\b\(shortName)\\b(?!<)", with: "\(shortName)<\(placeholders)>", options: .regularExpression)
+                if c.contains(shortName) {
+                    let placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
+                    c = c.replacingOccurrences(of: "\\b\(shortName)\\b(?!<)", with: "\(shortName)<\(placeholders)>", options: .regularExpression)
+                }
             }
         }
         
@@ -254,8 +254,12 @@ struct SwiftInterfaceGen {
         
         // Fallbacks for missing nested types or unavailable modules
         for m in ConfigManager.shared.missingNestedTypes {
-            c = c.replacingOccurrences(of: "\\b(?:[a-zA-Z0-9_]+[._])+\(m)\\b", with: "PlaceholderB1", options: .regularExpression)
+            if c.contains(m) {
+                c = c.replacingOccurrences(of: "\\b(?:[a-zA-Z0-9_]+[._])+\(m)\\b", with: "PlaceholderB1", options: .regularExpression)
+            }
         }
+        
+        c = c.replacingOccurrences(of: "\\bResourceBundleIdentifier\\b(?!<)", with: "ResourceBundleIdentifier<Any>", options: .regularExpression)
 
         // Fix unnamed parameters
         c = c.replacingOccurrences(of: "(_: ", with: "(arg1: ")
