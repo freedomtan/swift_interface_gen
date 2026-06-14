@@ -92,7 +92,7 @@ struct SwiftInterfaceGen {
         if parser.modules[module] == nil {
             parser.modules[module] = TypeNode(name: module)
         }
-
+        
         let count = symbols.count
         print("Found \(count) new symbols in \(module). Demangling and precomputing...", to: &Self.standardError)
         
@@ -105,6 +105,9 @@ struct SwiftInterfaceGen {
         }
         print("Demangling took: \(Date().timeIntervalSince(start))s", to: &Self.standardError)
         
+        // Swift ABI Nominal Type Discovery Pass
+        parser.discoverNominalTypes(demangledMap: demangledMap, currentModule: module)
+
         let startPre = Date()
         for entry in demangledMap {
             parser.precompute(demangled: entry.demangled)

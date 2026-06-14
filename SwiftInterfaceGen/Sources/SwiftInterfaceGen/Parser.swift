@@ -956,4 +956,55 @@ class Parser {
             }
         }
     }
+
+    func discoverNominalTypes(demangledMap: [(mangled: String, demangled: String)], currentModule: String) {
+        for (mangled, demangled) in demangledMap {
+            var path = ""
+            var kind = "unknown"
+            
+            if demangled.hasPrefix("nominal type descriptor for ") {
+                path = demangled.replacingOccurrences(of: "nominal type descriptor for ", with: "")
+                if mangled.hasSuffix("OMn") { kind = "enum" }
+                else if mangled.hasSuffix("VMn") { kind = "struct" }
+                else if mangled.hasSuffix("CMn") { kind = "class" }
+            } else if demangled.hasPrefix("protocol descriptor for ") {
+                path = demangled.replacingOccurrences(of: "protocol descriptor for ", with: "")
+                kind = "protocol"
+            } else {
+                continue
+            }
+            
+            if let inIndex = path.range(of: " in ") {
+                path = String(path[..<inIndex.lowerBound])
+            }
+            
+            let parts = path.components(separatedBy: ".")
+            guard parts.count >= 2 else { continue }
+            
+            let module = parts[0]
+            if module != currentModule {
+                discoveredNamespaces.insert(module)
+            }
+            
+            let typePath = Array(parts[1...])
+            
+            let node = findOrCreateDiscoveredTypePath(module: module, path: typePath)
+            setKind(kind, for: node)
+        }
+    }
+
+    private func findOrCreateDiscoveredTypePath(module: String, path: [String]) -> TypeNode {
+        if modules[module] == nil {
+            modules[module] = TypeNode(name: module)
+        }
+        
+        var current = modules[module]!
+        for part in path {
+            if current.nestedTypes[part] == nil {
+                current.nestedTypes[part] = TypeNode(name: part)
+            }
+            current = current.nestedTypes[part]!
+        }
+        return current
+    }
 }
