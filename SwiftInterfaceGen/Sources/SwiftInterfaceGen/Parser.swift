@@ -23,6 +23,7 @@ class Parser {
     var frameworkInterfaceCache: [String: String] = [:]
     var namespaceFrameworkCache: [String: Bool] = [:]
     var frameworkDefinedTypesCache: [String: Set<String>] = [:]
+    private var scannedLocalSwiftFiles = false
 
     private let genericRegex = try! NSRegularExpression(pattern: "\\b([a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)<([^>]+)>", options: [])
     private let namespaceRegex = try! NSRegularExpression(pattern: "\\b([A-Z][a-zA-Z0-9_$]*)\\.", options: [])
@@ -131,6 +132,11 @@ class Parser {
     func parse(mangled: String, demangled: String, currentModule: String) {
         self.defaultModule = currentModule
         self.currentPrecomputeModule = currentModule
+        
+        if !scannedLocalSwiftFiles {
+            scannedLocalSwiftFiles = true
+            scanLocalSwiftFiles(currentModule: currentModule)
+        }
         
         // Populate forced generics for the current module
         for (t, count) in ConfigManager.shared.forceGenerics {
@@ -866,7 +872,8 @@ class Parser {
                 "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable",
                 "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
                 "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
-                "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString"
+                "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
+                "AnySequence", "FloatingPointRoundingRule"
             ]
             
             let sortedTypes = referencedTypes.sorted()
@@ -897,5 +904,56 @@ class Parser {
         output += "\n" + stubs
 
         return output
+    }
+
+    private func scanLocalSwiftFiles(currentModule: String) {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: fm.currentDirectoryPath) else { return }
+        
+        let genericUsagePattern = "\\b([A-Z][a-zA-Z0-9_$]*)\\s*<([^>]+)>"
+        guard let regex = try? NSRegularExpression(pattern: genericUsagePattern, options: []) else { return }
+        
+        func countTopLevelCommas(in s: String) -> Int {
+            var commas = 0
+            var depth = 0
+            var parenDepth = 0
+            for char in s {
+                if char == "<" { depth += 1 }
+                else if char == ">" { depth -= 1 }
+                else if char == "(" { parenDepth += 1 }
+                else if char == ")" { parenDepth -= 1 }
+                else if char == "," {
+                    if depth == 0 && parenDepth == 0 {
+                        commas += 1
+                    }
+                }
+            }
+            return commas + 1
+        }
+        
+        for file in files {
+            if file.hasSuffix(".swift") && !file.hasSuffix("Interface.swift") {
+                guard let content = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
+                let nsRange = NSRange(content.startIndex..<content.endIndex, in: content)
+                let matches = regex.matches(in: content, options: [], range: nsRange)
+                for match in matches {
+                    guard let typeRange = Range(match.range(at: 1), in: content),
+                          let paramsRange = Range(match.range(at: 2), in: content) else { continue }
+                    let typeName = String(content[typeRange])
+                    let params = String(content[paramsRange])
+                    
+                    if ["Optional", "Array", "Dictionary", "Set", "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer"].contains(typeName) {
+                        continue
+                    }
+                    
+                    let count = countTopLevelCommas(in: params)
+                    let fullPath = currentModule + "." + typeName
+                    let currentMax = discoveredGenerics[fullPath] ?? 0
+                    discoveredGenerics[fullPath] = max(currentMax, count)
+                    let currentShortMax = discoveredGenerics[typeName] ?? 0
+                    discoveredGenerics[typeName] = max(currentShortMax, count)
+                }
+            }
+        }
     }
 }
