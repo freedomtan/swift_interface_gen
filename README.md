@@ -78,27 +78,13 @@ swiftc -F LocalFrameworks test_ModelCatalog.swift \
 DYLD_FRAMEWORK_PATH=LocalFrameworks ./test_run
 ```
 
-## Configuration (`config.json`)
+## 100% Dynamic Inference (No Configuration Required)
 
-*Note: The long-term goal of this project is to rely entirely on 100% dynamic inference. Hopefully, we can eliminate the need for `config.json` entirely in the future as the inference engine becomes smarter.*
+This tool has been fully refactored to achieve **100% dynamic inference**. There is no longer a need for `config.json` or manual override files. 
 
-To keep the source code clean and framework-agnostic, we currently externalize manual override rules and system-level fallback arrays into `SwiftInterfaceGen/config.json`. 
+All generic parameter counts, namespaces, type definitions, protocol conformances, and concrete/protocol type classifications are inferred automatically at runtime by scanning and parsing the demangled binary symbols and referencing the SDK's metadata headers.
 
-You can pass a custom configuration using the `--config` parameter:
-```bash
-./swift-interface-gen path/to.tbd --config path/to/config.json
-```
-
-### Configuration Keys:
-
-| Key | Type | Description |
-| :--- | :--- | :--- |
-| `systemModules` | `[String]` | A list of standard/system modules (e.g., `Swift`, `Foundation`, `ObjectiveC`) whose prefixes will be stripped from types (e.g., `Swift.Int` becomes `Int`). |
-| `fundamentalShims` | `[String]` | Core platform types (like `NSCoder`, `NSZone`, `UUID`, `CMTime`) that are excluded from normal generation and stubbed with safe global aliases. |
-| `missingNestedTypes` | `[String]` | A list of nested types (such as `Module`, `Options`, `SharedBytecode`) that may be referenced in method signatures but are not publicly defined in the TBD. The tool replaces these with `PlaceholderB1` to prevent compilation errors. |
-| `protocolShims` | `[String]` | Protocols (like `ChatLanguageModelResponse`) that should be shimmed globally so they conform to standard protocols in multiple modules. |
-| `forceGenerics` | `[String: Int]` | A dictionary mapping short type names to their expected generic parameter count (e.g., `"Tensor": 1`, `"CatalogAsset": 2`). This forces the type definition and all generic expansions to use the correct number of generic placeholders even if they cannot be dynamically inferred from the demangled symbols. |
-| `simpleReplacements` | `[String: String]` | Global string replacements performed on the final output (e.g., swapping complex nested namespaces like `TestCatalog.Resource.ResourceMetadata` to just `ResourceMetadata`). |
+For backward compatibility, the `--config` parameter is still accepted but operates as a no-op.
 
 ## Security, Entitlements, and AMFI
 
