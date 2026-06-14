@@ -86,6 +86,27 @@ All generic parameter counts, namespaces, type definitions, protocol conformance
 
 For backward compatibility, the `--config` parameter is still accepted but operates as a no-op.
 
+## Mock Dynamic Library Usage Notes
+
+When compiling client code against the reconstructed mock framework, the Swift compiler links against the generated mock dynamic library (e.g., `LocalFrameworks/ModelCatalog.framework/ModelCatalog`).
+
+At runtime, the dynamic linker (`dyld`) resolves this dependency based on environment variables and library paths. This provides two distinct execution modes:
+
+### 1. Isolated Mock Execution (Unit Testing / Type Verification)
+To run your test program using only the mock implementation (e.g., verifying type layouts, initializing classes without triggering system side effects or network requests):
+```bash
+DYLD_FRAMEWORK_PATH=LocalFrameworks ./test_run
+```
+* **How it works:** `dyld` prioritizes `LocalFrameworks` and loads your mock dynamic library. Methods invoked on mock instances will return mock default values (like `nil` or empty arrays) or trigger a `fatalError()` if they contain complex logic, without executing system code.
+
+### 2. Live System Execution (Integration Testing / Real API Calls)
+To run your test program against the actual system implementation (e.g., calling live XPC services or secure system daemons):
+```bash
+./test_run
+```
+* **How it works:** Without `DYLD_FRAMEWORK_PATH=LocalFrameworks`, `dyld` falls back to the system's dynamic linker search paths and loads the *real* system framework from `/System/Library/PrivateFrameworks/...`.
+* **Benefit:** This allows you to check types and compile your code locally against the mock framework without needing private framework headers, while executing the actual system implementation at runtime.
+
 ## Security, Entitlements, and AMFI
 
 When writing integration tests that actually invoke methods requiring XPC services or secure enclaves (rather than just inspecting types), you must link against the *real* system framework and sign your binary with private entitlements.
