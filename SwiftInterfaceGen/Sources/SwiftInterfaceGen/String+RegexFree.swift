@@ -771,39 +771,49 @@ extension String {
     // 19. fixPrefixAndPostfixOperators: cleans up operator keywords prefix/postfix
     func fixPrefixAndPostfixOperators() -> String {
         var result = self
-        
         var startSearch = result.startIndex
         while let range = result.range(of: "func ", range: startSearch..<result.endIndex) {
             let postFuncIdx = range.upperBound
-            if let prefixRange = result[postFuncIdx...].range(of: " prefix(") {
-                let opName = String(result[postFuncIdx..<prefixRange.lowerBound])
-                if !opName.contains(" ") && !opName.isEmpty {
-                    let fullRange = range.lowerBound..<prefixRange.upperBound
-                    let replacement = "prefix func \(opName)("
-                    result.replaceSubrange(fullRange, with: replacement)
-                    startSearch = result.index(range.lowerBound, offsetBy: replacement.count, limitedBy: result.endIndex) ?? result.endIndex
-                    continue
+            
+            var scanIdx = postFuncIdx
+            var parenIdx: String.Index? = nil
+            while scanIdx < result.endIndex {
+                let char = result[scanIdx]
+                if char == "(" {
+                    parenIdx = scanIdx
+                    break
+                } else if char == "\n" {
+                    break
+                }
+                scanIdx = result.index(after: scanIdx)
+            }
+            
+            if let parenIdx = parenIdx {
+                let sigPart = String(result[postFuncIdx..<parenIdx])
+                
+                if sigPart.hasSuffix(" prefix") {
+                    let opName = sigPart.dropLast(7).trimmingCharacters(in: .whitespaces)
+                    if !opName.contains(" ") && !opName.isEmpty {
+                        let fullRange = range.lowerBound..<result.index(after: parenIdx)
+                        let replacement = "prefix func \(opName)("
+                        result.replaceSubrange(fullRange, with: replacement)
+                        startSearch = result.index(range.lowerBound, offsetBy: replacement.count, limitedBy: result.endIndex) ?? result.endIndex
+                        continue
+                    }
+                } else if sigPart.hasSuffix(" postfix") {
+                    let opName = sigPart.dropLast(8).trimmingCharacters(in: .whitespaces)
+                    if !opName.contains(" ") && !opName.isEmpty {
+                        let fullRange = range.lowerBound..<result.index(after: parenIdx)
+                        let replacement = "postfix func \(opName)("
+                        result.replaceSubrange(fullRange, with: replacement)
+                        startSearch = result.index(range.lowerBound, offsetBy: replacement.count, limitedBy: result.endIndex) ?? result.endIndex
+                        continue
+                    }
                 }
             }
+            
             startSearch = range.upperBound
         }
-        
-        startSearch = result.startIndex
-        while let range = result.range(of: "func ", range: startSearch..<result.endIndex) {
-            let postFuncIdx = range.upperBound
-            if let postfixRange = result[postFuncIdx...].range(of: " postfix(") {
-                let opName = String(result[postFuncIdx..<postfixRange.lowerBound])
-                if !opName.contains(" ") && !opName.isEmpty {
-                    let fullRange = range.lowerBound..<postfixRange.upperBound
-                    let replacement = "postfix func \(opName)("
-                    result.replaceSubrange(fullRange, with: replacement)
-                    startSearch = result.index(range.lowerBound, offsetBy: replacement.count, limitedBy: result.endIndex) ?? result.endIndex
-                    continue
-                }
-            }
-            startSearch = range.upperBound
-        }
-        
         return result
     }
 
@@ -896,60 +906,76 @@ extension String {
 
     // 22. applyDiscoveredGenerics: appends generic placeholders to types found in flatGenerics/shortGenerics
     func applyDiscoveredGenerics(flatGenerics: [String: Int], shortGenerics: [String: Int]) -> String {
-        var result = self
-        var startSearch = result.startIndex
-        while startSearch < result.endIndex {
-            var idx = startSearch
-            var matchFound = false
-            var wordStart = idx
-            var wordEnd = idx
+        let chars = Array(self)
+        let n = chars.count
+        var result = ""
+        result.reserveCapacity(n + n / 10)
+        
+        var i = 0
+        while i < n {
+            let c = chars[i]
+            let isIdentStart = c.isLetter || c == "_" || c == "$"
             
-            while idx < result.endIndex {
-                let isStart = (idx == result.startIndex || (!result[result.index(before: idx)].isLetter && !result[result.index(before: idx)].isNumber && result[result.index(before: idx)] != "_" && result[result.index(before: idx)] != "$"))
-                
-                if isStart {
-                    var scanIdx = idx
-                    while scanIdx < result.endIndex && (result[scanIdx] == "_") {
-                        scanIdx = result.index(after: scanIdx)
-                    }
-                    if scanIdx < result.endIndex && result[scanIdx].isUppercase {
-                        wordStart = idx
-                        while scanIdx < result.endIndex && (result[scanIdx].isLetter || result[scanIdx].isNumber || result[scanIdx] == "_" || result[scanIdx] == "$") {
-                            scanIdx = result.index(after: scanIdx)
-                        }
-                        wordEnd = scanIdx
-                        matchFound = true
+            var isWordBoundary = true
+            if isIdentStart && i > 0 {
+                let prev = chars[i - 1]
+                if prev.isLetter || prev.isNumber || prev == "_" || prev == "$" {
+                    isWordBoundary = false
+                }
+            }
+            
+            if isIdentStart && isWordBoundary {
+                let start = i
+                while i < n {
+                    let nextC = chars[i]
+                    let isIdentChar = nextC.isLetter || nextC.isNumber || nextC == "_" || nextC == "$"
+                    if isIdentChar {
+                        i += 1
+                    } else {
                         break
                     }
                 }
-                idx = result.index(after: idx)
-            }
-            
-            if matchFound {
-                let wordRange = wordStart..<wordEnd
-                let typeName = String(result[wordRange])
                 
-                let followedByGeneric = (wordEnd < result.endIndex && result[wordEnd] == "<")
+                let word = String(chars[start..<i])
                 
-                if !followedByGeneric {
-                    var count = 0
-                    if let cVal = flatGenerics[typeName] {
-                        count = cVal
-                    } else if let cVal = shortGenerics[typeName] {
-                        count = cVal
+                var isCapitalized = false
+                var scanIdx = word.startIndex
+                while scanIdx < word.endIndex && (word[scanIdx] == "_" || word[scanIdx] == "$") {
+                    scanIdx = word.index(after: scanIdx)
+                }
+                if scanIdx < word.endIndex && word[scanIdx].isUppercase {
+                    isCapitalized = true
+                }
+                
+                if isCapitalized {
+                    var followedByGeneric = false
+                    var nextIdx = i
+                    while nextIdx < n && chars[nextIdx].isWhitespace {
+                        nextIdx += 1
+                    }
+                    if nextIdx < n && chars[nextIdx] == "<" {
+                        followedByGeneric = true
                     }
                     
-                    if count > 0 {
-                        let placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
-                        let replacement = "\(typeName)<\(placeholders)>"
-                        result.replaceSubrange(wordRange, with: replacement)
-                        startSearch = result.index(wordStart, offsetBy: replacement.count, limitedBy: result.endIndex) ?? result.endIndex
-                        continue
+                    if !followedByGeneric {
+                        var count = 0
+                        if let cVal = flatGenerics[word] {
+                            count = cVal
+                        } else if let cVal = shortGenerics[word] {
+                            count = cVal
+                        }
+                        
+                        if count > 0 {
+                            let placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
+                            result.append("\(word)<\(placeholders)>")
+                            continue
+                        }
                     }
                 }
-                startSearch = wordEnd
+                result.append(word)
             } else {
-                break
+                result.append(c)
+                i += 1
             }
         }
         return result
