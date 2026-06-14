@@ -46,9 +46,8 @@ cd ../../../
 ```
 
 ### 2. Generate the Interface Source
-*Note: We pipe through python to safely handle complex regex escaping across platforms.*
 ```bash
-./swift-interface-gen /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/PrivateFrameworks/ModelCatalog.framework/ModelCatalog.tbd | python3 -c "import sys; print(sys.stdin.read().replace('\\\\n', '\n').replace('(Optional,', '(Optional<Any>,').replace('(Optional ,', '(Optional<Any>,'))" > ModelCatalogInterface.swift
+./swift-interface-gen /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/PrivateFrameworks/ModelCatalog.framework/ModelCatalog.tbd > ModelCatalogInterface.swift
 ```
 
 ### 3. Create the Local Framework Structure

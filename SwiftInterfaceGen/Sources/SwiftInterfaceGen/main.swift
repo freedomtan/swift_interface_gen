@@ -243,6 +243,7 @@ struct SwiftInterfaceGen {
         // Fix Optional fallbacks
         c = c.replacingOccurrences(of: "(Optional,", with: "(Optional<Any>,")
         c = c.replacingOccurrences(of: "(Optional, ", with: "(Optional<Any>, ")
+        c = c.replacingOccurrences(of: "(Optional ,", with: "(Optional<Any>,")
         c = c.replacingOccurrences(of: "Optional,", with: "Optional<Any>,")
         c = c.replacingOccurrences(of: "Optional)", with: "Optional<Any>)")
         
@@ -314,17 +315,14 @@ struct SwiftInterfaceGen {
         c = c.replacingOccurrences(of: "(_: ", with: "(arg1: ")
         c = c.replacingOccurrences(of: ", _: ", with: ", arg2: ")
         
-        // Ensure literal newlines are handled (hack for the python shim)
-        c = c.replacingOccurrences(of: "\n", with: "\\n")
-
-        // Final cleanup of redundant escapes
-        let lines = c.components(separatedBy: "\\n")
+        // Final cleanup of redundant newlines
+        let lines = c.components(separatedBy: "\n")
         var newLines = [String]()
         for line in lines {
             if line.trimmingCharacters(in: .whitespaces).isEmpty { continue }
             newLines.append(line)
         }
-        c = newLines.joined(separator: "\\n")
+        c = newLines.joined(separator: "\n")
         
         return c
     }

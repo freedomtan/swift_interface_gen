@@ -45,7 +45,7 @@ swiftc -O -parse-as-library main.swift Parser.swift Model.swift Config.swift -o 
 cd ../../../
 
 echo "--- Generating Interface for $FRAMEWORK ---"
-./swift-interface-gen "$TBD_PATH" | python3 -c "import sys; print(sys.stdin.read().replace('\\\\n', '\n').replace('(Optional,', '(Optional<Any>,').replace('(Optional ,', '(Optional<Any>,'))" > "${FRAMEWORK}Interface.swift"
+./swift-interface-gen "$TBD_PATH" > "${FRAMEWORK}Interface.swift"
 
 echo "--- Preparing Local Framework ---"
 MODULE_DIR="LocalFrameworks/${FRAMEWORK}.framework/Modules/${FRAMEWORK}.swiftmodule"
