@@ -22,6 +22,7 @@ class Parser {
     var currentPrecomputeModule = "ModelCatalog"
     var frameworkInterfaceCache: [String: String] = [:]
     var namespaceFrameworkCache: [String: Bool] = [:]
+    var frameworkDefinedTypesCache: [String: Set<String>] = [:]
 
     private let genericRegex = try! NSRegularExpression(pattern: "\\b([a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)<([^>]+)>", options: [])
     private let namespaceRegex = try! NSRegularExpression(pattern: "\\b([A-Z][a-zA-Z0-9_$]*)\\.", options: [])
@@ -668,20 +669,30 @@ class Parser {
         return mergedContent
     }
 
-    func isTypeDefinedInFramework(module: String, typeName: String) -> Bool {
+    func getFrameworkDefinedTypes(module: String) -> Set<String> {
+        if let cached = frameworkDefinedTypesCache[module] {
+            return cached
+        }
         let content = getFrameworkInterfaceContent(module: module)
-        if content.isEmpty { return false }
-        if !content.contains(typeName) { return false }
-        let patterns = [
-            "\\b(?:struct|class|enum|protocol|typealias)\\s+\(typeName)\\b",
-            "\\btypealias\\s+\(typeName)\\b"
-        ]
-        for pat in patterns {
-            if content.range(of: pat, options: .regularExpression) != nil {
-                return true
+        var defined = Set<String>()
+        if !content.isEmpty {
+            let pattern = "\\b(?:struct|class|enum|protocol|typealias)\\s+([a-zA-Z0-9_$]+)\\b"
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                let nsRange = NSRange(content.startIndex..<content.endIndex, in: content)
+                let matches = regex.matches(in: content, options: [], range: nsRange)
+                for match in matches {
+                    if let range = Range(match.range(at: 1), in: content) {
+                        defined.insert(String(content[range]))
+                    }
+                }
             }
         }
-        return false
+        frameworkDefinedTypesCache[module] = defined
+        return defined
+    }
+
+    func isTypeDefinedInFramework(module: String, typeName: String) -> Bool {
+        return getFrameworkDefinedTypes(module: module).contains(typeName)
     }
 
     func generateAll() -> String {
@@ -755,7 +766,7 @@ class Parser {
                 if !definedTypes.contains(flattenedName) { continue }
                 
                 let pathPrefix = (moduleName == defaultModule) ? "" : "\(moduleName)_"
-                output += type.generateExtensions(defaultModule: defaultModule, path: pathPrefix)
+                output += type.generateExtensions(defaultModule: defaultModule, parser: self, path: pathPrefix)
             }
         }
 
@@ -812,13 +823,25 @@ class Parser {
 
         // Find all referenced but undefined types and generate stubs
         var stubs = ""
-        let typePattern = "\\b(_*[A-Z][a-zA-Z0-9_$]*)\\b"
+        let typePattern = "(?:\\b(any)\\s+)?\\b(_*[A-Z][a-zA-Z0-9_$]*)\\b(<)?"
         if let regex = try? NSRegularExpression(pattern: typePattern, options: []) {
-            let matches = regex.matches(in: output, options: [], range: NSRange(output.startIndex..., in: output))
+            let nsRange = NSRange(output.startIndex..<output.endIndex, in: output)
+            let matches = regex.matches(in: output, options: [], range: nsRange)
+            
             var referencedTypes = Set<String>()
+            var protocolRefTypes = Set<String>()
+            var genericRefTypes = Set<String>()
+            
             for match in matches {
-                if let range = Range(match.range, in: output) {
-                    referencedTypes.insert(String(output[range]))
+                guard let typeRange = Range(match.range(at: 2), in: output) else { continue }
+                let typeName = String(output[typeRange])
+                referencedTypes.insert(typeName)
+                
+                if match.range(at: 1).location != NSNotFound {
+                    protocolRefTypes.insert(typeName)
+                }
+                if match.range(at: 3).location != NSNotFound {
+                    genericRefTypes.insert(typeName)
                 }
             }
             
@@ -826,7 +849,7 @@ class Parser {
             var allDefinedInOutput = Set<String>()
             let defPattern = "\\b(?:struct|class|enum|protocol|typealias)\\s+([a-zA-Z0-9_$]+)"
             if let defRegex = try? NSRegularExpression(pattern: defPattern, options: []) {
-                let defMatches = defRegex.matches(in: output, options: [], range: NSRange(output.startIndex..., in: output))
+                let defMatches = defRegex.matches(in: output, options: [], range: nsRange)
                 for match in defMatches {
                     if let range = Range(match.range(at: 1), in: output) {
                         allDefinedInOutput.insert(String(output[range]))
@@ -856,12 +879,12 @@ class Parser {
                 let isDefined = allDefinedInOutput.contains(type)
                 if !isDefined {
                     // Check if used with "any" or ends with "_P"
-                    let isProtocolRef = output.contains("any \(type)") || type.hasSuffix("_P")
+                    let isProtocolRef = protocolRefTypes.contains(type) || type.hasSuffix("_P")
                     if isProtocolRef {
                         stubs += "public protocol \(type) {}\n"
                     } else {
                         // Check if used as generic in the output
-                        let isGenericRef = output.contains("\(type)<")
+                        let isGenericRef = genericRefTypes.contains(type)
                         if isGenericRef {
                             stubs += "public struct \(type)<T>: Hashable, Codable, Sendable {}\n"
                         } else {

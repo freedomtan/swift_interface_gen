@@ -40,8 +40,13 @@ struct SwiftInterfaceGen {
         
         processSymbols(symbols, parser: parser, module: currentModule, depth: 0)
 
+        let startGen = Date()
         let allCode = parser.generateAll()
+        print("generateAll took: \(Date().timeIntervalSince(startGen))s", to: &Self.standardError)
+        
+        let startPost = Date()
         let finalCode = postProcess(allCode, parser: parser)
+        print("postProcess took: \(Date().timeIntervalSince(startPost))s", to: &Self.standardError)
         
         let imports = resolveImports(from: allCode, currentModule: currentModule, parser: parser)
         for imp in imports {
@@ -91,18 +96,26 @@ struct SwiftInterfaceGen {
         let count = symbols.count
         print("Found \(count) new symbols in \(module). Demangling and precomputing...", to: &Self.standardError)
         
+        let start = Date()
         var demangledMap: [(mangled: String, demangled: String)] = []
         for mangled in symbols {
             if let demangled = demangle(symbol: mangled) {
                 demangledMap.append((mangled: mangled, demangled: demangled))
-                parser.precompute(demangled: demangled)
             }
         }
+        print("Demangling took: \(Date().timeIntervalSince(start))s", to: &Self.standardError)
         
-        print("Parsing symbols for \(module)...", to: &Self.standardError)
+        let startPre = Date()
+        for entry in demangledMap {
+            parser.precompute(demangled: entry.demangled)
+        }
+        print("Precompute took: \(Date().timeIntervalSince(startPre))s", to: &Self.standardError)
+        
+        let startParse = Date()
         for entry in demangledMap {
             parser.parse(mangled: entry.mangled, demangled: entry.demangled, currentModule: module)
         }
+        print("Parse took: \(Date().timeIntervalSince(startParse))s", to: &Self.standardError)
     }
 
     static func extractSymbols(from tbd: String) -> [String] {
@@ -208,11 +221,24 @@ struct SwiftInterfaceGen {
         c = c.replacingOccurrences(of: "<Any(?:,\\s*Any)*>\\(", with: "(", options: .regularExpression)
         
         // Strip invalid 'any' prefixes from concrete types
-        for t in parser.discoveredConcreteTypes {
-            if c.contains(t) {
-                c = c.replacingOccurrences(of: "\\bany (?:[a-zA-Z0-9_$]+_)?\(t)\\b", with: "$1\(t)", options: .regularExpression)
+        let anyRegex = try! NSRegularExpression(pattern: "\\bany (?:([a-zA-Z0-9_$]+_)?([a-zA-Z0-9_$]+))\\b", options: [])
+        let matches = anyRegex.matches(in: c, options: [], range: NSRange(c.startIndex..<c.endIndex, in: c))
+        var newC = ""
+        var lastIdx = c.startIndex
+        for match in matches {
+                guard let matchRange = Range(match.range, in: c) else { continue }
+                let prefix = match.range(at: 1).location != NSNotFound ? String(c[Range(match.range(at: 1), in: c)!]) : ""
+                let baseType = String(c[Range(match.range(at: 2), in: c)!])
+                let fullType = prefix + baseType
+                if parser.discoveredConcreteTypes.contains(baseType) || parser.discoveredConcreteTypes.contains(fullType) {
+                    let replacement = prefix + baseType
+                    newC.append(contentsOf: c[lastIdx..<matchRange.lowerBound])
+                    newC.append(replacement)
+                    lastIdx = matchRange.upperBound
+                }
             }
-        }
+            newC.append(contentsOf: c[lastIdx..<c.endIndex])
+            c = newC
         
         // Fix Optional fallbacks
         c = c.replacingOccurrences(of: "(Optional,", with: "(Optional<Any>,")
@@ -221,6 +247,8 @@ struct SwiftInterfaceGen {
         c = c.replacingOccurrences(of: "Optional)", with: "Optional<Any>)")
         
         // Add generic placeholders for dynamically discovered generic types (types only!)
+        var flatGenerics = [String: Int]()
+        var shortGenerics = [String: Int]()
         for (t, count) in parser.discoveredGenerics {
             if parser.discoveredProtocols.contains(t) { continue } // Protocols are never generic
             let shortName = t.components(separatedBy: ".").last!
@@ -228,26 +256,47 @@ struct SwiftInterfaceGen {
             if shortName == "Criteria" { continue } // Criteria has its own custom regex-based replacement
             
             let flatName = t.replacingOccurrences(of: ".", with: "_")
-            if c.contains(flatName) {
-                let placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
-                c = c.replacingOccurrences(of: "\\b\(flatName)\\b(?!<)", with: "\(flatName)<\(placeholders)>", options: .regularExpression)
-            }
+            flatGenerics[flatName] = max(flatGenerics[flatName] ?? 0, count)
             
-            // Only apply shortName replacement to top-level types to protect nested types of generic parents
             let components = t.components(separatedBy: ".")
             if components.count <= 2 {
-                if c.contains(shortName) {
-                    let placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
-                    c = c.replacingOccurrences(of: "\\b\(shortName)\\b(?!<)", with: "\(shortName)<\(placeholders)>", options: .regularExpression)
-                }
+                shortGenerics[shortName] = max(shortGenerics[shortName] ?? 0, count)
             }
         }
         
+        let genericTypePattern = "\\b(_*[A-Z][a-zA-Z0-9_$]*)\\b(?!<)"
+        if let genericTypeRegex = try? NSRegularExpression(pattern: genericTypePattern, options: []) {
+            let matches = genericTypeRegex.matches(in: c, options: [], range: NSRange(c.startIndex..<c.endIndex, in: c))
+            var newC = ""
+            var lastIdx = c.startIndex
+            for match in matches {
+                guard let matchRange = Range(match.range, in: c) else { continue }
+                let typeName = String(c[matchRange])
+                
+                var count = 0
+                if let cVal = flatGenerics[typeName] {
+                    count = cVal
+                } else if let cVal = shortGenerics[typeName] {
+                    count = cVal
+                }
+                
+                if count > 0 {
+                    let placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
+                    let replacement = "\(typeName)<\(placeholders)>"
+                    newC.append(contentsOf: c[lastIdx..<matchRange.lowerBound])
+                    newC.append(replacement)
+                    lastIdx = matchRange.upperBound
+                }
+            }
+            newC.append(contentsOf: c[lastIdx..<c.endIndex])
+            c = newC
+        }
+        
         // Clean up invalid generic typealiases
-        c = c.replacingOccurrences(of: "public typealias ([^<]+)<Any> =", with: "public typealias $1 =", options: .regularExpression)
+        c = c.replacingOccurrences(of: "public typealias ([^<]+)<Any(?:,\\s*Any)*> =", with: "public typealias $1 =", options: .regularExpression)
         
         // Clean up protocols that were mistakenly made generic
-        c = c.replacingOccurrences(of: "protocol ([^<]+)<Any>", with: "protocol $1", options: .regularExpression)
+        c = c.replacingOccurrences(of: "protocol ([^<]+)<Any(?:,\\s*Any)*>", with: "protocol $1", options: .regularExpression)
         
         // Clean up invalid nested generic applications
         c = c.replacingOccurrences(of: "\\.View<[^>]+>", with: ".View", options: .regularExpression)

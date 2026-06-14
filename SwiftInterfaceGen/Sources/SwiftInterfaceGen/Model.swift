@@ -465,7 +465,7 @@ class TypeNode {
         return false
     }
 
-    func generateExtensions(defaultModule: String, path: String = "") -> String {
+    func generateExtensions(defaultModule: String, parser: Parser? = nil, path: String = "") -> String {
         var output = ""
         let separator = (path.isEmpty || path.hasSuffix("_")) ? "" : "."
         let currentPath = path.isEmpty ? name : path + separator + name
@@ -473,7 +473,7 @@ class TypeNode {
         if kind == "protocol" {
              let sortedNested = nestedTypes.values.sorted(by: { $0.name < $1.name })
              for nested in sortedNested {
-                 output += nested.generateCode(indent: "", nameOverride: "\(name)_\(nested.name)") + "\n\n"
+                 output += nested.generateCode(indent: "", nameOverride: "\(name)_\(nested.name)", parser: parser) + "\n\n"
              }
         }
 
@@ -481,13 +481,36 @@ class TypeNode {
              if hasEqualityOperator() {
                  output += "extension \(currentPath): Equatable {}\n"
              } else {
-                 output += "extension \(currentPath): Equatable { public static func == (lhs: \(currentPath), rhs: \(currentPath)) -> Bool { fatalError() } }\n"
+                 var genericType = currentPath
+                 if isGeneric {
+                     var count = 1
+                     if let parser = parser {
+                         let fullPath1 = defaultModule + "." + name
+                         let fullPath2 = name
+                         if let inferredCount = parser.discoveredGenerics[fullPath1] {
+                             count = inferredCount
+                         } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
+                             count = inferredCount
+                         }
+                     }
+                     let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                     var params = [String]()
+                     for i in 0..<count {
+                         if i < placeholders.count {
+                             params.append(placeholders[i])
+                         } else {
+                             params.append("A\(i)")
+                         }
+                     }
+                     genericType += "<\(params.joined(separator: ", "))>"
+                 }
+                 output += "extension \(currentPath): Equatable { public static func == (lhs: \(genericType), rhs: \(genericType)) -> Bool { fatalError() } }\n"
              }
         }
         
         let sortedNested = nestedTypes.values.sorted(by: { $0.name < $1.name })
         for nested in sortedNested {
-            output += nested.generateExtensions(defaultModule: defaultModule, path: currentPath)
+            output += nested.generateExtensions(defaultModule: defaultModule, parser: parser, path: currentPath)
         }
         
         return output
