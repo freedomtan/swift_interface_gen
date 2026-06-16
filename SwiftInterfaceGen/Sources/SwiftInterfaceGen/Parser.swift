@@ -25,6 +25,7 @@ class Parser {
     var frameworkDefinedTypesCache: [String: Set<String>] = [:]
     private var scannedLocalSwiftFiles = false
     var tbdSymbols = Set<String>()
+    var referencedModules = Set<String>()
 
     init() {}
 
@@ -69,8 +70,8 @@ class Parser {
                 if let cached = namespaceFrameworkCache[ns] {
                     isFramework = cached
                 } else {
-                    let path1 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/PrivateFrameworks/\(ns).framework"
-                    let path2 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/SubFrameworks/\(ns).framework"
+                    let path1 = "\(ConfigManager.sdkRoot)/System/Library/PrivateFrameworks/\(ns).framework"
+                    let path2 = "\(ConfigManager.sdkRoot)/System/Library/SubFrameworks/\(ns).framework"
                     let exists = FileManager.default.fileExists(atPath: path1) || FileManager.default.fileExists(atPath: path2)
                     namespaceFrameworkCache[ns] = exists
                     isFramework = exists
@@ -150,13 +151,7 @@ class Parser {
             scanLocalSwiftFiles(currentModule: currentModule)
         }
         
-        // Populate forced generics for the current module
-        for (t, count) in ConfigManager.shared.forceGenerics {
-            let fullPath = currentModule + "." + t
-            if discoveredGenerics[fullPath] == nil {
-                discoveredGenerics[fullPath] = count
-            }
-        }
+
         
         var d = demangled
         let d_orig = demangled
@@ -214,6 +209,11 @@ class Parser {
                         let node = findOrCreateType(name: cleanType(typePath))
                         let simplifiedProto = simplifyType(protoPath)
                         node.conformances.insert(simplifiedProto)
+                        
+                        let cleanProto = cleanType(protoPath)
+                        discoveredProtocols.insert(cleanProto)
+                        let shortProto = cleanProto.components(separatedBy: ".").last ?? cleanProto
+                        discoveredProtocols.insert(shortProto)
                     }
                     return
                 }
@@ -461,8 +461,13 @@ class Parser {
     private func findOrCreateType(name: String) -> TypeNode {
         var parts = name.components(separatedBy: ".")
 
-        if !ConfigManager.shared.systemModules.contains(parts[0]) && !discoveredNamespaces.contains(parts[0]) && parts[0] != defaultModule {
+        let isTopLevel = isModuleAvailable(parts[0]) || parts[0] == "__C" || parts[0] == defaultModule
+        if !isTopLevel {
             parts.insert(defaultModule, at: 0)
+        }
+        
+        if parts[0] != defaultModule && parts[0] != "Swift" && parts[0] != "__C" && isModuleAvailable(parts[0]) {
+            referencedModules.insert(parts[0])
         }
         
         let moduleName = parts[0]
@@ -547,13 +552,33 @@ class Parser {
             t = t.stripModuleBeforeSubscriptOrGeneric()
         }
         
-        for mod in ConfigManager.shared.systemModules {
-            if t.contains(mod) {
-                if mod == "Swift" {
-                    // Keep Swift. prefix to handle shadowing correctly in postProcess()
-                } else {
-                    t = t.replaceWordDot(mod, with: "")
+        // Strip available module prefixes from the type name
+        let chars = Array(t)
+        let n = chars.count
+        var idx = 0
+        var scannedWords = Set<String>()
+        while idx < n {
+            if chars[idx].isLetter || chars[idx] == "_" {
+                let start = idx
+                while idx < n && (chars[idx].isLetter || chars[idx].isNumber || chars[idx] == "_") {
+                    idx += 1
                 }
+                let word = String(chars[start..<idx])
+                if idx < n && chars[idx] == "." {
+                    if idx + 1 < n && chars[idx+1].isLetter {
+                        scannedWords.insert(word)
+                    }
+                }
+            } else {
+                idx += 1
+            }
+        }
+        for word in scannedWords {
+            if word == "__C" {
+                t = t.replaceWordDot(word, with: "")
+            } else if word != "Swift" && word != defaultModule && isModuleAvailable(word) {
+                t = t.replaceWordDot(word, with: "")
+                referencedModules.insert(word)
             }
         }
         
@@ -747,22 +772,39 @@ class Parser {
     }
     
     func isModuleAvailable(_ name: String) -> Bool {
-        let sdkRoot = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
-        let paths = [
+        let sdkRoot = ConfigManager.sdkRoot
+        
+        // 1. Check if name is in usr/lib/swift (standard library modules)
+        let swiftLibPaths = [
+            "\(sdkRoot)/usr/lib/swift/\(name).swiftmodule",
+            "\(sdkRoot)/usr/lib/swift/libswift\(name).tbd"
+        ]
+        for path in swiftLibPaths {
+            if FileManager.default.fileExists(atPath: path) {
+                return true
+            }
+        }
+        
+        // 2. Check if name is a framework with a Modules directory containing a swiftmodule or modulemap
+        let frameworkPaths = [
             "\(sdkRoot)/System/Library/Frameworks/\(name).framework",
             "\(sdkRoot)/System/Library/PrivateFrameworks/\(name).framework",
             "\(sdkRoot)/System/Library/SubFrameworks/\(name).framework",
             "LocalFrameworks/\(name).framework"
         ]
-        for path in paths {
-            if FileManager.default.fileExists(atPath: path) {
+        for fwPath in frameworkPaths {
+            let modulesPath = "\(fwPath)/Modules"
+            if FileManager.default.fileExists(atPath: modulesPath) {
                 return true
             }
         }
+        
+        // 3. Built-in system modules
         let system = ["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "CoreVideo", "CoreMedia", "IOSurface"]
         if system.contains(name) {
             return true
         }
+        
         return false
     }
 
@@ -793,7 +835,7 @@ class Parser {
             return cached
         }
         var mergedContent = ""
-        let sdkRoot = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+        let sdkRoot = ConfigManager.sdkRoot
         let searchDirs = [
             "\(sdkRoot)/System/Library/Frameworks/\(module).framework/Modules/\(module).swiftmodule",
             "\(sdkRoot)/System/Library/PrivateFrameworks/\(module).framework/Modules/\(module).swiftmodule",
@@ -1188,7 +1230,7 @@ class Parser {
             let isDefined = allDefinedInOutput.contains(type)
             if !isDefined {
                 // Check if used with "any" or ends with "_P"
-                let isProtocolRef = protocolRefTypes.contains(type) || type.hasSuffix("_P") || ConfigManager.shared.protocolShims.contains(type)
+                let isProtocolRef = protocolRefTypes.contains(type) || type.hasSuffix("_P")
                 if isProtocolRef {
                     stubs += "public protocol \(type) {}\n"
                 } else {

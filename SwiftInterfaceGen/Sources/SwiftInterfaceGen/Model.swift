@@ -195,24 +195,45 @@ class TypeNode {
         }
 
         if isEnum && hasCases, let raw = rawType {
-            inherits.append(raw)
+            var cleanRaw = raw.trimmingCharacters(in: .whitespaces)
+            if cleanRaw.hasPrefix("any ") {
+                cleanRaw = String(cleanRaw.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+            }
+            if cleanRaw.hasPrefix("Swift.") {
+                cleanRaw = String(cleanRaw.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            }
+            let validRawTypes: Set<String> = [
+                "Int", "Int8", "Int16", "Int32", "Int64",
+                "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
+                "Double", "Float", "Float16", "String", "Character"
+            ]
+            if validRawTypes.contains(cleanRaw) {
+                inherits.append(raw)
+            } else {
+                conformances.insert(raw)
+            }
         }
         
         var cleanConformances = Set<String>()
         for conf in conformances {
             var clean = conf.trimmingCharacters(in: .whitespaces)
-            if clean.hasPrefix("any ") {
-                clean = String(clean.dropFirst(4)).trimmingCharacters(in: .whitespaces)
-            }
-            if clean.hasPrefix("Swift.") {
-                clean = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            var changed = true
+            while changed {
+                changed = false
+                if clean.hasPrefix("any ") {
+                    clean = String(clean.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+                    changed = true
+                }
+                if clean.hasPrefix("Swift.") {
+                    clean = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                    changed = true
+                }
             }
             if let parser = parser {
                 let baseName = clean.stripGenericAngles()
                 if parser.discoveredProtocols.contains(baseName) || 
                    parser.discoveredProtocols.contains(where: { $0.hasSuffix("." + baseName) }) ||
-                   baseName.hasSuffix("_P") || 
-                   ConfigManager.shared.protocolShims.contains(baseName) {
+                   baseName.hasSuffix("_P") {
                     clean = baseName
                 }
             }
@@ -222,6 +243,11 @@ class TypeNode {
         if cleanConformances.contains("Codable") {
             cleanConformances.remove("Decodable")
             cleanConformances.remove("Encodable")
+        }
+        if cleanConformances.contains("Decodable") && cleanConformances.contains("Encodable") {
+            cleanConformances.remove("Decodable")
+            cleanConformances.remove("Encodable")
+            cleanConformances.insert("Codable")
         }
         if cleanConformances.contains("Hashable") {
             cleanConformances.remove("Equatable")
@@ -235,18 +261,23 @@ class TypeNode {
         
         var inheritsList = inherits.map { t in
             var clean = t.trimmingCharacters(in: .whitespaces)
-            if clean.hasPrefix("any ") {
-                clean = String(clean.dropFirst(4)).trimmingCharacters(in: .whitespaces)
-            }
-            if clean.hasPrefix("Swift.") {
-                clean = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            var changed = true
+            while changed {
+                changed = false
+                if clean.hasPrefix("any ") {
+                    clean = String(clean.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+                    changed = true
+                }
+                if clean.hasPrefix("Swift.") {
+                    clean = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                    changed = true
+                }
             }
             if let parser = parser {
                 let baseName = clean.stripGenericAngles()
                 if parser.discoveredProtocols.contains(baseName) || 
                    parser.discoveredProtocols.contains(where: { $0.hasSuffix("." + baseName) }) ||
-                   baseName.hasSuffix("_P") || 
-                   ConfigManager.shared.protocolShims.contains(baseName) {
+                   baseName.hasSuffix("_P") {
                     clean = baseName
                 }
             }

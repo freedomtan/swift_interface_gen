@@ -7,7 +7,9 @@ set -e
 
 FRAMEWORK=$1
 TEST_FILE=$2
-SDK_ROOT="/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+if [ -z "$SDK_ROOT" ]; then
+    SDK_ROOT=$(xcrun --show-sdk-path 2>/dev/null || echo "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
+fi
 PRIVATE_FRAMEWORKS="/System/Library/PrivateFrameworks"
 SUB_FRAMEWORKS="/System/Library/SubFrameworks"
 

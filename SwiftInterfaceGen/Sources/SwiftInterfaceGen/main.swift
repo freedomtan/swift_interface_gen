@@ -57,8 +57,15 @@ struct SwiftInterfaceGen {
     }
 
     static func resolveImports(from code: String, currentModule: String, parser: Parser) -> [String] {
-        var imports = Set(ConfigManager.shared.systemModules)
-        imports.remove("__C")
+        var imports = Set<String>()
+        imports.insert("Foundation")
+        
+        for mod in parser.referencedModules {
+            if mod != currentModule && mod != "Swift" && mod != "__C" {
+                imports.insert(mod)
+            }
+        }
+        
         if code.contains("MTL") { imports.insert("Metal") }
         if code.contains("IOSurface") { imports.insert("IOSurface") }
         if code.contains("CGImage") || code.contains("CGRect") || code.contains("CGSize") || code.contains("CGFloat") { imports.insert("CoreGraphics") }
@@ -71,8 +78,8 @@ struct SwiftInterfaceGen {
         for mod in parser.discoveredNamespaces {
             if code.contains("\(mod).") && mod != currentModule {
                 if mod == "__C" { continue }
-                let path1 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/PrivateFrameworks/\(mod).framework"
-                let path2 = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/SubFrameworks/\(mod).framework"
+                let path1 = "\(ConfigManager.sdkRoot)/System/Library/PrivateFrameworks/\(mod).framework"
+                let path2 = "\(ConfigManager.sdkRoot)/System/Library/SubFrameworks/\(mod).framework"
                 if FileManager.default.fileExists(atPath: path1) || FileManager.default.fileExists(atPath: path2) {
                     imports.insert(mod)
                 }
@@ -171,7 +178,7 @@ struct SwiftInterfaceGen {
     }
 
     static func resolveLibraryPath(_ lib: String) -> String {
-        let sdkRoot = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+        let sdkRoot = ConfigManager.sdkRoot
         if lib.starts(with: "/System/Library/PrivateFrameworks") {
             let parts = lib.components(separatedBy: "/")
             if let frameworkName = parts.first(where: { $0.hasSuffix(".framework") }) {
@@ -266,8 +273,7 @@ struct SwiftInterfaceGen {
                parser.discoveredProtocols.contains(where: { $0.hasSuffix("." + t) }) ||
                parser.discoveredProtocols.contains(shortName) ||
                parser.discoveredProtocols.contains(where: { $0.hasSuffix("." + shortName) }) ||
-               shortName.hasSuffix("_P") ||
-               ConfigManager.shared.protocolShims.contains(shortName) {
+               shortName.hasSuffix("_P") {
                 continue
             }
             guard let firstChar = shortName.first, firstChar.isUppercase else { continue } // Only types!
@@ -292,12 +298,7 @@ struct SwiftInterfaceGen {
         // Clean up invalid nested generic applications
         c = c.stripGenericFromView()
         
-        // Fallbacks for missing nested types or unavailable modules
-        for m in ConfigManager.shared.missingNestedTypes {
-            if c.contains(m) {
-                c = c.replaceMissingNestedTypes(missingName: m)
-            }
-        }
+
         
         c = c.replaceWordWithoutGeneric("ResourceBundleIdentifier", with: "ResourceBundleIdentifier<Any>")
         c = c.replacingOccurrences(of: "var id: ResourceBundleIdentifier<Any>", with: "var id: ResourceBundleIdentifier<Self>")
