@@ -219,7 +219,17 @@ struct SwiftInterfaceGen {
         c = c.replacingOccurrences(of: "Foundation.", with: "")
         c = c.replacingOccurrences(of: "___FOUNDATION___", with: "Foundation.")
         
+        // Strip Swift. from types unless there is a collision
+        let standardShadowedTypes = ["Float", "Double", "Int", "String", "Bool"].filter { parser.discoveredConcreteTypes.contains($0) }
+        for type in standardShadowedTypes {
+            c = c.replacingOccurrences(of: "Swift.\(type)", with: "___SWIFT_SHIELDED_\(type)___")
+        }
+        
         c = c.replacingOccurrences(of: "Swift.", with: "")
+        
+        for type in standardShadowedTypes {
+            c = c.replacingOccurrences(of: "___SWIFT_SHIELDED_\(type)___", with: "Swift.\(type)")
+        }
         
         // Handle AnySequence
         c = c.replaceWordWithoutGeneric("AnySequence", with: "AnySequence<Any>")
@@ -237,7 +247,8 @@ struct SwiftInterfaceGen {
         c = c.stripAnyGenericApplicationBeforeParen()
         
         // Strip invalid 'any' prefixes from concrete types
-        c = c.stripInvalidAnyPrefixes(concreteTypes: parser.discoveredConcreteTypes)
+        let protocolShortNames = Set(parser.discoveredProtocols.map { $0.components(separatedBy: ".").last ?? $0 })
+        c = c.stripInvalidAnyPrefixes(concreteTypes: parser.discoveredConcreteTypes, protocolNames: protocolShortNames)
         
         // Fix Optional fallbacks
         c = c.replacingOccurrences(of: "(Optional,", with: "(Optional<Any>,")
@@ -250,8 +261,15 @@ struct SwiftInterfaceGen {
         var flatGenerics = [String: Int]()
         var shortGenerics = [String: Int]()
         for (t, count) in parser.discoveredGenerics {
-            if parser.discoveredProtocols.contains(t) { continue } // Protocols are never generic
             let shortName = t.components(separatedBy: ".").last!
+            if parser.discoveredProtocols.contains(t) || 
+               parser.discoveredProtocols.contains(where: { $0.hasSuffix("." + t) }) ||
+               parser.discoveredProtocols.contains(shortName) ||
+               parser.discoveredProtocols.contains(where: { $0.hasSuffix("." + shortName) }) ||
+               shortName.hasSuffix("_P") ||
+               ConfigManager.shared.protocolShims.contains(shortName) {
+                continue
+            }
             guard let firstChar = shortName.first, firstChar.isUppercase else { continue } // Only types!
             
             let flatName = t.replacingOccurrences(of: ".", with: "_")
@@ -282,6 +300,11 @@ struct SwiftInterfaceGen {
         }
         
         c = c.replaceWordWithoutGeneric("ResourceBundleIdentifier", with: "ResourceBundleIdentifier<Any>")
+        c = c.replacingOccurrences(of: "var id: ResourceBundleIdentifier<Any>", with: "var id: ResourceBundleIdentifier<Self>")
+        
+        if !parser.defaultModule.isEmpty {
+            c = c.replacingOccurrences(of: "___SHIELDED_\(parser.defaultModule)___", with: parser.defaultModule)
+        }
         
         // Final cleanup of redundant newlines
         let lines = c.components(separatedBy: "\n")

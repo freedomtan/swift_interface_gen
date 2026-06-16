@@ -106,6 +106,7 @@ class Parser {
     private func setKind(_ kind: String, for node: TypeNode) {
         if node.kind == "unknown" || node.kind == "struct" {
              if kind == "class" || kind == "enum" || kind == "protocol" {
+                 fputs("TypeKindSet: \(node.name) -> \(kind)\n", stderr)
                  node.kind = kind
              }
         }
@@ -114,7 +115,33 @@ class Parser {
         }
     }
 
+    /// Returns the set of protocol short names that are safe to keep an `any` prefix.
+    /// A name is "safe" if it IS a known protocol but does NOT also appear as a concrete type short name
+    /// at any nesting level. This prevents `any AppleDeviceTracking` (which is shadowed by the
+    /// concrete nested struct) while allowing `any ResourceBundle` (which has no same-named
+    /// concrete type in discoveredConcreteTypes at any nesting level that causes shadowing issues).
+    /// NOTE: ResourceBundle IS in discoveredConcreteTypes because of Catalog.ResourceBundle enum,
+    /// so we compare the full protocol path depth vs the concrete type to decide.
+    func unambiguousProtocolShortNames() -> Set<String> {
+        // Use discoveredConcreteTypes (short names of ALL concrete types at any depth)
+        // A protocol short name P is "safe" if NOT in discoveredConcreteTypes.
+        var result = Set<String>()
+        for proto in discoveredProtocols {
+            let shortName = proto.components(separatedBy: ".").last ?? proto
+            if !discoveredConcreteTypes.contains(shortName) {
+                result.insert(shortName)
+            }
+        }
+        return result
+    }
+
     func parse(mangled: String, demangled: String, currentModule: String) {
+        var mangled = mangled
+        if mangled.hasSuffix("Tj") {
+            mangled = String(mangled.dropLast(2))
+        } else if mangled.hasSuffix("Tq") {
+            mangled = String(mangled.dropLast(2))
+        }
         self.defaultModule = currentModule
         self.currentPrecomputeModule = currentModule
         
@@ -310,6 +337,7 @@ class Parser {
                 if !typeName.isEmpty && !memberName.isEmpty {
                     if memberName.contains("getter") || memberName.contains("setter") { return }
 
+                    let parentName = typeName.components(separatedBy: ".").last!
                     let node = findOrCreateType(name: cleanType(typeName))
                     if let k = forcedKind { setKind(k, for: node) }
                     
@@ -332,7 +360,7 @@ class Parser {
                             signatureRaw = String(signatureRaw[..<arrow]).trimmingCharacters(in: .whitespaces)
                         }
                         
-                        let signature = simplifyType(signatureRaw)
+                        let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
                         let initSig = fixUnnamedParameters(signature)
                         if mangled.contains("PAAE") {
                             node.extensionMembers["init" + initSig] = .initializer("init" + initSig)
@@ -340,7 +368,7 @@ class Parser {
                             node.members["init" + initSig] = .initializer("init" + initSig)
                         }
                     } else {
-                        let signature = simplifyType(signatureRaw)
+                        let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
                         let fixedSignature = fixUnnamedParameters(escapedMemberName + signature)
                         if mangled.contains("PAAE") {
                             node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
@@ -359,7 +387,6 @@ class Parser {
         if cleanD.contains(" : ") {
             let parts = cleanD.components(separatedBy: " : ")
             var fullMemberPath = parts[0].trimmingCharacters(in: .whitespaces)
-            let type = simplifyType(parts[1])
             
             var isReadOnly = d_orig.contains(" { get }") || !d_orig.contains(" { get set }")
             if fullMemberPath.hasSuffix(".getter") {
@@ -377,6 +404,9 @@ class Parser {
             }
             
             let (typeName, memberName) = splitPath(fullMemberPath)
+            let parentName = typeName.components(separatedBy: ".").last!
+            let type = simplifyType(parts[1], parentName: parentName)
+            
             if !typeName.isEmpty && !memberName.isEmpty {
                 let node = findOrCreateType(name: cleanType(typeName))
                 if let k = forcedKind { setKind(k, for: node) }
@@ -443,7 +473,9 @@ class Parser {
         var current = modules[moduleName]!
         for part in parts.dropFirst() {
             if current.nestedTypes[part] == nil {
-                current.nestedTypes[part] = TypeNode(name: part)
+                let newNode = TypeNode(name: part)
+                newNode.parent = current
+                current.nestedTypes[part] = newNode
             }
             current = current.nestedTypes[part]!
         }
@@ -461,7 +493,7 @@ class Parser {
     }
 
     private func cleanType(_ name: String) -> String {
-        var n = name.stripLongNumbers()
+        var n = name.stripGenericAngles().stripLongNumbers()
         
         if n.contains("(extension in ") {
             for ext in discoveredNamespaces {
@@ -477,12 +509,37 @@ class Parser {
         return n
     }
 
-    func simplifyType(_ type: String) -> String {
-        var t = type
+    func simplifyType(_ type: String, parentName: String? = nil, isMethodSignature: Bool = false) -> String {
+        var t = type.replacingOccurrences(of: "CVBufferRef", with: "CVBuffer")
         
+        // For each discovered protocol, add 'any' prefix when used as an existential type.
+        // Track which ones are "ambiguous" (also have a concrete type with the same short name)
+        // so we can preserve their module prefix to avoid Swift shadowing inside nested type bodies.
+        var ambiguousAnyPlaceholders: [(placeholder: String, fullQualified: String)] = []
         let words = discoveredProtocols.filter { t.contains($0) }
         for p in words {
-             t = t.replaceWord(p, with: "any \(p)")
+             let shortName = p.components(separatedBy: ".").last ?? p
+             let isAmbiguous = discoveredConcreteTypes.contains(shortName)
+             if isAmbiguous {
+                 // Replace with a placeholder that won't be touched by module stripping.
+                 // Restore with FULLY QUALIFIED 'any ModuleName.ProtocolName' after stripping
+                 // to bypass Swift name shadowing inside nested type bodies.
+                 // E.g., in Catalog.Resource.AppleDeviceTracking's body, bare 'AppleDeviceTracking'
+                 // shadows the protocol, so we need 'any ModelCatalog.AppleDeviceTracking'.
+                  let placeholder = "___ANY_PROTO_\(shortName)___"
+                  t = t.replaceWord(p, with: placeholder)
+                  // p is the fully qualified name (e.g., ModelCatalog.AppleDeviceTracking)
+                  let fullQualified: String
+                  if !defaultModule.isEmpty && p.hasPrefix(defaultModule + ".") {
+                      let suffix = p.dropFirst(defaultModule.count)
+                      fullQualified = "any ___SHIELDED_\(defaultModule)___\(suffix)"
+                  } else {
+                      fullQualified = "any \(p)"
+                  }
+                  ambiguousAnyPlaceholders.append((placeholder: placeholder, fullQualified: fullQualified))
+             } else {
+                 t = t.replaceWord(p, with: "any \(p)")
+             }
         }
         
         if t.contains("<") || t.contains("[") {
@@ -492,7 +549,11 @@ class Parser {
         
         for mod in ConfigManager.shared.systemModules {
             if t.contains(mod) {
-                t = t.replaceWordDot(mod, with: "")
+                if mod == "Swift" {
+                    // Keep Swift. prefix to handle shadowing correctly in postProcess()
+                } else {
+                    t = t.replaceWordDot(mod, with: "")
+                }
             }
         }
         
@@ -520,11 +581,31 @@ class Parser {
              }
         }
         
+        // Restore ambiguous any-protocol placeholders with FULLY QUALIFIED form (e.g., any ModelCatalog.X)
+        // This is necessary for protocols that share a short name with a nested concrete type.
+        // E.g., ModelCatalog.AppleDeviceTracking (protocol) vs Catalog.Resource.AppleDeviceTracking (struct):
+        // inside Catalog.Resource.AppleDeviceTracking's body, bare 'AppleDeviceTracking' resolves to
+        // the concrete struct, so we use 'any ModelCatalog.AppleDeviceTracking' for disambiguation.
+        for (placeholder, fullQualified) in ambiguousAnyPlaceholders {
+            t = t.replacingOccurrences(of: placeholder, with: fullQualified)
+        }
+        
         if t.contains(".") {
+            // Shield Swift standard types from JSON conversion
+            t = t.replacingOccurrences(of: "Swift.String", with: "___SWIFT_SHIELDED_String___")
+            t = t.replacingOccurrences(of: "Swift.Dictionary", with: "___SWIFT_SHIELDED_Dictionary___")
+            t = t.replacingOccurrences(of: "Swift.Array", with: "___SWIFT_SHIELDED_Array___")
+            t = t.replacingOccurrences(of: "Swift.Object", with: "___SWIFT_SHIELDED_Object___")
+            
             t = t.replaceDotWord(word: "Array", replacement: ".JSONArray")
             t = t.replaceDotWord(word: "Dictionary", replacement: ".JSONDictionary")
             t = t.replaceDotWord(word: "Object", replacement: ".JSONObject")
             t = t.replaceDotWord(word: "String", replacement: ".JSONString")
+            
+            t = t.replacingOccurrences(of: "___SWIFT_SHIELDED_String___", with: "Swift.String")
+            t = t.replacingOccurrences(of: "___SWIFT_SHIELDED_Dictionary___", with: "Swift.Dictionary")
+            t = t.replacingOccurrences(of: "___SWIFT_SHIELDED_Array___", with: "Swift.Array")
+            t = t.replacingOccurrences(of: "___SWIFT_SHIELDED_Object___", with: "Swift.Object")
         }
 
         var prevT = ""
@@ -537,10 +618,6 @@ class Parser {
             t = t.replacingOccurrences(of: "Optional<", with: "___OPT_T___")
             t = t.replaceWordWithoutGeneric("Optional", with: "Optional<Any>")
             t = t.replacingOccurrences(of: "___OPT_T___", with: "Optional<")
-        }
-        
-        if t.contains("ResourceBundle") {
-            t = t.replacingOccurrences(of: "any ResourceBundle", with: "any ResourceBundle_P")
         }
 
         if t.contains("Dictionary") {
@@ -585,7 +662,11 @@ class Parser {
         }
         t = t.replacingOccurrences(of: "}", with: "")
 
-        return t
+        if isMethodSignature {
+            return stripLabelsFromMethodSignature(t)
+        } else {
+            return stripFunctionTypeLabels(t)
+        }
     }
 
     private func fixUnnamedParameters(_ sig: String) -> String {
@@ -749,11 +830,137 @@ class Parser {
         return getFrameworkDefinedTypes(module: module).contains(typeName)
     }
 
+    func applyTypeFixups() {
+        if defaultModule == "ModelCatalog" {
+            // Fix VisionModelBase
+            if let node = modules["ModelCatalog"]?.nestedTypes["VisionModelBase"] {
+                node.members["id"] = .property(name: "id", type: "String", isReadOnly: true, isStatic: false)
+                node.members["inferenceProviders"] = .property(name: "inferenceProviders", type: "Set<InferenceProvider>", isReadOnly: true, isStatic: false)
+                node.members["cost"] = .property(name: "cost", type: "CostProfile", isReadOnly: true, isStatic: false)
+                node.members["executionContexts"] = .property(name: "executionContexts", type: "Set<ExecutionContext>", isReadOnly: false, isStatic: false)
+            }
+            // Fix VoicesOverridesBase
+            if let node = modules["ModelCatalog"]?.nestedTypes["VoicesOverridesBase"] {
+                node.members["id"] = .property(name: "id", type: "String", isReadOnly: true, isStatic: false)
+                node.members["inferenceProviders"] = .property(name: "inferenceProviders", type: "Set<InferenceProvider>", isReadOnly: true, isStatic: false)
+                node.members["cost"] = .property(name: "cost", type: "CostProfile", isReadOnly: true, isStatic: false)
+                node.members["executionContexts"] = .property(name: "executionContexts", type: "Set<ExecutionContext>", isReadOnly: false, isStatic: false)
+            }
+            // Fix AssetBackedVoicesOverridesBase
+            if let node = modules["ModelCatalog"]?.nestedTypes["AssetBackedVoicesOverridesBase"] {
+                node.members["id"] = .property(name: "id", type: "String", isReadOnly: true, isStatic: false)
+                node.members["inferenceProviders"] = .property(name: "inferenceProviders", type: "Set<InferenceProvider>", isReadOnly: true, isStatic: false)
+                node.members["cost"] = .property(name: "cost", type: "CostProfile", isReadOnly: true, isStatic: false)
+                node.members["executionContexts"] = .property(name: "executionContexts", type: "Set<ExecutionContext>", isReadOnly: false, isStatic: false)
+            }
+            // Fix XPCServiceClientConnection
+            if let node = modules["ModelCatalog"]?.nestedTypes["XPCServiceClientConnection"] {
+                node.members["typealias Service"] = .associatedType("public typealias Service = A")
+                node.members["callAsyncSignature"] = .method(name: "call", signature: "call<GenericA>(_ arg1: (Any, (Optional<GenericA>, Optional<Error>) -> ()) -> ()) async throws -> GenericA", isStatic: false)
+            }
+            // Fix BidirectionalXPCServiceClientConnection
+            if let node = modules["ModelCatalog"]?.nestedTypes["BidirectionalXPCServiceClientConnection"] {
+                node.members["typealias LocalService"] = .associatedType("public typealias LocalService = A")
+                node.members["typealias RemoteService"] = .associatedType("public typealias RemoteService = B")
+            }
+            // Fix CatalogService
+            if let node = modules["ModelCatalog"]?.nestedTypes["CatalogService"] {
+                node.members["typealias Interface"] = .associatedType("public typealias Interface = Any")
+                node.members["customize"] = .method(name: "customize", signature: "customize(serverInterface: NSXPCInterface) -> ()", isStatic: true)
+            }
+            // Fix LLMAdapterBase
+            if let node = modules["ModelCatalog"]?.nestedTypes["LLMAdapterBase"] {
+                node.members["dependencies"] = .property(name: "dependencies", type: "Array<any ManagedResource>", isReadOnly: true, isStatic: false)
+                node.members["runtimeInformation"] = .property(name: "runtimeInformation", type: "Array<ManagedRuntimeInformation>", isReadOnly: true, isStatic: false)
+            }
+            // Fix LLMModelBase
+            if let node = modules["ModelCatalog"]?.nestedTypes["LLMModelBase"] {
+                node.members["dependencies"] = .property(name: "dependencies", type: "Array<any ManagedResource>", isReadOnly: true, isStatic: false)
+                node.members["runtimeInformation"] = .property(name: "runtimeInformation", type: "Array<ManagedRuntimeInformation>", isReadOnly: true, isStatic: false)
+            }
+        }
+        
+        // Automatically inherit protocol members for conforming concrete types if they are missing
+        func findTypeNode(byName name: String) -> TypeNode? {
+            var cleanName = name.trimmingCharacters(in: .whitespaces)
+            if cleanName.hasPrefix("any ") {
+                cleanName = String(cleanName.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+            } else if cleanName.hasPrefix("some ") {
+                cleanName = String(cleanName.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+            }
+            let shortName = cleanName.components(separatedBy: ".").last ?? cleanName
+            for module in modules.values {
+                if let node = module.nestedTypes[shortName] {
+                    return node
+                }
+            }
+            return nil
+        }
+
+        func inheritProtocolMembers(node: TypeNode) {
+            if node.kind == "struct" || node.kind == "enum" {
+                for conf in node.conformances {
+                    if let protoNode = findTypeNode(byName: conf), protoNode.kind == "protocol" {
+                        for (memberKey, memberVal) in protoNode.members {
+                            let nameToCheck: String
+                            switch memberVal {
+                            case .property(let n, _, _, _):
+                                nameToCheck = n
+                            case .method(let n, _, _):
+                                nameToCheck = n
+                            default:
+                                continue
+                            }
+                            
+                            var hasMember = false
+                            for existingVal in node.members.values {
+                                switch existingVal {
+                                case .property(let n, _, _, _):
+                                    if n == nameToCheck { hasMember = true }
+                                case .method(let n, _, _):
+                                    if n == nameToCheck { hasMember = true }
+                                default:
+                                    break
+                                }
+                            }
+                            for existingVal in node.extensionMembers.values {
+                                switch existingVal {
+                                case .property(let n, _, _, _):
+                                    if n == nameToCheck { hasMember = true }
+                                case .method(let n, _, _):
+                                    if n == nameToCheck { hasMember = true }
+                                default:
+                                    break
+                                }
+                            }
+                            
+                            if !hasMember {
+                                node.members[memberKey] = memberVal
+                            }
+                        }
+                    }
+                }
+            }
+            for child in node.nestedTypes.values {
+                inheritProtocolMembers(node: child)
+            }
+        }
+
+        for module in modules.values {
+            for type in module.nestedTypes.values {
+                inheritProtocolMembers(node: type)
+            }
+        }
+    }
+
     func generateAll() -> String {
+        applyTypeFixups()
+        fputs("discoveredProtocols: \(discoveredProtocols)\n", stderr)
         // Set all referenced but undefined types to struct
         func defaultUnknownTypes(node: TypeNode) {
             if node.kind == "unknown" {
                 node.kind = "struct"
+                discoveredConcreteTypes.insert(node.name)
             }
             for nested in node.nestedTypes.values {
                 defaultUnknownTypes(node: nested)
@@ -894,6 +1101,14 @@ class Parser {
             if !definedTypes.contains(moduleName) {
                 output += "public typealias \(moduleName) = \(moduleName)_Namespace\n"
             }
+            
+            if moduleName == "__C" {
+                for type in sortedTypes {
+                    let flattenedName = "\(moduleName)_\(type.name)"
+                    if !definedTypes.contains(flattenedName) { continue }
+                    output += "public typealias \(type.name) = \(flattenedName)\n"
+                }
+            }
         }
         
         // Phase 4: Generate generic typealiases mapping flattened names to imported module types, OR stubs if missing
@@ -927,15 +1142,16 @@ class Parser {
         let referenced = output.scanReferencedTypes()
         var referencedTypes = Set<String>()
         var protocolRefTypes = Set<String>()
-        var genericRefTypes = Set<String>()
+        var genericCounts = [String: Int]()
         
         for item in referenced {
             referencedTypes.insert(item.typeName)
             if item.isProtocol {
                 protocolRefTypes.insert(item.typeName)
             }
-            if item.isGeneric {
-                genericRefTypes.insert(item.typeName)
+            if item.genericCount > 0 {
+                let currentMax = genericCounts[item.typeName] ?? 0
+                genericCounts[item.typeName] = max(currentMax, item.genericCount)
             }
         }
         
@@ -948,16 +1164,23 @@ class Parser {
             "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
             "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
             "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
-            "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable",
+            "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Identifiable",
             "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
             "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
             "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
-            "AnySequence", "FloatingPointRoundingRule", "Task", "Mutex", "CustomStringConvertible", "CustomDebugStringConvertible", "CodingKey"
+            "AnySequence", "FloatingPointRoundingRule", "Task", "Mutex", "CustomStringConvertible", "CustomDebugStringConvertible", "CodingKey",
+            "ExpressibleByExtendedGraphemeClusterLiteral", "ExpressibleByStringLiteral", "ExpressibleByUnicodeScalarLiteral",
+            "ExpressibleByIntegerLiteral", "ExpressibleByFloatLiteral", "ExpressibleByBooleanLiteral",
+            "ExpressibleByNilLiteral", "ExpressibleByArrayLiteral", "ExpressibleByDictionaryLiteral",
+            "LocalizedError", "CustomNSError", "Logger", "NSXPCConnection", "NSXPCInterface", "Protocol", "NSCopying",
+            "Swift", "Foundation", "CoreFoundation", "Metal", "IOSurface", "CoreGraphics", "CoreVideo", "CoreMedia", "CoreImage", "CoreML", "Dispatch", "os", "ObjectiveC", "Synchronization",
+            "Strideable", "AdditiveArithmetic", "BinaryFloatingPoint", "FloatingPoint", "FloatingPointSign", "Numeric", "SignedNumeric",
+            "MTLDevice", "MTLBuffer", "MTLTexture", "IOSurfaceRef", "CVBufferRef", "CVBuffer"
         ]
         
         let sortedTypes = referencedTypes.sorted()
         for type in sortedTypes {
-            if systemTypes.contains(type) { continue }
+            if systemTypes.contains(type) || type == defaultModule || type == "___SHIELDED_\(defaultModule)___" || discoveredNamespaces.contains(type) { continue }
             if type.count == 1 { continue }
             if type.hasPrefix("JSON") { continue }
             
@@ -965,14 +1188,19 @@ class Parser {
             let isDefined = allDefinedInOutput.contains(type)
             if !isDefined {
                 // Check if used with "any" or ends with "_P"
-                let isProtocolRef = protocolRefTypes.contains(type) || type.hasSuffix("_P")
+                let isProtocolRef = protocolRefTypes.contains(type) || type.hasSuffix("_P") || ConfigManager.shared.protocolShims.contains(type)
                 if isProtocolRef {
                     stubs += "public protocol \(type) {}\n"
                 } else {
                     // Check if used as generic in the output
-                    let isGenericRef = genericRefTypes.contains(type)
-                    if isGenericRef {
-                        stubs += "public struct \(type)<T>: Hashable, Codable, Sendable {}\n"
+                    let gc = genericCounts[type] ?? 0
+                    if gc > 0 {
+                        let placeholders = ["T", "U", "V", "W", "X", "Y", "Z"]
+                        var params = [String]()
+                        for j in 0..<gc {
+                            params.append(j < placeholders.count ? placeholders[j] : "T\(j)")
+                        }
+                        stubs += "public struct \(type)<\(params.joined(separator: ", "))>: Hashable, Codable, Sendable {}\n"
                     } else {
                         stubs += "public struct \(type): Hashable, Codable, Sendable {}\n"
                     }
@@ -1040,9 +1268,28 @@ class Parser {
                 if mangled.hasSuffix("OMn") { kind = "enum" }
                 else if mangled.hasSuffix("VMn") { kind = "struct" }
                 else if mangled.hasSuffix("CMn") { kind = "class" }
+            } else if demangled.hasPrefix("type metadata for ") {
+                path = demangled.replacingOccurrences(of: "type metadata for ", with: "")
+                if mangled.hasSuffix("ON") { kind = "enum" }
+                else if mangled.hasSuffix("VN") { kind = "struct" }
+                else if mangled.hasSuffix("CN") { kind = "class" }
             } else if demangled.hasPrefix("protocol descriptor for ") {
                 path = demangled.replacingOccurrences(of: "protocol descriptor for ", with: "")
                 kind = "protocol"
+            } else if demangled.contains("enum case for ") {
+                let d = demangled.replacingOccurrences(of: "enum case for ", with: "")
+                if let openParen = d.firstIndex(of: "(") {
+                    let fullPath = String(d[..<openParen]).trimmingCharacters(in: .whitespaces)
+                    let parts = fullPath.components(separatedBy: ".")
+                    if parts.count >= 2 {
+                        path = parts.dropLast().joined(separator: ".")
+                        kind = "enum"
+                    } else {
+                        continue
+                    }
+                } else {
+                    continue
+                }
             } else {
                 continue
             }
@@ -1074,10 +1321,235 @@ class Parser {
         var current = modules[module]!
         for part in path {
             if current.nestedTypes[part] == nil {
-                current.nestedTypes[part] = TypeNode(name: part)
+                let newNode = TypeNode(name: part)
+                newNode.parent = current
+                current.nestedTypes[part] = newNode
             }
             current = current.nestedTypes[part]!
         }
         return current
+    }
+
+    private func stripFunctionTypeLabels(_ t: String) -> String {
+        var result = ""
+        var i = t.startIndex
+        while i < t.endIndex {
+            if t[i] == "(" {
+                // Find matching parenthesis
+                var depth = 0
+                var j = i
+                var found = false
+                while j < t.endIndex {
+                    if t[j] == "(" {
+                        depth += 1
+                    } else if t[j] == ")" {
+                        depth -= 1
+                        if depth == 0 {
+                            found = true
+                            break
+                        }
+                    }
+                    j = t.index(after: j)
+                }
+                if found {
+                    let inner = String(t[t.index(after: i)..<j])
+                    let after = String(t[t.index(after: j)...])
+                    
+                    // Check if this paren is followed by -> (possibly with throws, async, etc.)
+                    let trimmedAfter = after.trimmingCharacters(in: .whitespaces)
+                    let isFuncType: Bool
+                    if trimmedAfter.hasPrefix("->") {
+                        isFuncType = true
+                    } else if trimmedAfter.hasPrefix("throws") || trimmedAfter.hasPrefix("async") {
+                        // Check if it has -> after throws/async
+                        var k = trimmedAfter.startIndex
+                        var hasArrow = false
+                        while k < trimmedAfter.endIndex {
+                            if trimmedAfter[k...].hasPrefix("->") {
+                                hasArrow = true
+                                break
+                            }
+                            k = trimmedAfter.index(after: k)
+                        }
+                        isFuncType = hasArrow
+                    } else {
+                        isFuncType = false
+                    }
+                    
+                    if isFuncType {
+                        // This is a function type!
+                        // Recursively clean the inner parameters
+                        let cleanedInner = cleanFuncParams(inner)
+                        // Also recursively clean the after part (since it contains the return type and rest)
+                        let cleanedAfter = stripFunctionTypeLabels(after)
+                        result += "(" + cleanedInner + ")" + cleanedAfter
+                        return result
+                    } else {
+                        // Not a function type paren (could be a tuple or grouping)
+                        // Recursively clean inside and continue
+                        let cleanedInner = stripFunctionTypeLabels(inner)
+                        result += "(" + cleanedInner + ")"
+                        i = t.index(after: j)
+                        continue
+                    }
+                }
+            }
+            result.append(t[i])
+            i = t.index(after: i)
+        }
+        return result
+    }
+
+    private func cleanFuncParams(_ s: String) -> String {
+        // Split s by commas at depth 0 of nested structures
+        var params = [String]()
+        var current = ""
+        var pDepth = 0
+        var aDepth = 0
+        var sDepth = 0
+        var i = s.startIndex
+        while i < s.endIndex {
+            let c = s[i]
+            if c == "(" { pDepth += 1 }
+            else if c == ")" { pDepth -= 1 }
+            else if c == "<" { aDepth += 1 }
+            else if c == ">" { aDepth -= 1 }
+            else if c == "[" { sDepth += 1 }
+            else if c == "]" { sDepth -= 1 }
+            
+            if c == "," && pDepth == 0 && aDepth == 0 && sDepth == 0 {
+                params.append(current)
+                current = ""
+            } else {
+                current.append(c)
+            }
+            i = s.index(after: i)
+        }
+        params.append(current)
+        
+        // Clean each param
+        let cleanedParams = params.map { param -> String in
+            let trimmed = param.trimmingCharacters(in: .whitespaces)
+            // Find colon at depth 0 in this parameter
+            var colonIndex: String.Index? = nil
+            var pDepth = 0
+            var aDepth = 0
+            var sDepth = 0
+            var j = trimmed.startIndex
+            while j < trimmed.endIndex {
+                let c = trimmed[j]
+                if c == "(" { pDepth += 1 }
+                else if c == ")" { pDepth -= 1 }
+                else if c == "<" { aDepth += 1 }
+                else if c == ">" { aDepth -= 1 }
+                else if c == "[" { sDepth += 1 }
+                else if c == "]" { sDepth -= 1 }
+                
+                if c == ":" && pDepth == 0 && aDepth == 0 && sDepth == 0 {
+                    colonIndex = j
+                    break
+                }
+                j = trimmed.index(after: j)
+            }
+            
+            if let colon = colonIndex {
+                // Strip label and recursively clean the type part
+                let typePart = String(trimmed[trimmed.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+                return stripFunctionTypeLabels(typePart)
+            } else {
+                return stripFunctionTypeLabels(trimmed)
+            }
+        }
+        
+        return cleanedParams.joined(separator: ", ")
+    }
+
+    private func stripLabelsFromMethodSignature(_ t: String) -> String {
+        guard t.hasPrefix("(") else { return stripFunctionTypeLabels(t) }
+        
+        // Find matching parenthesis for the top-level parameters
+        var depth = 0
+        var matchingIndex: String.Index? = nil
+        for (idx, char) in t.enumerated() {
+            if char == "(" {
+                depth += 1
+            } else if char == ")" {
+                depth -= 1
+                if depth == 0 {
+                    matchingIndex = t.index(t.startIndex, offsetBy: idx)
+                    break
+                }
+            }
+        }
+        guard let closeParen = matchingIndex else { return stripFunctionTypeLabels(t) }
+        
+        let paramsPart = String(t[t.index(after: t.startIndex)..<closeParen])
+        let afterPart = String(t[t.index(after: closeParen)...])
+        
+        let cleanedAfter = stripFunctionTypeLabels(afterPart)
+        let cleanedParams = cleanMethodParams(paramsPart)
+        
+        return "(" + cleanedParams + ")" + cleanedAfter
+    }
+
+    private func cleanMethodParams(_ s: String) -> String {
+        var params = [String]()
+        var current = ""
+        var pDepth = 0
+        var aDepth = 0
+        var sDepth = 0
+        var i = s.startIndex
+        while i < s.endIndex {
+            let c = s[i]
+            if c == "(" { pDepth += 1 }
+            else if c == ")" { pDepth -= 1 }
+            else if c == "<" { aDepth += 1 }
+            else if c == ">" { aDepth -= 1 }
+            else if c == "[" { sDepth += 1 }
+            else if c == "]" { sDepth -= 1 }
+            
+            if c == "," && pDepth == 0 && aDepth == 0 && sDepth == 0 {
+                params.append(current)
+                current = ""
+            } else {
+                current.append(c)
+            }
+            i = s.index(after: i)
+        }
+        params.append(current)
+        
+        let cleaned = params.map { param -> String in
+            let trimmed = param.trimmingCharacters(in: .whitespaces)
+            var colonIndex: String.Index? = nil
+            var pDepth = 0
+            var aDepth = 0
+            var sDepth = 0
+            var j = trimmed.startIndex
+            while j < trimmed.endIndex {
+                let c = trimmed[j]
+                if c == "(" { pDepth += 1 }
+                else if c == ")" { pDepth -= 1 }
+                else if c == "<" { aDepth += 1 }
+                else if c == ">" { aDepth -= 1 }
+                else if c == "[" { sDepth += 1 }
+                else if c == "]" { sDepth -= 1 }
+                
+                if c == ":" && pDepth == 0 && aDepth == 0 && sDepth == 0 {
+                    colonIndex = j
+                    break
+                }
+                j = trimmed.index(after: j)
+            }
+            
+            if let colon = colonIndex {
+                let labelPart = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
+                let typePart = String(trimmed[trimmed.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+                let cleanedType = stripFunctionTypeLabels(typePart)
+                return labelPart + ": " + cleanedType
+            } else {
+                return stripFunctionTypeLabels(trimmed)
+            }
+        }
+        return cleaned.joined(separator: ", ")
     }
 }

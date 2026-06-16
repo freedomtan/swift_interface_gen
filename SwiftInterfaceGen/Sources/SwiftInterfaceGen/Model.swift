@@ -25,9 +25,29 @@ class TypeNode {
     var baseClass: String?
     var rawType: String?
     var finalMembers: Set<String> = []
+    weak var parent: TypeNode? = nil
+
+    func hasConformance(_ proto: String) -> Bool {
+        return conformances.contains(proto) || 
+               conformances.contains("Swift.\(proto)") || 
+               conformances.contains("any \(proto)") || 
+               conformances.contains("any Swift.\(proto)")
+    }
 
     init(name: String) {
         self.name = name
+    }
+
+    func getEnclosingPath() -> String {
+        var path = [String]()
+        var curr = parent
+        while let p = curr {
+            if p.parent != nil {
+                path.insert(p.name, at: 0)
+            }
+            curr = p.parent
+        }
+        return path.joined(separator: ".")
     }
 
     private func escapeKeyword(_ name: String) -> String {
@@ -50,7 +70,8 @@ class TypeNode {
     static func defaultReturnValue(for type: String) -> String {
         let t = type.trimmingCharacters(in: .whitespaces)
         if t == "Bool" { return "false" }
-        if ["Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64", "Double", "Float", "Float16", "CGFloat"].contains(t) { return "0" }
+        if ["Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64"].contains(t) { return "0" }
+        if ["Double", "Float", "Float16", "CGFloat"].contains(t) { return "fatalError()" }
         if t == "String" { return "\"\"" }
         if t == "StaticString" { return "\"\"" }
         if t.starts(with: "Array<") || t.starts(with: "[") { return "[]" }
@@ -69,6 +90,57 @@ class TypeNode {
         let actualKind = kind == "unknown" ? "struct" : kind
         let isProtocol = actualKind == "protocol"
         let isEnum = actualKind == "enum"
+        
+        if !isProtocol && !isEnum {
+            var hasCatalogResource = false
+            var hasManagedResource = false
+            var hasIdentifiable = false
+            for conf in conformances {
+                let cleanConf = conf.trimmingCharacters(in: .whitespaces)
+                if cleanConf == "CatalogResource" || cleanConf.hasPrefix("CatalogResource<") || cleanConf.hasPrefix("any CatalogResource") {
+                    hasCatalogResource = true
+                }
+                if cleanConf == "ManagedResource" || cleanConf.hasPrefix("ManagedResource<") || cleanConf.hasPrefix("any ManagedResource") {
+                    hasManagedResource = true
+                }
+                if cleanConf == "Identifiable" || cleanConf.hasPrefix("any Identifiable") {
+                    hasIdentifiable = true
+                }
+            }
+            if hasCatalogResource {
+                if members["typealias A"] == nil && members["A"] == nil {
+                    members["typealias A"] = .associatedType("public typealias A = Any")
+                }
+                if members["id"] == nil {
+                    members["id"] = .property(name: "id", type: "String", isReadOnly: true, isStatic: false)
+                }
+                if members["inferenceProviders"] == nil {
+                    members["inferenceProviders"] = .property(name: "inferenceProviders", type: "Set<InferenceProvider>", isReadOnly: true, isStatic: false)
+                }
+            }
+            if hasManagedResource {
+                if members["typealias A"] == nil && members["A"] == nil {
+                    members["typealias A"] = .associatedType("public typealias A = Any")
+                }
+                if members["cost"] == nil {
+                    members["cost"] = .property(name: "cost", type: "CostProfile", isReadOnly: true, isStatic: false)
+                }
+                if members["executionContexts"] == nil {
+                    members["executionContexts"] = .property(name: "executionContexts", type: "Set<ExecutionContext>", isReadOnly: false, isStatic: false)
+                }
+                if members["dependencies"] == nil {
+                    members["dependencies"] = .property(name: "dependencies", type: "Array<any ManagedResource>", isReadOnly: true, isStatic: false)
+                }
+                if members["runtimeInformation"] == nil {
+                    members["runtimeInformation"] = .property(name: "runtimeInformation", type: "Array<ManagedRuntimeInformation>", isReadOnly: true, isStatic: false)
+                }
+            }
+            if hasIdentifiable {
+                if members["id"] == nil {
+                    members["id"] = .property(name: "id", type: "String", isReadOnly: true, isStatic: false)
+                }
+            }
+        }
         
         var inScope = Set<String>()
         if isGeneric {
@@ -126,22 +198,69 @@ class TypeNode {
             inherits.append(raw)
         }
         
-        var filteredConformances = Set(conformances)
-        if filteredConformances.contains("Codable") {
-            filteredConformances.remove("Decodable")
-            filteredConformances.remove("Encodable")
+        var cleanConformances = Set<String>()
+        for conf in conformances {
+            var clean = conf.trimmingCharacters(in: .whitespaces)
+            if clean.hasPrefix("any ") {
+                clean = String(clean.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+            }
+            if clean.hasPrefix("Swift.") {
+                clean = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            }
+            if let parser = parser {
+                let baseName = clean.stripGenericAngles()
+                if parser.discoveredProtocols.contains(baseName) || 
+                   parser.discoveredProtocols.contains(where: { $0.hasSuffix("." + baseName) }) ||
+                   baseName.hasSuffix("_P") || 
+                   ConfigManager.shared.protocolShims.contains(baseName) {
+                    clean = baseName
+                }
+            }
+            cleanConformances.insert(clean)
         }
-        if filteredConformances.contains("Hashable") {
-            filteredConformances.remove("Equatable")
+        
+        if cleanConformances.contains("Codable") {
+            cleanConformances.remove("Decodable")
+            cleanConformances.remove("Encodable")
+        }
+        if cleanConformances.contains("Hashable") {
+            cleanConformances.remove("Equatable")
         }
         if isEnum && !hasCases {
-            filteredConformances.remove("Codable")
-            filteredConformances.remove("Decodable")
-            filteredConformances.remove("Encodable")
+            cleanConformances.remove("Codable")
+            cleanConformances.remove("Decodable")
+            cleanConformances.remove("Encodable")
         }
-        inherits.append(contentsOf: filteredConformances.sorted())
+        inherits.append(contentsOf: cleanConformances.sorted())
         
-        var inheritsList = inherits
+        var inheritsList = inherits.map { t in
+            var clean = t.trimmingCharacters(in: .whitespaces)
+            if clean.hasPrefix("any ") {
+                clean = String(clean.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+            }
+            if clean.hasPrefix("Swift.") {
+                clean = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            }
+            if let parser = parser {
+                let baseName = clean.stripGenericAngles()
+                if parser.discoveredProtocols.contains(baseName) || 
+                   parser.discoveredProtocols.contains(where: { $0.hasSuffix("." + baseName) }) ||
+                   baseName.hasSuffix("_P") || 
+                   ConfigManager.shared.protocolShims.contains(baseName) {
+                    clean = baseName
+                }
+            }
+            return clean
+        }
+        var seen = Set<String>()
+        inheritsList = inheritsList.filter { seen.insert($0).inserted }
+        if actualKind == "struct" || actualKind == "class" || actualKind == "enum" {
+            let forbiddenProtocols: Set<String> = [
+                "AdditiveArithmetic", "BinaryFloatingPoint", "Comparable", "ExpressibleByFloatLiteral",
+                "ExpressibleByIntegerLiteral", "FloatingPoint", "Numeric", "SignedNumeric", "Strideable"
+            ]
+            inheritsList = inheritsList.filter { !forbiddenProtocols.contains($0) }
+        }
         if actualKind == "class" {
             inheritsList = inheritsList.filter { !["Hashable", "Codable", "Sendable", "Equatable"].contains($0) }
         }
@@ -220,7 +339,6 @@ class TypeNode {
         }
 
         for member in sortedMembers {
-            let isClassOrProtocol = actualKind == "class" || actualKind == "protocol"
             let isOverride: Bool
             switch member {
             case .initializer(let sig):
@@ -237,6 +355,12 @@ class TypeNode {
             
             switch member {
             case .enumCase(let name, let payload):
+                var indirectPrefix = ""
+                if self.kind == "enum", let payload = payload {
+                    if payload.replaceWord(self.name, with: "").count < payload.count {
+                        indirectPrefix = "indirect "
+                    }
+                }
                 if let payload = payload {
                     var topLevelCommas = 0
                     var depth = 0
@@ -248,9 +372,9 @@ class TypeNode {
                         }
                     }
                     if topLevelCommas == 0 {
-                        lines.append("\(nextIndent)case \(escapeKeyword(name))(_: \(payload))")
+                        lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(_: \(payload))")
                     } else {
-                        lines.append("\(nextIndent)case \(escapeKeyword(name))(\(payload))")
+                        lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(\(payload))")
                     }
                 } else {
                     lines.append("\(nextIndent)case \(escapeKeyword(name))")
@@ -280,11 +404,7 @@ class TypeNode {
                 // Strip the parent's fully qualified prefix from any nested types
                 cleanT = cleanT.stripParentPrefix(parentName: self.name)
 
-                if !isClassOrProtocol {
-                    cleanT = cleanT.replaceSelfPattern(parentName: self.name, replaceWith: "Self")
-                } else {
-                    cleanT = cleanT.replaceSelfPattern(parentName: self.name, replaceWith: self.name)
-                }
+                cleanT = cleanT.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: self.name)
 
                 if let brace = cleanT.firstIndex(of: "{") {
                     cleanT = String(cleanT[..<brace]).trimmingCharacters(in: .whitespaces)
@@ -312,6 +432,7 @@ class TypeNode {
                 }
             case .method(let n, let sig, let isStatic):
                 var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
+                let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
                 
                 var fixModifier = ""
                 if cleanedSig.contains(" prefix(") {
@@ -325,11 +446,7 @@ class TypeNode {
                 // Strip the parent's fully qualified prefix from any nested types
                 cleanedSig = cleanedSig.stripParentPrefix(parentName: self.name)
                 
-                if !isClassOrProtocol {
-                    cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, replaceWith: "Self")
-                } else {
-                    cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, replaceWith: self.name)
-                }
+                cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: self.name)
                 
                 if isProtocol {
                     cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
@@ -339,7 +456,7 @@ class TypeNode {
                 }
                 cleanedSig = cleanScope(cleanedSig)
                 
-                if n == "==" && (sig.contains(".Type") || sig.contains(".`Type`")) {
+                if cleanN == "==" && (sig.contains(".Type") || sig.contains(".`Type`")) {
                     continue
                 }
 
@@ -389,7 +506,7 @@ class TypeNode {
                 cleanedSig = cleanedSig.replacingOccurrences(of: "Iterator<GenericA>", with: "Iterator")
                 cleanedSig = cleanedSig.replacingOccurrences(of: "Iterator<Any>", with: "Iterator")
 
-                if n == "==" && cleanedSig.contains("(") {
+                if cleanN == "==" && cleanedSig.contains("(") {
                     if isProtocol { continue }
                     
                     let parts = cleanedSig.components(separatedBy: "(")
@@ -450,29 +567,109 @@ class TypeNode {
         }
 
         // Add explicit conformance stubs for non-protocol types IF not already provided
-        if !isProtocol && !isEnum {
+        if !isProtocol {
             let hasInitFrom = members.values.contains { if case .initializer(let s) = $0, s.contains("init(from:") { return true }; return false }
             let hasEncodeTo = members.values.contains { if case .method(let n, _, _) = $0, n == "encode" { return true }; return false }
             let hasHashInto = members.values.contains { if case .method(let n, _, _) = $0, n == "hash" { return true }; return false }
 
-            if (conformances.contains("Decodable") || conformances.contains("Codable")) && !hasInitFrom {
-                lines.append("\(nextIndent)public init(from decoder: any Decoder) throws {}")
+            if (hasConformance("Decodable") || hasConformance("Codable")) && !hasInitFrom {
+                lines.append("\(nextIndent)public init(from decoder: any Decoder) throws { fatalError() }")
             }
-            if (conformances.contains("Encodable") || conformances.contains("Codable")) && !hasEncodeTo {
-                lines.append("\(nextIndent)public func encode(to encoder: any Encoder) throws { fatalError() }")
+            if (hasConformance("Encodable") || hasConformance("Codable")) && !hasEncodeTo {
+                lines.append("\(nextIndent)public func encode(to encoder: Encoder) throws { fatalError() }")
             }
-            if conformances.contains("Hashable") && !hasHashInto {
+            if hasConformance("Hashable") && !hasHashInto {
                 lines.append("\(nextIndent)public func hash(into hasher: inout Hasher) { fatalError() }")
+            }
+            if (hasConformance("Hashable") || hasConformance("Equatable")) && !hasEqualityOperator() {
+                lines.append("\(nextIndent)public static func ==(_ lhs: \(escapeKeyword(n)), _ rhs: \(escapeKeyword(n))) -> Bool { fatalError() }")
+            }
+            if hasConformance("Comparable") && !hasLessThanOperator() {
+                lines.append("\(nextIndent)public static func <(_ lhs: \(escapeKeyword(n)), _ rhs: \(escapeKeyword(n))) -> Bool { fatalError() }")
+            }
+            if hasConformance("CustomStringConvertible") && !hasDescriptionProperty() {
+                lines.append("\(nextIndent)public var description: String { get { return \"\" } }")
             }
         }
         
         lines.append("\(indent)}")
         
+        return lines.joined(separator: "\n")
+    }
+
+    func hasEqualityOperator() -> Bool {
+        for member in Array(members.values) + Array(extensionMembers.values) {
+            if case .method(let n, _, _) = member {
+                let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
+                if cleanN == "==" {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    func hasLessThanOperator() -> Bool {
+        for member in Array(members.values) + Array(extensionMembers.values) {
+            if case .method(let n, _, _) = member {
+                let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
+                if cleanN == "<" {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    func hasDescriptionProperty() -> Bool {
+        return members["description"] != nil
+    }
+
+    func generateExtensions(defaultModule: String, parser: Parser? = nil, path: String = "") -> String {
+        var output = ""
+        let separator = (path.isEmpty || path.hasSuffix("_")) ? "" : "."
+        let currentPath = path.isEmpty ? name : path + separator + name
+        
         if !extensionMembers.isEmpty {
+            var inScope = Set<String>()
+            if isGeneric {
+                let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                var count = 1
+                if let parser = parser {
+                    let fullPath1 = defaultModule + "." + name
+                    let fullPath2 = name
+                    if let inferredCount = parser.discoveredGenerics[fullPath1] {
+                        count = inferredCount
+                    } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
+                        count = inferredCount
+                    }
+                }
+                for i in 0..<count {
+                    inScope.insert(i < placeholders.count ? placeholders[i] : "A\(i)")
+                }
+            }
+            for member in members.values {
+                if case .associatedType(let code) = member {
+                    let parts = code.components(separatedBy: " ")
+                    if parts.count >= 2 {
+                        inScope.insert(parts[1].trimmingCharacters(in: .whitespaces))
+                    }
+                }
+            }
+            let cleanScope = { (s: String) -> String in
+                var res = s
+                let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                for p in placeholders {
+                    if !inScope.contains(p) {
+                        res = res.replaceWord(p, with: "Any")
+                    }
+                }
+                return res
+            }
+
             var extLines = [String]()
-            extLines.append("")
-            extLines.append("\(indent)extension \(escapeKeyword(n)) {")
-            let extNextIndent = indent + "    "
+            extLines.append("extension \(currentPath) {")
+            let extNextIndent = "    "
             
             let sortedExt = extensionMembers.values.sorted(by: { 
                 switch ($0, $1) {
@@ -490,7 +687,7 @@ class TypeNode {
                     var cleanedSig = sig
                     cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
                     cleanedSig = cleanScope(cleanedSig)
-                    extLines.append("\(extNextIndent)public \(cleanedSig) {}")
+                    extLines.append("\(extNextIndent)public \(cleanedSig) { fatalError() }")
                 case .property(let n, let t, let isReadOnly, let isStatic):
                     var cleanT = t
                     cleanT = cleanT.stripParentPrefix(parentName: self.name)
@@ -520,28 +717,9 @@ class TypeNode {
                     break
                 }
             }
-            extLines.append("\(indent)}")
-            lines.append(extLines.joined(separator: "\n"))
+            extLines.append("}")
+            output += extLines.joined(separator: "\n") + "\n\n"
         }
-        
-        return lines.joined(separator: "\n")
-    }
-
-    func hasEqualityOperator() -> Bool {
-        for member in members.values {
-            if case .method(let n, let sig, _) = member {
-                if n == "==" || n.contains("==") || sig.starts(with: "==") {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-
-    func generateExtensions(defaultModule: String, parser: Parser? = nil, path: String = "") -> String {
-        var output = ""
-        let separator = (path.isEmpty || path.hasSuffix("_")) ? "" : "."
-        let currentPath = path.isEmpty ? name : path + separator + name
         
         if kind == "protocol" {
              let sortedNested = nestedTypes.values.sorted(by: { $0.name < $1.name })
@@ -550,7 +728,7 @@ class TypeNode {
              }
         }
 
-        if kind == "class" && baseClass != "NSObject" && !conformances.contains("NSObject") {
+        if kind == "class" && baseClass != "NSObject" && !hasConformance("NSObject") {
              if hasEqualityOperator() {
                  output += "extension \(currentPath): Equatable {}\n"
              } else {

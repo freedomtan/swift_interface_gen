@@ -557,14 +557,15 @@ extension String {
     // selfPattern1: \b([a-zA-Z0-9_]+\.)+\(self.name)<[^>]+> -> Self
     // selfPattern2: \b([a-zA-Z0-9_]+\.)+\(self.name)\b -> Self
     // prefixPattern: \b([a-zA-Z0-9_]+\.)+\(self.name)\b -> self.name
-    func replaceSelfPattern(parentName: String, replaceWith: String) -> String {
+    func replaceSelfPattern(parentName: String, enclosingPath: String, replaceWith: String) -> String {
         var result = self
         var startSearch = result.startIndex
         while let range = result.range(of: parentName, range: startSearch..<result.endIndex) {
             var isValidPrefix = false
             var prefixStartIdx = range.lowerBound
+            var beforeDotIdx = range.lowerBound
             if range.lowerBound > result.startIndex {
-                let beforeDotIdx = result.index(before: range.lowerBound)
+                beforeDotIdx = result.index(before: range.lowerBound)
                 if result[beforeDotIdx] == "." {
                     var scanIdx = beforeDotIdx
                     while scanIdx > result.startIndex {
@@ -602,6 +603,16 @@ extension String {
                         } else {
                             break
                         }
+                    }
+                }
+            }
+            
+            if isValidPrefix {
+                // If this is a nested type with a non-empty enclosing path, verify the scanned prefix ends with enclosingPath + "."
+                if !enclosingPath.isEmpty {
+                    let scannedPrefix = String(result[prefixStartIdx...beforeDotIdx])
+                    if !scannedPrefix.hasSuffix(enclosingPath + ".") {
+                        isValidPrefix = false
                     }
                 }
             }
@@ -662,11 +673,23 @@ extension String {
         return t
     }
 
-    // 17. hasGenericPlaceholderInBrackets: checks if the string contains a generic placeholder whole-word inside <...>
+    // 17. hasGenericPlaceholderInBrackets: checks if the string contains a generic placeholder whole-word inside <...> before the first '('
     func hasGenericPlaceholderInBrackets(p: String) -> Bool {
         guard let openIdx = self.firstIndex(of: "<"),
               let closeIdx = self.firstIndex(of: ">"),
               openIdx < closeIdx else { return false }
+        
+        let afterIdx = self.index(after: openIdx)
+        guard afterIdx < self.endIndex else { return false }
+        let nextChar = self[afterIdx]
+        guard nextChar.isLetter else {
+            return false
+        }
+        
+        if let parenIdx = self.firstIndex(of: "("), parenIdx < openIdx {
+            return false
+        }
+        
         let inside = String(self[self.index(after: openIdx)..<closeIdx])
         
         let variations = [p, "\(p)1", "\(p)2", "\(p)3", "\(p)4"]
@@ -855,8 +878,10 @@ extension String {
         return result
     }
 
-    // 21. stripInvalidAnyPrefixes: removes 'any' keyword before concrete types
-    func stripInvalidAnyPrefixes(concreteTypes: Set<String>) -> String {
+    // 21. stripInvalidAnyPrefixes: removes 'any' keyword before concrete types that are NOT also protocols.
+    // If a type name appears in both concreteTypes and protocolNames (e.g. ResourceBundle, which is both
+    // a protocol and a nested enum), we keep the 'any' prefix since the usage is existential.
+    func stripInvalidAnyPrefixes(concreteTypes: Set<String>, protocolNames: Set<String> = []) -> String {
         var result = self
         var startSearch = result.startIndex
         while let range = result.range(of: "any ", range: startSearch..<result.endIndex) {
@@ -876,7 +901,7 @@ extension String {
             var scanIdx = range.upperBound
             while scanIdx < result.endIndex {
                 let char = result[scanIdx]
-                let isIdentChar = char.isLetter || char.isNumber || char == "_" || char == "$"
+                let isIdentChar = char.isLetter || char.isNumber || char == "_" || char == "$" || char == "."
                 if isIdentChar {
                     scanIdx = result.index(after: scanIdx)
                 } else {
@@ -885,15 +910,24 @@ extension String {
             }
             
             let typeNameRange = range.upperBound..<scanIdx
-            let fullType = String(result[typeNameRange])
+            var fullType = String(result[typeNameRange])
+            if fullType.hasSuffix(".") {
+                fullType = String(fullType.dropLast())
+            }
             
             if !fullType.isEmpty {
-                var baseType = fullType
-                if let underscoreIdx = fullType.firstIndex(of: "_") {
-                    baseType = String(fullType[result.index(after: underscoreIdx)...])
+                let lastComponent = fullType.components(separatedBy: ".").last!
+                var baseType = lastComponent
+                if let underscoreIdx = lastComponent.firstIndex(of: "_") {
+                    baseType = String(lastComponent[result.index(after: underscoreIdx)...])
                 }
                 
-                if concreteTypes.contains(baseType) || concreteTypes.contains(fullType) {
+                let isConcrete = concreteTypes.contains(baseType) || concreteTypes.contains(lastComponent)
+                // Don't strip if this type is ALSO a protocol (e.g. ResourceBundle is both a
+                // concrete nested enum AND a top-level protocol — keep 'any' for the protocol usage)
+                let isAlsoProtocol = protocolNames.contains(lastComponent) || protocolNames.contains(baseType)
+                
+                if isConcrete && !isAlsoProtocol {
                     result.replaceSubrange(range, with: "")
                     startSearch = range.lowerBound
                     continue
@@ -904,7 +938,213 @@ extension String {
         return result
     }
 
-    // 22. applyDiscoveredGenerics: appends generic placeholders to types found in flatGenerics/shortGenerics
+    // 22. addAnyToProtocolExistentials: inserts 'any' before known protocol names used in existential positions.
+    // Accepts a pre-filtered set of unambiguous protocol short names (no same-named top-level concrete type).
+    // Handles: Array<Proto>, Optional<Proto>, -> Proto, : Proto, = Proto, (Proto, etc.
+    // Skips: protocol Proto, extension Proto declaration contexts.
+    func addAnyToProtocolExistentials(protocols shortProtos: Set<String>) -> String {
+        guard !shortProtos.isEmpty else { return self }
+        var result = self
+        
+        for proto in shortProtos.sorted(by: { $0.count > $1.count }) {
+            var startSearch = result.startIndex
+            while let range = result.range(of: proto, range: startSearch..<result.endIndex) {
+                // Word boundary check: not preceded by an identifier char
+                let isWordCharBefore: Bool
+                if range.lowerBound > result.startIndex {
+                    let prevChar = result[result.index(before: range.lowerBound)]
+                    isWordCharBefore = prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$"
+                } else {
+                    isWordCharBefore = false
+                }
+                
+                // Word boundary check: not followed by an identifier char
+                let isWordCharAfter: Bool
+                if range.upperBound < result.endIndex {
+                    let nextChar = result[range.upperBound]
+                    isWordCharAfter = nextChar.isLetter || nextChar.isNumber || nextChar == "_" || nextChar == "$"
+                } else {
+                    isWordCharAfter = false
+                }
+                
+                guard !isWordCharBefore && !isWordCharAfter else {
+                    startSearch = range.upperBound
+                    continue
+                }
+                
+                // Check if already preceded by 'any '
+                var alreadyHasAny = false
+                if range.lowerBound >= result.index(result.startIndex, offsetBy: 4, limitedBy: result.endIndex) ?? result.startIndex {
+                    let anyEnd = range.lowerBound
+                    let anyStart = result.index(anyEnd, offsetBy: -4)
+                    if String(result[anyStart..<anyEnd]) == "any " {
+                        alreadyHasAny = true
+                    }
+                }
+                
+                if alreadyHasAny {
+                    startSearch = range.upperBound
+                    continue
+                }
+                
+                // Check if this is a declaration site (preceded by struct/class/protocol/extension/typealias/enum)
+                // Scan backwards skipping whitespace to find the preceding word
+                var scanBack = range.lowerBound
+                while scanBack > result.startIndex {
+                    let prevIdx = result.index(before: scanBack)
+                    let prevChar = result[prevIdx]
+                    if prevChar.isWhitespace {
+                        scanBack = prevIdx
+                    } else {
+                        break
+                    }
+                }
+                // Collect the preceding keyword
+                let kwEnd = scanBack
+                var kwStart = scanBack
+                while kwStart > result.startIndex {
+                    let prevIdx = result.index(before: kwStart)
+                    let prevChar = result[prevIdx]
+                    if prevChar.isLetter {
+                        kwStart = prevIdx
+                    } else {
+                        break
+                    }
+                }
+                let prevKeyword = String(result[kwStart..<kwEnd])
+                
+                if ["struct", "class", "protocol", "extension", "typealias", "enum", "import"].contains(prevKeyword) {
+                    startSearch = range.upperBound
+                    continue
+                }
+                
+                // Also skip if it's a conformance position in a type declaration header:
+                // i.e., after `: ` following a type name (like `struct Foo: Proto {`)
+                // We approximate: if preceded by `, ` or `: ` at the *declaration* level — but this is complex.
+                // Instead, check if the proto appears as an inheriting conformance on the LHS of `{`:
+                // Simpler heuristic: check character 2 positions back (skip whitespace) for colon
+                // and if we're at top indentation level (very hard without AST).
+                // We accept a small false-negative (protocol decl conformances will get `any` too but
+                // Swift ignores it there or it gets stripped by stripInvalidAnyPrefixes later).
+                
+                // Check if it's inside a generic argument (e.g., Array<Proto>) or after ->/ :
+                // Check the character immediately before (after stripping whitespace) for existential context
+                var contextChar: Character = "\0"
+                var ctxScan = range.lowerBound
+                while ctxScan > result.startIndex {
+                    let prevIdx = result.index(before: ctxScan)
+                    let prevChar = result[prevIdx]
+                    if prevChar.isWhitespace {
+                        ctxScan = prevIdx
+                    } else {
+                        ctxScan = prevIdx
+                        contextChar = prevChar
+                        break
+                    }
+                }
+                
+                // Existential position: inside generics, after arrow, colon, equals, or comma/paren
+                let isAfterArrow: Bool
+                if contextChar == ">" && ctxScan > result.startIndex {
+                    let beforeArrow = result[result.index(before: ctxScan)]
+                    isAfterArrow = (beforeArrow == "-")
+                } else {
+                    isAfterArrow = false
+                }
+                
+                let existentialContextChars: Set<Character> = ["<", ",", "(", "[", ":", "="]
+                let shouldInsertAny = existentialContextChars.contains(contextChar) || isAfterArrow
+                
+                if shouldInsertAny {
+                    result.insert(contentsOf: "any ", at: range.lowerBound)
+                    startSearch = result.index(range.lowerBound, offsetBy: proto.count + 4, limitedBy: result.endIndex) ?? result.endIndex
+                } else {
+                    startSearch = range.upperBound
+                }
+            }
+        }
+        return result
+    }
+
+    // 22b. stripAnyFromConformanceList: removes incorrectly added 'any' from conformance list items.
+    // Handles: `struct Foo: any Bar, any Baz {` -> `struct Foo: Bar, Baz {`
+    // Also handles: `class Foo: Base, any Bar {`
+    func stripAnyFromConformanceList() -> String {
+        var result = self
+        var startSearch = result.startIndex
+        
+        while startSearch < result.endIndex {
+            // Find the next 'any ' that appears in conformance list position
+            guard let anyRange = result.range(of: "any ", range: startSearch..<result.endIndex) else { break }
+            
+            let isWordCharBefore: Bool
+            if anyRange.lowerBound > result.startIndex {
+                let prevChar = result[result.index(before: anyRange.lowerBound)]
+                isWordCharBefore = prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$"
+            } else {
+                isWordCharBefore = false
+            }
+            
+            if isWordCharBefore {
+                startSearch = anyRange.upperBound
+                continue
+            }
+            
+            // Check if the character before 'any' (skipping whitespace) is ':' or ','
+            var ctxScan = anyRange.lowerBound
+            while ctxScan > result.startIndex {
+                let prevIdx = result.index(before: ctxScan)
+                let prevChar = result[prevIdx]
+                if prevChar.isWhitespace {
+                    ctxScan = prevIdx
+                } else {
+                    ctxScan = prevIdx
+                    break
+                }
+            }
+            let contextChar = ctxScan < anyRange.lowerBound ? result[ctxScan] : "\0"
+            
+            // Also check if we're on a conformance line (look backward for a `{` not found before a `:`)
+            // Heuristic: if context char is ':' or ',', check that the same line contains a `{`
+            if contextChar == ":" || contextChar == "," {
+                // Check forward to see if this line ends with ` {`
+                var lineScan = anyRange.upperBound
+                var foundBrace = false
+                while lineScan < result.endIndex && result[lineScan] != "\n" {
+                    if result[lineScan] == "{" {
+                        foundBrace = true
+                        break
+                    }
+                    lineScan = result.index(after: lineScan)
+                }
+                
+                // Also look backward to start of line
+                var lineStart = anyRange.lowerBound
+                while lineStart > result.startIndex {
+                    let prevIdx = result.index(before: lineStart)
+                    if result[prevIdx] == "\n" { break }
+                    lineStart = prevIdx
+                }
+                let linePrefix = String(result[lineStart..<anyRange.lowerBound])
+                
+                let isConformanceLine = foundBrace && (
+                    linePrefix.contains("struct ") || linePrefix.contains("class ") ||
+                    linePrefix.contains("enum ") || linePrefix.contains("protocol ")
+                )
+                
+                if isConformanceLine {
+                    result.replaceSubrange(anyRange, with: "")
+                    startSearch = anyRange.lowerBound
+                    continue
+                }
+            }
+            
+            startSearch = anyRange.upperBound
+        }
+        return result
+    }
+
+    // 23. applyDiscoveredGenerics: appends generic placeholders to types found in flatGenerics/shortGenerics
     func applyDiscoveredGenerics(flatGenerics: [String: Int], shortGenerics: [String: Int]) -> String {
         let chars = Array(self)
         let n = chars.count
@@ -1306,7 +1546,7 @@ extension String {
     // 30. scanFrameworkDefinedTypes: returns Set of defined struct/class/enum/protocol/typealias names
     func scanFrameworkDefinedTypes() -> Set<String> {
         var defined = Set<String>()
-        let keywords: Set<String> = ["struct", "class", "enum", "protocol", "typealias"]
+        let keywords: Set<String> = ["struct", "class", "enum", "protocol", "typealias", "var", "func"]
         let chars = Array(self)
         let n = chars.count
         var i = 0
@@ -1360,9 +1600,9 @@ extension String {
         return defined
     }
 
-    // 31. scanReferencedTypes: returns array of (typeName, isProtocol, isGeneric)
-    func scanReferencedTypes() -> [(typeName: String, isProtocol: Bool, isGeneric: Bool)] {
-        var results: [(typeName: String, isProtocol: Bool, isGeneric: Bool)] = []
+    // 31. scanReferencedTypes: returns array of (typeName, isProtocol, genericCount)
+    func scanReferencedTypes() -> [(typeName: String, isProtocol: Bool, genericCount: Int)] {
+        var results: [(typeName: String, isProtocol: Bool, genericCount: Int)] = []
         let chars = Array(self)
         let n = chars.count
         var i = 0
@@ -1414,16 +1654,28 @@ extension String {
                             }
                         }
                         
-                        var isGeneric = false
+                        var genericCount = 0
                         var nextIdx = i
                         while nextIdx < n && chars[nextIdx].isWhitespace {
                             nextIdx += 1
                         }
                         if nextIdx < n && chars[nextIdx] == "<" {
-                            isGeneric = true
+                            var depth = 1
+                            var commas = 0
+                            var scan = nextIdx + 1
+                            while scan < n && depth > 0 {
+                                let c = chars[scan]
+                                if c == "<" { depth += 1 }
+                                else if c == ">" { depth -= 1 }
+                                else if c == "," && depth == 1 { commas += 1 }
+                                scan += 1
+                            }
+                            if depth == 0 {
+                                genericCount = commas + 1
+                            }
                         }
                         
-                        results.append((typeName: word, isProtocol: isProtocol, isGeneric: isGeneric))
+                        results.append((typeName: word, isProtocol: isProtocol, genericCount: genericCount))
                     }
                 }
             } else {
@@ -1558,6 +1810,33 @@ extension String {
                 let replaceRange = range.lowerBound..<scanIdx
                 result.replaceSubrange(replaceRange, with: ")")
                 startSearch = range.upperBound
+            } else {
+                startSearch = range.upperBound
+            }
+        }
+        return result
+    }
+
+    // 37. stripGenericAngles: removes <...> generic parameters from a type name
+    func stripGenericAngles() -> String {
+        var result = self
+        var startSearch = result.startIndex
+        while let range = result.range(of: "<", range: startSearch..<result.endIndex) {
+            var depth = 1
+            var scanIdx = range.upperBound
+            while scanIdx < result.endIndex && depth > 0 {
+                let char = result[scanIdx]
+                if char == "<" {
+                    depth += 1
+                } else if char == ">" {
+                    depth -= 1
+                }
+                scanIdx = result.index(after: scanIdx)
+            }
+            if depth == 0 {
+                let replaceRange = range.lowerBound..<scanIdx
+                result.replaceSubrange(replaceRange, with: "")
+                startSearch = range.lowerBound
             } else {
                 startSearch = range.upperBound
             }

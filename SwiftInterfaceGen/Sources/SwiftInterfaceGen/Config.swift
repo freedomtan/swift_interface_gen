@@ -4,7 +4,7 @@ struct GeneratorConfig {
     var systemModules: [String] = ["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "CoreVideo", "CoreMedia", "IOSurface", "__C", "Synchronization"]
     var fundamentalShims: [String] = []
     var missingNestedTypes: [String] = []
-    var protocolShims: [String] = []
+    var protocolShims: [String] = ["FeatureFlags_FeatureFlagsKey", "AppleIntelligenceReporting_AppleIntelligenceError"]
     var forceGenerics: [String: Int] = [:]
     var simpleReplacements: [String: String] = [:]
 }
