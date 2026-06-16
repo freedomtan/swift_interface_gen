@@ -68,7 +68,7 @@ swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
 
 # Generate aliases using comparison script
 rm -f aliases.txt
-python3 /Users/freedom/.gemini/antigravity-cli/brain/0fd91ff0-a8f2-4abf-90e3-666140999f13/scratch/compare_symbols.py "$TBD_PATH" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" aliases.txt
+python3 compare_symbols.py "$TBD_PATH" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" aliases.txt
 
 if [ -f aliases.txt ] && [ -s aliases.txt ]; then
     echo "--- Re-compiling Mock Dynamic Library with Symbol Aliases ---"
