@@ -422,6 +422,7 @@ class TypeNode {
                 var cleanedSig = sig
                 if isProtocol {
                     cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
+                    cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                     cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
                 } else {
                     cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
@@ -465,6 +466,7 @@ class TypeNode {
 
                 if isProtocol {
                     cleanT = cleanT.replacePlaceholderDotsWithSelf()
+                    cleanT = cleanT.replaceWord("A", with: "Self")
                     cleanT = cleanT.replaceMultiSegmentSelfPathsWithAny()
                 } else {
                     cleanT = cleanT.replaceGenericPlaceholderPathsWithAny()

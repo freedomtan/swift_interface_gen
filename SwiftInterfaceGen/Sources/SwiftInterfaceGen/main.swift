@@ -300,9 +300,6 @@ struct SwiftInterfaceGen {
         
 
         
-        c = c.replaceWordWithoutGeneric("ResourceBundleIdentifier", with: "ResourceBundleIdentifier<Any>")
-        c = c.replacingOccurrences(of: "var id: ResourceBundleIdentifier<Any>", with: "var id: ResourceBundleIdentifier<Self>")
-        
         if !parser.defaultModule.isEmpty {
             c = c.replacingOccurrences(of: "___SHIELDED_\(parser.defaultModule)___", with: parser.defaultModule)
         }
