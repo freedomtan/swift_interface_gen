@@ -26,14 +26,18 @@ extension String {
     }
 
     // 2. replaceWord: replaces whole word occurrences of `word` with `replacement`.
-    func replaceWord(_ word: String, with replacement: String) -> String {
+    func replaceWord(_ word: String, with replacement: String, allowPrecededByDot: Bool = true) -> String {
         var result = self
         var startSearch = result.startIndex
         while let range = result.range(of: word, range: startSearch..<result.endIndex) {
             let isWordCharBefore: Bool
+            var precededByDot = false
             if range.lowerBound > result.startIndex {
                 let prevChar = result[result.index(before: range.lowerBound)]
                 isWordCharBefore = prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$"
+                if prevChar == "." {
+                    precededByDot = true
+                }
             } else {
                 isWordCharBefore = false
             }
@@ -46,7 +50,8 @@ extension String {
                 isWordCharAfter = false
             }
             
-            if !isWordCharBefore && !isWordCharAfter {
+            let shouldReplace = !isWordCharBefore && !isWordCharAfter && (allowPrecededByDot || !precededByDot)
+            if shouldReplace {
                 result.replaceSubrange(range, with: replacement)
                 if replacement.isEmpty {
                     startSearch = range.lowerBound

@@ -257,6 +257,7 @@ class TypeNode {
             cleanConformances.remove("Decodable")
             cleanConformances.remove("Encodable")
         }
+        self.conformances = cleanConformances
         inherits.append(contentsOf: cleanConformances.sorted())
         
         var inheritsList = inherits.map { t in
@@ -369,6 +370,11 @@ class TypeNode {
             lines.append("\(nextIndent)case _mock")
         }
 
+        var generatedMethods = Set<String>()
+        var generatedInitializers = Set<String>()
+        var generatedProperties = Set<String>()
+        var generatedEnumCases = Set<String>()
+
         for member in sortedMembers {
             let isOverride: Bool
             switch member {
@@ -386,6 +392,8 @@ class TypeNode {
             
             switch member {
             case .enumCase(let name, let payload):
+                if generatedEnumCases.contains(name) { continue }
+                generatedEnumCases.insert(name)
                 var indirectPrefix = ""
                 if self.kind == "enum", let payload = payload {
                     if payload.replaceWord(self.name, with: "").count < payload.count {
@@ -419,10 +427,23 @@ class TypeNode {
                     cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
                 }
                 cleanedSig = cleanScope(cleanedSig)
+                
+                var normalizedSig = cleanedSig
+                if let parser = parser, !parser.defaultModule.isEmpty {
+                    normalizedSig = normalizedSig.replacingOccurrences(of: "\(parser.defaultModule).", with: "")
+                }
+                normalizedSig = normalizedSig.replacingOccurrences(of: " ", with: "")
+                if generatedInitializers.contains(normalizedSig) { continue }
+                generatedInitializers.insert(normalizedSig)
+                
                 if isProtocol { lines.append("\(nextIndent)\(cleanedSig)") }
                 else if isEnum { /* skip */ }
                 else { lines.append("\(nextIndent)public \(overrideMod)\(cleanedSig) {}") }
             case .property(let n, let t, let isReadOnly, let isStatic):
+                let propKey = "\(isStatic ? "static" : "instance")-\(n)"
+                if generatedProperties.contains(propKey) { continue }
+                generatedProperties.insert(propKey)
+                
                 if n == "allCases" && isEnum { continue }
                 if n == "rawValue" && isEnum { continue }
                 
@@ -481,7 +502,27 @@ class TypeNode {
                 
                 if isProtocol {
                     cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
+                    cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                     cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
+                    
+                    // Remove "A" and "Self" from the method generic parameter list (it represents Self)
+                    if let openIdx = cleanedSig.firstIndex(of: "<"),
+                       let parenIdx = cleanedSig.firstIndex(of: "("),
+                       openIdx < parenIdx {
+                        let methodName = String(cleanedSig[..<parenIdx]).trimmingCharacters(in: .whitespaces)
+                        if methodName.contains("<") {
+                            if let closeIdx = cleanedSig.firstIndex(of: ">"), openIdx < closeIdx {
+                                let inside = String(cleanedSig[cleanedSig.index(after: openIdx)..<closeIdx])
+                                let parts = inside.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                                let filtered = parts.filter { $0 != "A" && $0 != "Self" }
+                                if filtered.isEmpty {
+                                    cleanedSig = String(cleanedSig[..<openIdx]) + String(cleanedSig[cleanedSig.index(after: closeIdx)...])
+                                } else {
+                                    cleanedSig = String(cleanedSig[..<openIdx]) + "<\(filtered.joined(separator: ", "))>" + String(cleanedSig[cleanedSig.index(after: closeIdx)...])
+                                }
+                            }
+                        }
+                    }
                 } else {
                     cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
                 }
@@ -536,6 +577,41 @@ class TypeNode {
                 // Fix nested iterator specialization
                 cleanedSig = cleanedSig.replacingOccurrences(of: "Iterator<GenericA>", with: "Iterator")
                 cleanedSig = cleanedSig.replacingOccurrences(of: "Iterator<Any>", with: "Iterator")
+
+                if isProtocol {
+                    var methodGenericParams = [String]()
+                    let potentialParams = ["A1", "B1", "C1", "D1", "A2", "B2", "C2", "D2"]
+                    for p in potentialParams {
+                        if cleanedSig.replaceWord(p, with: "").count < cleanedSig.count {
+                            methodGenericParams.append(p)
+                        }
+                    }
+                    if !methodGenericParams.isEmpty {
+                        if let parenIdx = cleanedSig.firstIndex(of: "(") {
+                            let methodName = String(cleanedSig[..<parenIdx]).trimmingCharacters(in: .whitespaces)
+                            let methodArgs = String(cleanedSig[parenIdx...])
+                            if methodName.contains("<") {
+                                if let closeAngleIdx = methodName.firstIndex(of: ">") {
+                                    let baseName = String(methodName[..<closeAngleIdx])
+                                    cleanedSig = baseName + ", " + methodGenericParams.joined(separator: ", ") + ">" + methodArgs
+                                }
+                            } else {
+                                cleanedSig = methodName + "<\(methodGenericParams.joined(separator: ", "))>" + methodArgs
+                            }
+                        }
+                    }
+                }
+
+                var normalizedSig = cleanedSig
+                if let parser = parser, !parser.defaultModule.isEmpty {
+                    normalizedSig = normalizedSig.replacingOccurrences(of: "\(parser.defaultModule).", with: "")
+                }
+                normalizedSig = normalizedSig.replacingOccurrences(of: " ", with: "")
+                let methodKey = "\(isStatic ? "static" : "instance")-\(normalizedSig)"
+                if generatedMethods.contains(methodKey) {
+                    continue
+                }
+                generatedMethods.insert(methodKey)
 
                 if cleanN == "==" && cleanedSig.contains("(") {
                     if isProtocol { continue }

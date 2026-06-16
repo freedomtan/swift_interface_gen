@@ -82,10 +82,23 @@ class Parser {
             }
         }
         
-        // Infer protocols and preserve their dotted namespaces
-        if demangled.contains("protocol descriptor for ") {
-            let name = demangled.replacingOccurrences(of: "protocol descriptor for ", with: "")
-            discoveredProtocols.insert(name)
+        // Infer protocols and concrete types
+        let prefixes = [
+            "nominal type descriptor for ",
+            "type metadata for ",
+            "protocol descriptor for "
+        ]
+        for prefix in prefixes {
+            if demangled.hasPrefix(prefix) {
+                let name = demangled.replacingOccurrences(of: prefix, with: "")
+                let cleanName = cleanType(name)
+                let shortName = cleanName.components(separatedBy: ".").last!
+                if prefix == "protocol descriptor for " {
+                    discoveredProtocols.insert(cleanName)
+                } else {
+                    discoveredConcreteTypes.insert(shortName)
+                }
+            }
         }
         let protocols = demangled.scanProtocols()
         for proto in protocols {
@@ -521,7 +534,7 @@ class Parser {
         // Track which ones are "ambiguous" (also have a concrete type with the same short name)
         // so we can preserve their module prefix to avoid Swift shadowing inside nested type bodies.
         var ambiguousAnyPlaceholders: [(placeholder: String, fullQualified: String)] = []
-        let words = discoveredProtocols.filter { t.contains($0) }
+        let words = discoveredProtocols.filter { t.contains($0) }.sorted(by: { $0.count > $1.count })
         for p in words {
              let shortName = p.components(separatedBy: ".").last ?? p
              let isAmbiguous = discoveredConcreteTypes.contains(shortName)
@@ -532,7 +545,7 @@ class Parser {
                  // E.g., in Catalog.Resource.AppleDeviceTracking's body, bare 'AppleDeviceTracking'
                  // shadows the protocol, so we need 'any ModelCatalog.AppleDeviceTracking'.
                   let placeholder = "___ANY_PROTO_\(shortName)___"
-                  t = t.replaceWord(p, with: placeholder)
+                  t = t.replaceWord(p, with: placeholder, allowPrecededByDot: false)
                   // p is the fully qualified name (e.g., ModelCatalog.AppleDeviceTracking)
                   let fullQualified: String
                   if !defaultModule.isEmpty && p.hasPrefix(defaultModule + ".") {
@@ -543,7 +556,7 @@ class Parser {
                   }
                   ambiguousAnyPlaceholders.append((placeholder: placeholder, fullQualified: fullQualified))
              } else {
-                 t = t.replaceWord(p, with: "any \(p)")
+                 t = t.replaceWord(p, with: "any \(p)", allowPrecededByDot: false)
              }
         }
         
@@ -1229,8 +1242,13 @@ class Parser {
             // Check if defined
             let isDefined = allDefinedInOutput.contains(type)
             if !isDefined {
-                // Check if used with "any" or ends with "_P"
-                let isProtocolRef = protocolRefTypes.contains(type) || type.hasSuffix("_P")
+                // Check if used with "any", ends with "_P", or is in discoveredProtocols
+                let flatDiscoveredProtocols = Set(discoveredProtocols.map { $0.replacingOccurrences(of: ".", with: "_") })
+                let isProtocolRef = protocolRefTypes.contains(type) || 
+                                    type.hasSuffix("_P") || 
+                                    discoveredProtocols.contains(type) || 
+                                    flatDiscoveredProtocols.contains(type) || 
+                                    discoveredProtocols.contains(where: { $0.hasSuffix("." + type) })
                 if isProtocolRef {
                     stubs += "public protocol \(type) {}\n"
                 } else {
