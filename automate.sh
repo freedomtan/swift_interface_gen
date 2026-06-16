@@ -62,11 +62,24 @@ echo "--- Compiling Mock Dynamic Library ---"
 swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
     "${FRAMEWORK}Interface.swift" \
     -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
-    -sdk "$SDK_ROOT"
+    -sdk "$SDK_ROOT" -language-mode 5
+
+# Generate aliases using comparison script
+rm -f aliases.txt
+python3 /Users/freedom/.gemini/antigravity-cli/brain/0fd91ff0-a8f2-4abf-90e3-666140999f13/scratch/compare_symbols.py "$TBD_PATH" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" aliases.txt
+
+if [ -f aliases.txt ] && [ -s aliases.txt ]; then
+    echo "--- Re-compiling Mock Dynamic Library with Symbol Aliases ---"
+    ALIAS_FLAGS=$(cat aliases.txt)
+    swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
+        "${FRAMEWORK}Interface.swift" \
+        -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
+        -sdk "$SDK_ROOT" -language-mode 5 $ALIAS_FLAGS
+fi
 
 echo "--- Compiling Test Program ---"
 swiftc -F LocalFrameworks "$TEST_FILE" \
-    -sdk "$SDK_ROOT" \
+    -sdk "$SDK_ROOT" -language-mode 5 \
     -o "${FRAMEWORK}_test_run"
 
 echo "--- Codesigning ---"

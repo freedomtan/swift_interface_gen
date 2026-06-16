@@ -9,7 +9,7 @@ enum MemberKind {
     case initializer(String)
     case property(name: String, type: String, isReadOnly: Bool, isStatic: Bool)
     case method(name: String, signature: String, isStatic: Bool)
-    case enumCase(String)
+    case enumCase(name: String, payload: String?)
     case associatedType(String)
     case other(String)
 }
@@ -18,11 +18,13 @@ class TypeNode {
     let name: String
     var kind: String = "unknown"
     var members: [String: MemberKind] = [:]
+    var extensionMembers: [String: MemberKind] = [:]
     var nestedTypes: [String: TypeNode] = [:]
     var conformances: Set<String> = []
     var isGeneric: Bool = false
     var baseClass: String?
     var rawType: String?
+    var finalMembers: Set<String> = []
 
     init(name: String) {
         self.name = name
@@ -45,7 +47,7 @@ class TypeNode {
         return name
     }
 
-    private func defaultReturnValue(for type: String) -> String {
+    static func defaultReturnValue(for type: String) -> String {
         let t = type.trimmingCharacters(in: .whitespaces)
         if t == "Bool" { return "false" }
         if ["Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64", "Double", "Float", "Float16", "CGFloat"].contains(t) { return "0" }
@@ -111,7 +113,7 @@ class TypeNode {
         
         var hasCases = false
         for member in members.values {
-            if case .enumCase(_) = member { hasCases = true; break }
+            if case .enumCase(_, _) = member { hasCases = true; break }
             if case .property(_, let t, _, let isStatic) = member {
                 if isEnum && isStatic && (t == self.name || t.hasSuffix("." + self.name)) {
                     hasCases = true
@@ -124,11 +126,20 @@ class TypeNode {
             inherits.append(raw)
         }
         
-        var filteredConformances = conformances.sorted()
-        if isEnum && !hasCases {
-            filteredConformances = filteredConformances.filter { !["Codable", "Encodable", "Decodable"].contains($0) }
+        var filteredConformances = Set(conformances)
+        if filteredConformances.contains("Codable") {
+            filteredConformances.remove("Decodable")
+            filteredConformances.remove("Encodable")
         }
-        inherits.append(contentsOf: filteredConformances)
+        if filteredConformances.contains("Hashable") {
+            filteredConformances.remove("Equatable")
+        }
+        if isEnum && !hasCases {
+            filteredConformances.remove("Codable")
+            filteredConformances.remove("Decodable")
+            filteredConformances.remove("Encodable")
+        }
+        inherits.append(contentsOf: filteredConformances.sorted())
         
         var inheritsList = inherits
         if actualKind == "class" {
@@ -193,9 +204,9 @@ class TypeNode {
         
         let sortedMembers = members.values.sorted(by: { 
             switch ($0, $1) {
-            case (.enumCase(let n1), .enumCase(let n2)): return n1 < n2
-            case (.enumCase(_), _): return true
-            case (_, .enumCase(_)): return false
+            case (.enumCase(let n1, _), .enumCase(let n2, _)): return n1 < n2
+            case (.enumCase(_, _), _): return true
+            case (_, .enumCase(_, _)): return false
             case (.initializer(_), .initializer(_)): return false
             case (.initializer(_), _): return true
             case (_, .initializer(_)): return false
@@ -225,8 +236,25 @@ class TypeNode {
             let overrideMod = isOverride ? "override " : ""
             
             switch member {
-            case .enumCase(let n):
-                lines.append("\(nextIndent)case \(escapeKeyword(n))")
+            case .enumCase(let name, let payload):
+                if let payload = payload {
+                    var topLevelCommas = 0
+                    var depth = 0
+                    for c in payload {
+                        if c == "(" || c == "<" || c == "[" { depth += 1 }
+                        else if c == ")" || c == ">" || c == "]" { depth -= 1 }
+                        else if c == "," && depth == 0 {
+                            topLevelCommas += 1
+                        }
+                    }
+                    if topLevelCommas == 0 {
+                        lines.append("\(nextIndent)case \(escapeKeyword(name))(_: \(payload))")
+                    } else {
+                        lines.append("\(nextIndent)case \(escapeKeyword(name))(\(payload))")
+                    }
+                } else {
+                    lines.append("\(nextIndent)case \(escapeKeyword(name))")
+                }
             case .initializer(let sig):
                 var cleanedSig = sig
                 if isProtocol {
@@ -272,14 +300,15 @@ class TypeNode {
                 cleanT = cleanScope(cleanT)
 
                 let staticMod = isStatic ? "static " : ""
+                let finalMod = (!isStatic && self.kind == "class" && self.finalMembers.contains(n)) ? "final " : ""
                 if isProtocol {
                     let suffix = isReadOnly ? "{ get }" : "{ get set }"
                     lines.append("\(nextIndent)\(staticMod)var \(n): \(cleanT) \(suffix)")
                 } else {
-                    let defaultVal = defaultReturnValue(for: cleanT)
+                    let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
                     let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
                     let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set {} }"
-                    lines.append("\(nextIndent)public \(overrideMod)\(staticMod)var \(n): \(cleanT) \(suffix)")
+                    lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)var \(n): \(cleanT) \(suffix)")
                 }
             case .method(let n, let sig, let isStatic):
                 var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
@@ -391,6 +420,7 @@ class TypeNode {
                 }
                 
                 let staticMod = isStatic ? "static " : ""
+                let finalMod = (!isStatic && self.kind == "class" && self.finalMembers.contains(sig)) ? "final " : ""
                 if isProtocol { 
                     lines.append("\(nextIndent)\(staticMod)\(fixModifier)func \(cleanedSig)") 
                 } else { 
@@ -398,10 +428,10 @@ class TypeNode {
                     if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
                         returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
                     }
-                    let defaultVal = defaultReturnValue(for: returnType)
+                    let defaultVal = TypeNode.defaultReturnValue(for: returnType)
                     let body = defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }"
                     let finalBody = defaultVal == "fatalError()" ? "{ fatalError() }" : body
-                    lines.append("\(nextIndent)public \(overrideMod)\(staticMod)\(fixModifier)func \(cleanedSig) \(finalBody)") 
+                    lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)\(fixModifier)func \(cleanedSig) \(finalBody)") 
                 }
             case .associatedType(let code):
                 lines.append("\(nextIndent)\(code)")
@@ -437,6 +467,62 @@ class TypeNode {
         }
         
         lines.append("\(indent)}")
+        
+        if !extensionMembers.isEmpty {
+            var extLines = [String]()
+            extLines.append("")
+            extLines.append("\(indent)extension \(escapeKeyword(n)) {")
+            let extNextIndent = indent + "    "
+            
+            let sortedExt = extensionMembers.values.sorted(by: { 
+                switch ($0, $1) {
+                case (.initializer(_), .initializer(_)): return false
+                case (.initializer(_), _): return true
+                case (_, .initializer(_)): return false
+                case (.property(let n1, _, _, _), .property(let n2, _, _, _)): return n1 < n2
+                default: return false
+                }
+            })
+            
+            for member in sortedExt {
+                switch member {
+                case .initializer(let sig):
+                    var cleanedSig = sig
+                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
+                    cleanedSig = cleanScope(cleanedSig)
+                    extLines.append("\(extNextIndent)public \(cleanedSig) {}")
+                case .property(let n, let t, let isReadOnly, let isStatic):
+                    var cleanT = t
+                    cleanT = cleanT.stripParentPrefix(parentName: self.name)
+                    cleanT = cleanT.replaceGenericPlaceholderPathsWithAny()
+                    cleanT = cleanScope(cleanT)
+                    
+                    let staticMod = isStatic ? "static " : ""
+                    let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
+                    let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
+                    let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set {} }"
+                    extLines.append("\(extNextIndent)public \(staticMod)var \(n): \(cleanT) \(suffix)")
+                case .method(_, let sig, let isStatic):
+                    var cleanedSig = sig
+                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
+                    cleanedSig = cleanScope(cleanedSig)
+                    
+                    let staticMod = isStatic ? "static " : ""
+                    var returnType = "Void"
+                    if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
+                        returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                    }
+                    let defaultVal = TypeNode.defaultReturnValue(for: returnType)
+                    let body = defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }"
+                    let finalBody = defaultVal == "fatalError()" ? "{ fatalError() }" : body
+                    extLines.append("\(extNextIndent)public \(staticMod)func \(cleanedSig) \(finalBody)")
+                default:
+                    break
+                }
+            }
+            extLines.append("\(indent)}")
+            lines.append(extLines.joined(separator: "\n"))
+        }
         
         return lines.joined(separator: "\n")
     }

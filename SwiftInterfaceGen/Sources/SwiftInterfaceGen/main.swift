@@ -83,6 +83,7 @@ struct SwiftInterfaceGen {
     }
 
     static func processSymbols(_ symbols: [String], parser: Parser, module: String, depth: Int = 0) {
+        parser.tbdSymbols.formUnion(symbols)
         if parser.processedModules.contains(module) { return }
         parser.processedModules.insert(module)
         
@@ -281,10 +282,6 @@ struct SwiftInterfaceGen {
         }
         
         c = c.replaceWordWithoutGeneric("ResourceBundleIdentifier", with: "ResourceBundleIdentifier<Any>")
-
-        // Fix unnamed parameters
-        c = c.replacingOccurrences(of: "(_: ", with: "(arg1: ")
-        c = c.replacingOccurrences(of: ", _: ", with: ", arg2: ")
         
         // Final cleanup of redundant newlines
         let lines = c.components(separatedBy: "\n")

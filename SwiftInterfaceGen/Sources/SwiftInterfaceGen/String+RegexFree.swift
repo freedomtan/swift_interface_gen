@@ -1432,4 +1432,136 @@ extension String {
         }
         return results
     }
+
+    // 32. stripGenericFromSequence: replaces Sequence<...> with Sequence
+    func stripGenericFromSequence() -> String {
+        var result = self
+        var startSearch = result.startIndex
+        while let range = result.range(of: "Sequence<", range: startSearch..<result.endIndex) {
+            if range.lowerBound > result.startIndex {
+                let prevIdx = result.index(before: range.lowerBound)
+                let prevChar = result[prevIdx]
+                if prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$" {
+                    startSearch = range.upperBound
+                    continue
+                }
+            }
+            var depth = 1
+            var scanIdx = range.upperBound
+            while scanIdx < result.endIndex && depth > 0 {
+                let char = result[scanIdx]
+                if char == "<" {
+                    depth += 1
+                } else if char == ">" {
+                    depth -= 1
+                }
+                scanIdx = result.index(after: scanIdx)
+            }
+            if depth == 0 {
+                let replaceRange = range.lowerBound..<scanIdx
+                result.replaceSubrange(replaceRange, with: "Sequence")
+                startSearch = result.index(range.lowerBound, offsetBy: 8, limitedBy: result.endIndex) ?? result.endIndex
+            } else {
+                startSearch = range.upperBound
+            }
+        }
+        return result
+    }
+
+    // 33. stripModuleBeforeAngle: replaces Word.< with <
+    func stripModuleBeforeAngle() -> String {
+        var result = self
+        var startSearch = result.startIndex
+        while let range = result.range(of: ".<", range: startSearch..<result.endIndex) {
+            var wordStart = range.lowerBound
+            while wordStart > result.startIndex {
+                let prevIdx = result.index(before: wordStart)
+                let char = result[prevIdx]
+                if char.isLetter || char.isNumber || char == "_" || char == "$" {
+                    wordStart = prevIdx
+                } else {
+                    break
+                }
+            }
+            if wordStart < range.lowerBound {
+                let replaceRange = wordStart..<range.upperBound
+                result.replaceSubrange(replaceRange, with: "<")
+                startSearch = wordStart
+            } else {
+                startSearch = range.upperBound
+            }
+        }
+        return result
+    }
+
+    // 34. stripExtensionInParens: replaces (extension in ...): with empty string
+    func stripExtensionInParens() -> String {
+        var result = self
+        var startSearch = result.startIndex
+        while let range = result.range(of: "(extension in ", range: startSearch..<result.endIndex) {
+            var scanIdx = range.upperBound
+            var found = false
+            while scanIdx < result.endIndex {
+                if result[scanIdx] == ")" {
+                    let nextIdx = result.index(after: scanIdx)
+                    if nextIdx < result.endIndex && result[nextIdx] == ":" {
+                        let replaceRange = range.lowerBound..<result.index(after: nextIdx)
+                        result.replaceSubrange(replaceRange, with: "")
+                        startSearch = range.lowerBound
+                        found = true
+                        break
+                    }
+                }
+                scanIdx = result.index(after: scanIdx)
+            }
+            if !found {
+                startSearch = range.upperBound
+            }
+        }
+        return result
+    }
+
+    // 35. replaceExtensionParensWithAny: replaces (extension ...) with Any
+    func replaceExtensionParensWithAny() -> String {
+        var result = self
+        var startSearch = result.startIndex
+        while let range = result.range(of: "(extension", range: startSearch..<result.endIndex) {
+            var scanIdx = range.upperBound
+            var found = false
+            while scanIdx < result.endIndex {
+                if result[scanIdx] == ")" {
+                    let replaceRange = range.lowerBound..<result.index(after: scanIdx)
+                    result.replaceSubrange(replaceRange, with: "Any")
+                    startSearch = result.index(range.lowerBound, offsetBy: 3, limitedBy: result.endIndex) ?? result.endIndex
+                    found = true
+                    break
+                }
+                scanIdx = result.index(after: scanIdx)
+            }
+            if !found {
+                startSearch = range.upperBound
+            }
+        }
+        return result
+    }
+
+    // 36. stripNumbersAfterParen: replaces )[0-9]+ with )
+    func stripNumbersAfterParen() -> String {
+        var result = self
+        var startSearch = result.startIndex
+        while let range = result.range(of: ")", range: startSearch..<result.endIndex) {
+            var scanIdx = range.upperBound
+            while scanIdx < result.endIndex && result[scanIdx].isNumber {
+                scanIdx = result.index(after: scanIdx)
+            }
+            if scanIdx > range.upperBound {
+                let replaceRange = range.lowerBound..<scanIdx
+                result.replaceSubrange(replaceRange, with: ")")
+                startSearch = range.upperBound
+            } else {
+                startSearch = range.upperBound
+            }
+        }
+        return result
+    }
 }

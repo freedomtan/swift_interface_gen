@@ -35,3 +35,9 @@ GEMINI.md
 # Generated Interfaces
 *Interface.swift
 SwiftInterfaceGen/*Interface.swift
+
+# Temporary / Generated files
+aliases.txt
+*_diagram.md
+*_diagram.pdf
+scratch/

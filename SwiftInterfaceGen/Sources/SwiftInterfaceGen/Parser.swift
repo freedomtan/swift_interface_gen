@@ -24,6 +24,7 @@ class Parser {
     var namespaceFrameworkCache: [String: Bool] = [:]
     var frameworkDefinedTypesCache: [String: Set<String>] = [:]
     private var scannedLocalSwiftFiles = false
+    var tbdSymbols = Set<String>()
 
     init() {}
 
@@ -155,7 +156,8 @@ class Parser {
             "resilient class stub for ",
             "ObjC resilient class stub for ",
             "reflection metadata for ",
-            "value witness table for "
+            "value witness table for ",
+            "protocol conformance descriptor for "
         ]
         
         var forcedKind: String? = nil
@@ -173,7 +175,10 @@ class Parser {
                 } else if desc.contains("protocol conformance descriptor") {
                     let parts = d.components(separatedBy: " : ")
                     if parts.count == 2 {
-                        let typePath = parts[0].trimmingCharacters(in: .whitespaces)
+                        var typePath = parts[0].trimmingCharacters(in: .whitespaces)
+                        if typePath.contains("protocol conformance descriptor for ") {
+                            typePath = typePath.replacingOccurrences(of: "protocol conformance descriptor for ", with: "")
+                        }
                         var protoPath = parts[1].trimmingCharacters(in: .whitespaces)
                         if let inIndex = protoPath.range(of: " in ") {
                             protoPath = String(protoPath[..<inIndex.lowerBound]).trimmingCharacters(in: .whitespaces)
@@ -190,7 +195,7 @@ class Parser {
         }
         
         if !isPrimaryDescriptor {
-            let junkKeywords = ["descriptor", "metadata", "witness table", "helper", "offset", "lookup function", "variable", "function pointer", "default argument", "enum case for", "lazy cache", "block copy", "block destroy", "property descriptor", "reflection metadata", "resilient class stub"]
+            let junkKeywords = ["descriptor", "type metadata", "metadata accessor", "metadata instantiation", "witness table", "helper", "offset", "lookup function", "variable", "function pointer", "default argument", "lazy cache", "block copy", "block destroy", "property descriptor", "reflection metadata", "resilient class stub"]
             for junk in junkKeywords {
                 if d_orig.contains(junk) {
                     if (d_orig.contains("dispatch thunk") || d_orig.contains("method descriptor")) && d_orig.contains("(") {
@@ -202,11 +207,16 @@ class Parser {
             }
         }
         
-        if d_orig.contains(".modify") || d_orig.contains(".read") ||
-           d_orig.contains("deinit") || d_orig.contains("__allocating_init") || 
+        if d_orig.contains("deinit") || d_orig.contains("__allocating_init") || 
            d_orig.contains(" where ") || d_orig.contains("initializeBufferWithCopy") ||
            d_orig.contains("async function pointer") {
             return
+        }
+
+        if d.starts(with: "(extension in ") {
+            if let colonIndex = d.firstIndex(of: ":") {
+                d = String(d[d.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+            }
         }
 
         if d.contains("dispatch thunk of ") {
@@ -221,13 +231,46 @@ class Parser {
                 if !typeName.isEmpty && !caseName.isEmpty {
                     let node = findOrCreateType(name: cleanType(typeName))
                     setKind("enum", for: node)
-                    node.members[caseName] = .enumCase(caseName)
+                    
+                    var payload: String? = nil
+                    let parts = d.components(separatedBy: " -> ")
+                    if parts.count >= 3 {
+                        let payloadRaw = parts[1..<parts.count-1].joined(separator: " -> ")
+                        var trimmed = payloadRaw.trimmingCharacters(in: .whitespaces)
+                        if trimmed.hasPrefix("(") && trimmed.hasSuffix(")") {
+                            var depth = 0
+                            var matchesLast = true
+                            for (idx, char) in trimmed.enumerated() {
+                                if char == "(" {
+                                    depth += 1
+                                } else if char == ")" {
+                                    depth -= 1
+                                    if depth == 0 && idx < trimmed.count - 1 {
+                                        matchesLast = false
+                                        break
+                                    }
+                                }
+                            }
+                            if matchesLast && depth == 0 {
+                                trimmed.removeFirst()
+                                trimmed.removeLast()
+                                trimmed = trimmed.trimmingCharacters(in: .whitespaces)
+                            }
+                        }
+                        
+                        let simplified = simplifyType(trimmed)
+                        if !simplified.isEmpty {
+                            payload = simplified
+                        }
+                    }
+                    
+                    node.members[caseName] = .enumCase(name: caseName, payload: payload)
                 }
             }
             return
         }
 
-        let modulesToStrip = [defaultModule, "Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC"]
+        let modulesToStrip = [defaultModule, "Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "Synchronization"]
         for mod in modulesToStrip {
             if d.starts(with: mod + ".") {
                 d = String(d.dropFirst(mod.count + 1))
@@ -244,7 +287,17 @@ class Parser {
             cleanD = String(cleanD.dropFirst(7))
         }
 
+        var isRealMethod = false
         if let openParenIndex = cleanD.firstIndex(of: "(") {
+            isRealMethod = true
+            if let colonRange = cleanD.range(of: " : ") {
+                if colonRange.lowerBound < openParenIndex {
+                    isRealMethod = false
+                }
+            }
+        }
+
+        if isRealMethod, let openParenIndex = cleanD.firstIndex(of: "(") {
             let prefix = String(cleanD[..<openParenIndex])
             if !prefix.hasSuffix("<") && cleanD.contains(" -> ") {
                 let fullMemberPath = prefix.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " :", with: "")
@@ -281,11 +334,22 @@ class Parser {
                         
                         let signature = simplifyType(signatureRaw)
                         let initSig = fixUnnamedParameters(signature)
-                        node.members["init" + initSig] = .initializer("init" + initSig)
+                        if mangled.contains("PAAE") {
+                            node.extensionMembers["init" + initSig] = .initializer("init" + initSig)
+                        } else {
+                            node.members["init" + initSig] = .initializer("init" + initSig)
+                        }
                     } else {
                         let signature = simplifyType(signatureRaw)
                         let fixedSignature = fixUnnamedParameters(escapedMemberName + signature)
-                        node.members[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                        if mangled.contains("PAAE") {
+                            node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                        } else {
+                            node.members[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                        }
+                        if !tbdSymbols.contains(mangled + "Tj") {
+                            node.finalMembers.insert(fixedSignature)
+                        }
                     }
                 }
                 return
@@ -304,6 +368,12 @@ class Parser {
             } else if fullMemberPath.hasSuffix(".setter") {
                 fullMemberPath = String(fullMemberPath.dropLast(7))
                 isReadOnly = false
+            } else if fullMemberPath.hasSuffix(".read") {
+                fullMemberPath = String(fullMemberPath.dropLast(5))
+                isReadOnly = true
+            } else if fullMemberPath.hasSuffix(".modify") {
+                fullMemberPath = String(fullMemberPath.dropLast(7))
+                isReadOnly = false
             }
             
             let (typeName, memberName) = splitPath(fullMemberPath)
@@ -317,7 +387,14 @@ class Parser {
                 }
 
                 let escapedMemberName = escapeKeyword(memberName)
-                node.members[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                if mangled.contains("PAAE") {
+                    node.extensionMembers[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                } else {
+                    node.members[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                }
+                if !tbdSymbols.contains(mangled + "Tj") {
+                    node.finalMembers.insert(escapedMemberName)
+                }
             }
             return
         }
@@ -384,14 +461,11 @@ class Parser {
     }
 
     private func cleanType(_ name: String) -> String {
-        var n = name
-        if n.range(of: "[0-9]{5,}", options: .regularExpression) != nil {
-            n = n.replacingOccurrences(of: "[0-9]{5,}", with: "", options: .regularExpression)
-        }
+        var n = name.stripLongNumbers()
         
         if n.contains("(extension in ") {
             for ext in discoveredNamespaces {
-                n = n.replacingOccurrences(of: "\\(extension in \(ext)\\):", with: "", options: .regularExpression)
+                n = n.replacingOccurrences(of: "(extension in \(ext)):", with: "")
             }
         }
         
@@ -408,17 +482,17 @@ class Parser {
         
         let words = discoveredProtocols.filter { t.contains($0) }
         for p in words {
-             t = t.replacingOccurrences(of: "\\b\(p)\\b", with: "any \(p)", options: .regularExpression)
+             t = t.replaceWord(p, with: "any \(p)")
         }
         
         if t.contains("<") || t.contains("[") {
-            t = t.replacingOccurrences(of: "Sequence<[^>]+>", with: "Sequence", options: .regularExpression)
-            t = t.replacingOccurrences(of: "[^\\s(,<>]+\\.\\[", with: "[", options: .regularExpression)
+            t = t.stripGenericFromSequence()
+            t = t.stripModuleBeforeSubscriptOrGeneric()
         }
         
         for mod in ConfigManager.shared.systemModules {
             if t.contains(mod) {
-                t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "", options: .regularExpression)
+                t = t.replaceWordDot(mod, with: "")
             }
         }
         
@@ -429,8 +503,8 @@ class Parser {
             t = t.replacingOccurrences(of: "NSOperatingSystemVersion", with: "OperatingSystemVersion")
         }
 
-        t = t.replacingOccurrences(of: "[0-9]{5,}", with: "", options: .regularExpression)
-        t = t.replacingOccurrences(of: "\\)[0-9]+", with: ")", options: .regularExpression)
+        t = t.stripLongNumbers()
+        t = t.stripNumbersAfterParen()
 
         var frameworks = Array(discoveredNamespaces)
         if !frameworks.contains(defaultModule) && !defaultModule.isEmpty {
@@ -438,19 +512,19 @@ class Parser {
         }
         for mod in frameworks {
              if t.contains(mod) {
-                 if mod == defaultModule {
-                     t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "", options: .regularExpression)
-                 } else {
-                     t = t.replacingOccurrences(of: "\\b\(mod)\\.", with: "\(mod)_", options: .regularExpression)
-                 }
+                  if mod == defaultModule {
+                      t = t.replaceWordDot(mod, with: "")
+                  } else {
+                      t = t.replaceWordDot(mod, with: "\(mod)_")
+                  }
              }
         }
         
         if t.contains(".") {
-            t = t.replacingOccurrences(of: "\\.Array\\b", with: ".JSONArray", options: .regularExpression)
-            t = t.replacingOccurrences(of: "\\.Dictionary\\b", with: ".JSONDictionary", options: .regularExpression)
-            t = t.replacingOccurrences(of: "\\.Object\\b", with: ".JSONObject", options: .regularExpression)
-            t = t.replacingOccurrences(of: "\\.String\\b", with: ".JSONString", options: .regularExpression)
+            t = t.replaceDotWord(word: "Array", replacement: ".JSONArray")
+            t = t.replaceDotWord(word: "Dictionary", replacement: ".JSONDictionary")
+            t = t.replaceDotWord(word: "Object", replacement: ".JSONObject")
+            t = t.replaceDotWord(word: "String", replacement: ".JSONString")
         }
 
         var prevT = ""
@@ -461,46 +535,46 @@ class Parser {
 
         if t.contains("Optional") {
             t = t.replacingOccurrences(of: "Optional<", with: "___OPT_T___")
-            t = t.replacingOccurrences(of: "\\bOptional\\b(?!<)", with: "Optional<Any>", options: .regularExpression)
+            t = t.replaceWordWithoutGeneric("Optional", with: "Optional<Any>")
             t = t.replacingOccurrences(of: "___OPT_T___", with: "Optional<")
         }
         
         if t.contains("ResourceBundle") {
-            t = t.replacingOccurrences(of: "\\bany ResourceBundle\\b", with: "any ResourceBundle_P", options: .regularExpression)
+            t = t.replacingOccurrences(of: "any ResourceBundle", with: "any ResourceBundle_P")
         }
 
         if t.contains("Dictionary") {
-            t = t.replacingOccurrences(of: "\\bDictionary\\b(?![<])", with: "[AnyHashable: Any]", options: .regularExpression)
+            t = t.replaceWordWithoutGeneric("Dictionary", with: "[AnyHashable: Any]")
         }
         if t.contains("Array") {
-            t = t.replacingOccurrences(of: "\\bArray\\b(?![<])", with: "[Any]", options: .regularExpression)
+            t = t.replaceWordWithoutGeneric("Array", with: "[Any]")
         }
         
         while prevT != t {
             prevT = t
-            t = t.replacingOccurrences(of: "[a-zA-Z0-9_$]+\\.\\[", with: "[", options: .regularExpression)
-            t = t.replacingOccurrences(of: "[a-zA-Z0-9_$]+\\.<", with: "<", options: .regularExpression)
+            t = t.stripModuleBeforeSubscriptOrGeneric()
+            t = t.stripModuleBeforeAngle()
         }
-        t = t.replacingOccurrences(of: "\\.\\[", with: "[")
+        t = t.replacingOccurrences(of: ".[", with: "[")
 
         if t.contains("async") {
-            t = t.replacingOccurrences(of: "\\(async throws\\s*\\)", with: "async throws", options: .regularExpression)
-            t = t.replacingOccurrences(of: "\\(async\\s*\\)", with: "async", options: .regularExpression)
+            t = t.replacingOccurrences(of: "(async throws)", with: "async throws")
+            t = t.replacingOccurrences(of: "(async)", with: "async")
         }
         if t.contains("throws") {
-            t = t.replacingOccurrences(of: "\\(throws\\s*\\)", with: "throws", options: .regularExpression)
+            t = t.replacingOccurrences(of: "(throws)", with: "throws")
         }
         
         if t.contains("extension") {
-            t = t.replacingOccurrences(of: "\\(extension in [^)]+\\):", with: "", options: .regularExpression)
-            t = t.replacingOccurrences(of: "\\(\\bextension\\b[^)]+\\)", with: "Any", options: .regularExpression)
+            t = t.stripExtensionInParens()
+            t = t.replaceExtensionParensWithAny()
         }
         if t.contains("==") {
             t = t.replacingOccurrences(of: "== String>", with: ">")
             t = t.replacingOccurrences(of: "== A>", with: ">")
         }
         if t.contains("some") {
-            t = t.replacingOccurrences(of: "\\bsome\\b", with: "Any", options: .regularExpression)
+            t = t.replaceWord("some", with: "some Sendable")
         }
         
         if t.contains("set {") {
@@ -559,6 +633,7 @@ class Parser {
         paramList.append(current)
 
         var newParams = [String]()
+        var unnamedCount = 1
         for p in paramList {
             let trimmed = p.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
@@ -581,7 +656,8 @@ class Parser {
             }
 
             if !hasLabel && trimmed != "()" {
-                newParams.append("_: " + trimmed)
+                newParams.append("_ arg\(unnamedCount): " + trimmed)
+                unnamedCount += 1
             } else {
                 newParams.append(trimmed)
             }
@@ -730,6 +806,53 @@ class Parser {
                 output += type.generateCode(indent: "", nameOverride: actualName, parser: self) + "\n\n"
             }
         }
+
+        // Generate top-level (global) members of the default module
+        if let defaultModNode = modules[defaultModule] {
+            let sortedMembers = defaultModNode.members.values.sorted(by: { 
+                switch ($0, $1) {
+                case (.property(let n1, _, _, _), .property(let n2, _, _, _)): return n1 < n2
+                case (.method(let n1, _, _), .method(let n2, _, _)): return n1 < n2
+                default: return false
+                }
+            })
+            for member in sortedMembers {
+                switch member {
+                case .method(_, let sig, _):
+                    var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
+                    if cleanedSig.contains(" prefix(") {
+                        cleanedSig = cleanedSig.replacingOccurrences(of: " prefix(", with: "(")
+                    } else if cleanedSig.contains(" postfix(") {
+                        cleanedSig = cleanedSig.replacingOccurrences(of: " postfix(", with: "(")
+                    }
+                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
+                    cleanedSig = fixUnnamedParameters(cleanedSig)
+                    var returnType = "Void"
+                    if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
+                        returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                    }
+                    let defaultVal = TypeNode.defaultReturnValue(for: returnType)
+                    let body = defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }"
+                    let finalBody = defaultVal == "fatalError()" ? "{ fatalError() }" : body
+                    output += "public func \(cleanedSig) \(finalBody)\n\n"
+                    
+                case .property(let n, let t, let isReadOnly, _):
+                    var cleanT = t.replaceGenericPlaceholderPathsWithAny()
+                    if let brace = cleanT.firstIndex(of: "{") {
+                        cleanT = String(cleanT[..<brace]).trimmingCharacters(in: .whitespaces)
+                    }
+                    cleanT = cleanT.replacingOccurrences(of: "}", with: "")
+                    
+                    let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
+                    let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
+                    let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set {} }"
+                    output += "public var \(n): \(cleanT) \(suffix)\n\n"
+                    
+                default:
+                    break
+                }
+            }
+        }
         
         // Phase 2: Generate type extensions
         for moduleName in sortedModuleNames {
@@ -829,7 +952,7 @@ class Parser {
             "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
             "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
             "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
-            "AnySequence", "FloatingPointRoundingRule"
+            "AnySequence", "FloatingPointRoundingRule", "Task", "Mutex", "CustomStringConvertible", "CustomDebugStringConvertible", "CodingKey"
         ]
         
         let sortedTypes = referencedTypes.sorted()
@@ -865,9 +988,6 @@ class Parser {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: fm.currentDirectoryPath) else { return }
         
-        let genericUsagePattern = "\\b([A-Z][a-zA-Z0-9_$]*)\\s*<([^>]+)>"
-        guard let regex = try? NSRegularExpression(pattern: genericUsagePattern, options: []) else { return }
-        
         func countTopLevelCommas(in s: String) -> Int {
             var commas = 0
             var depth = 0
@@ -889,15 +1009,13 @@ class Parser {
         for file in files {
             if file.hasSuffix(".swift") && !file.hasSuffix("Interface.swift") {
                 guard let content = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
-                let nsRange = NSRange(content.startIndex..<content.endIndex, in: content)
-                let matches = regex.matches(in: content, options: [], range: nsRange)
-                for match in matches {
-                    guard let typeRange = Range(match.range(at: 1), in: content),
-                          let paramsRange = Range(match.range(at: 2), in: content) else { continue }
-                    let typeName = String(content[typeRange])
-                    let params = String(content[paramsRange])
+                
+                let genericTypes = content.scanGenericTypeApplications()
+                for (typeName, params) in genericTypes {
+                    let shortName = typeName.components(separatedBy: ".").last!
+                    guard let firstChar = shortName.first, firstChar.isUppercase else { continue }
                     
-                    if ["Optional", "Array", "Dictionary", "Set", "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer"].contains(typeName) {
+                    if ["Optional", "Array", "Dictionary", "Set", "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer"].contains(shortName) {
                         continue
                     }
                     
