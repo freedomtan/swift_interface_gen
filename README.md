@@ -42,7 +42,7 @@ If you prefer to run the steps manually:
 ### 1. Build the Generator
 ```bash
 cd SwiftInterfaceGen/Sources/SwiftInterfaceGen
-swiftc -parse-as-library main.swift Parser.swift Model.swift Config.swift -o ../../../swift-interface-gen
+swiftc -parse-as-library main.swift Parser.swift Model.swift Config.swift String+RegexFree.swift -o ../../../swift-interface-gen
 cd ../../../
 ```
 
