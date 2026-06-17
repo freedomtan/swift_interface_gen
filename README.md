@@ -11,6 +11,7 @@ This tool is primarily used for reverse-engineering and reconstructing the publi
 - **Local Framework Bundling:** Generates a complete, self-contained `.framework` structure (including `.swiftmodule` and `.swiftinterface`) that can be seamlessly passed to the Swift compiler using standard `-F` flags.
 - **Mock Executability:** Generates safe mock implementations (e.g., empty initializers `{}`, safe default return values like `[]` or `nil`, and `fatalError()` for complex logic). This allows client code to successfully instantiate objects and verify type layouts at runtime without crashing immediately.
 - **Smart Dependency Resolution:** Automatically detects and resolves cross-module dependencies (e.g., pulling in `CoreAICommon` when parsing `CoreAICompiler`) by scanning system `PrivateFrameworks` and `SubFrameworks`.
+- **Exact Symbol Alignment (100% TBD Matching):** Compares generated binary exports against the original `.tbd` file, compiles raw assembly stubs for missing symbols, and uses linker flags (`-exported_symbols_list`) to ensure the compiled mock library exports exactly the same symbols as the original framework.
 
 ## Quick Start (Automation Script)
 
