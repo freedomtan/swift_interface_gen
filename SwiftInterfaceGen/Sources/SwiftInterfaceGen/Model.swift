@@ -737,7 +737,9 @@ class TypeNode {
             if hasConformance("Hashable") && !hasHashInto {
                 lines.append("\(nextIndent)public func hash(into hasher: inout Hasher) { fatalError() }")
             }
-            if (hasConformance("Hashable") || hasConformance("Equatable")) && !hasEqualityOperator() {
+            // For class types, don't auto-generate == — the TBD may not export it,
+            // and adding it creates spurious extra symbols. For structs/enums it's always needed.
+            if (hasConformance("Hashable") || hasConformance("Equatable")) && !hasEqualityOperator() && actualKind != "class" {
                 lines.append("\(nextIndent)public static func ==(_ lhs: \(escapeKeyword(n)), _ rhs: \(escapeKeyword(n))) -> Bool { fatalError() }")
             }
             if hasConformance("Comparable") && !hasLessThanOperator() {
@@ -931,7 +933,7 @@ class TypeNode {
              }
         }
 
-        if kind == "class" && baseClass != "NSObject" && !hasConformance("NSObject") {
+        if kind == "class" && baseClass != "NSObject" && !hasConformance("NSObject") && hasConformance("Equatable") {
              if hasEqualityOperator() {
                  output += "extension \(currentPath): Equatable {}\n"
              } else {
