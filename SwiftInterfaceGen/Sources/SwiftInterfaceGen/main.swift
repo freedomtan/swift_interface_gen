@@ -57,6 +57,9 @@ struct SwiftInterfaceGen {
             print("import \(imp)")
         }
         
+        let exportsContent = parser.tbdSymbols.sorted().joined(separator: "\n") + "\n"
+        try? exportsContent.write(toFile: "\(currentModule)_exports.txt", atomically: true, encoding: .utf8)
+        
         print(finalCode)
     }
 
@@ -322,24 +325,24 @@ struct SwiftInterfaceGen {
 
     static func runCompare(args: [String]) {
         guard let compareIdx = args.firstIndex(of: "--compare"),
-              compareIdx + 2 < args.count else {
-            print("Usage: swift-interface-gen --compare <tbd_path> <dylib_path> [aliases_output_path]")
+              compareIdx + 3 < args.count else {
+            print("Usage: swift-interface-gen --compare <exports_file_path> <dylib_path> <stubs_s_output_path>")
             exit(1)
         }
         
         let tbdPath = args[compareIdx + 1]
         let dylibPath = args[compareIdx + 2]
-        let aliasesOutputPath = (compareIdx + 3 < args.count) ? args[compareIdx + 3] : nil
+        let stubsSPath = args[compareIdx + 3]
         
         guard let tbdContent = try? String(contentsOfFile: tbdPath, encoding: .utf8) else {
-            print("Error: Could not read TBD file at \(tbdPath)")
+            print("Error: Could not read expected symbols file at \(tbdPath)")
             exit(1)
         }
         
         let tbdSyms = extractSymbols(from: tbdContent)
         let dylibSyms = extractDylibSymbols(dylibPath: dylibPath)
         
-        print("Total symbols in TBD: \(tbdSyms.count)")
+        print("Total symbols in expected file: \(tbdSyms.count)")
         print("Total symbols in Dylib: \(dylibSyms.count)")
         
         func normalize(_ sym: String) -> String {
@@ -375,7 +378,7 @@ struct SwiftInterfaceGen {
         }
         extra.sort()
         
-        print("\n--- Missing Symbols (in TBD but not in Dylib) ---")
+        print("\n--- Missing Symbols (in TBD/Expected but not in Dylib) ---")
         print("Count: \(missing.count)")
         for s in missing.prefix(50) {
             print("  \(s)")
@@ -384,7 +387,7 @@ struct SwiftInterfaceGen {
             print("  ... and \(missing.count - 50) more")
         }
         
-        print("\n--- Extra Symbols (in Dylib but not in TBD) ---")
+        print("\n--- Extra Symbols (in Dylib but not in TBD/Expected) ---")
         print("Count: \(extra.count)")
         for s in extra.prefix(50) {
             print("  \(s)")
@@ -393,39 +396,16 @@ struct SwiftInterfaceGen {
             print("  ... and \(extra.count - 50) more")
         }
         
-        if let aliasesPath = aliasesOutputPath {
-            print("\nGenerating alias flags to \(aliasesPath)...")
-            
-            var demangledMap = [String: String]()
-            let allSymbolsToDemangle = Set(missing).union(Set(extra))
-            for s in allSymbolsToDemangle {
-                if let dem = demangle(symbol: s) {
-                    demangledMap[s] = dem
-                }
-            }
-            
-            var demangledToExtra = [String: String]()
-            for extraSym in extra {
-                if let demExtra = demangledMap[extraSym] {
-                    demangledToExtra[demExtra] = extraSym
-                }
-            }
-            
-            var aliasFlags = [String]()
-            for missSym in missing {
-                if let demMiss = demangledMap[missSym],
-                   let extraSym = demangledToExtra[demMiss] {
-                    aliasFlags.append("-Xlinker -alias -Xlinker \(extraSym) -Xlinker \(missSym)")
-                }
-            }
-            
-            let aliasesContent = aliasFlags.joined(separator: " ")
-            do {
-                try aliasesContent.write(toFile: aliasesPath, atomically: true, encoding: .utf8)
-                print("Generated \(aliasFlags.count) symbol aliases.")
-            } catch {
-                print("Error writing aliases file: \(error)")
-            }
+        // Generate stubs.s
+        var stubsContent = ".data\n.align 3\n"
+        for sym in missing {
+            stubsContent += ".globl \(sym)\n\(sym):\n    .quad 0\n"
+        }
+        do {
+            try stubsContent.write(toFile: stubsSPath, atomically: true, encoding: .utf8)
+            print("Generated \(missing.count) stubs in \(stubsSPath).")
+        } catch {
+            print("Error writing stubs.s file: \(error)")
         }
     }
     

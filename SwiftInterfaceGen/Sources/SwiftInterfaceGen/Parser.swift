@@ -304,13 +304,14 @@ class Parser {
                         }
                     }
                     
-                    node.members[caseName] = .enumCase(name: caseName, payload: payload)
+                    let hasLabel = mangled.contains("tc")
+                    node.members[caseName] = .enumCase(name: caseName, payload: payload, hasLabel: hasLabel)
                 }
             }
             return
         }
 
-        let modulesToStrip = [defaultModule, "Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "Synchronization"]
+        let modulesToStrip = [defaultModule]
         for mod in modulesToStrip {
             if d.starts(with: mod + ".") {
                 d = String(d.dropFirst(mod.count + 1))
@@ -374,7 +375,7 @@ class Parser {
                         }
                         
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
-                        let initSig = fixUnnamedParameters(signature)
+                        let initSig = Parser.fixUnnamedParameters(signature)
                         if mangled.contains("PAAE") {
                             node.extensionMembers["init" + initSig] = .initializer("init" + initSig)
                         } else {
@@ -382,7 +383,7 @@ class Parser {
                         }
                     } else {
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
-                        let fixedSignature = fixUnnamedParameters(escapedMemberName + signature)
+                        let fixedSignature = Parser.fixUnnamedParameters(escapedMemberName + signature)
                         if mangled.contains("PAAE") {
                             node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                         } else {
@@ -418,7 +419,8 @@ class Parser {
             
             let (typeName, memberName) = splitPath(fullMemberPath)
             let parentName = typeName.components(separatedBy: ".").last!
-            let type = simplifyType(parts[1], parentName: parentName)
+            let isSubscript = memberName == "subscript" || memberName == "`subscript`"
+            let type = simplifyType(parts[1], parentName: parentName, isMethodSignature: isSubscript)
             
             if !typeName.isEmpty && !memberName.isEmpty {
                 let node = findOrCreateType(name: cleanType(typeName))
@@ -703,11 +705,12 @@ class Parser {
         if isMethodSignature {
             return stripLabelsFromMethodSignature(t)
         } else {
-            return stripFunctionTypeLabels(t)
+            let stripped = stripFunctionTypeLabels(t)
+            return Parser.escapeClosures(in: stripped, isTopLevelParameter: false)
         }
     }
 
-    private func fixUnnamedParameters(_ sig: String) -> String {
+    static func fixUnnamedParameters(_ sig: String, isSubscript: Bool = false) -> String {
         guard let openParen = sig.firstIndex(of: "(") else { return sig }
         let prefix = sig[..<sig.index(after: openParen)]
         let rest = String(sig[sig.index(after: openParen)...])
@@ -734,13 +737,23 @@ class Parser {
         var pDepth = 0
         var aDepth = 0
         var sDepth = 0
-        for c in paramsPart {
+        
+        let chars = Array(paramsPart)
+        var idx = 0
+        while idx < chars.count {
+            let c = chars[idx]
             if c == "(" { pDepth += 1 }
             else if c == ")" { pDepth -= 1 }
-            else if c == "<" { aDepth += 1 }
-            else if c == ">" { aDepth -= 1 }
             else if c == "[" { sDepth += 1 }
             else if c == "]" { sDepth -= 1 }
+            else if c == "<" { aDepth += 1 }
+            else if c == ">" {
+                if idx > 0 && chars[idx - 1] == "-" {
+                    // Ignore ->
+                } else {
+                    aDepth -= 1
+                }
+            }
             
             if c == "," && pDepth == 0 && aDepth == 0 && sDepth == 0 {
                 paramList.append(current)
@@ -748,6 +761,7 @@ class Parser {
             } else {
                 current.append(c)
             }
+            idx += 1
         }
         paramList.append(current)
 
@@ -761,30 +775,53 @@ class Parser {
             var depth_p = 0
             var depth_a = 0
             var depth_s = 0
-            for c in trimmed {
-                if c == "(" { depth_p += 1 }
-                else if c == ")" { depth_p -= 1 }
-                else if c == "<" { depth_a += 1 }
-                else if c == ">" { depth_a -= 1 }
-                else if c == "[" { depth_s += 1 }
-                else if c == "]" { depth_s -= 1 }
-                else if c == ":" && depth_p == 0 && depth_a == 0 && depth_s == 0 {
+            var colonIdx: String.Index? = nil
+            for (index, char) in trimmed.enumerated() {
+                if char == "(" { depth_p += 1 }
+                else if char == ")" { depth_p -= 1 }
+                else if char == "<" { depth_a += 1 }
+                else if char == ">" { depth_a -= 1 }
+                else if char == "[" { depth_s += 1 }
+                else if char == "]" { depth_s -= 1 }
+                else if char == ":" && depth_p == 0 && depth_a == 0 && depth_s == 0 {
                     hasLabel = true
+                    colonIdx = trimmed.index(trimmed.startIndex, offsetBy: index)
                     break
                 }
             }
 
-            if !hasLabel && trimmed != "()" {
-                newParams.append("_ arg\(unnamedCount): " + trimmed)
+            var labelPart = ""
+            var typePart = trimmed
+            var labelName = ""
+            if hasLabel, let cIdx = colonIdx {
+                labelName = String(trimmed[..<cIdx]).trimmingCharacters(in: .whitespaces)
+                labelPart = labelName + ": "
+                typePart = String(trimmed[trimmed.index(after: cIdx)...]).trimmingCharacters(in: .whitespaces)
+            }
+
+            let escapedType = Parser.escapeClosures(in: typePart, isTopLevelParameter: true)
+
+            if isSubscript {
+                if hasLabel && labelName != "_" {
+                    newParams.append("\(labelName) arg\(unnamedCount): \(escapedType)")
+                } else {
+                    newParams.append("_ arg\(unnamedCount): \(escapedType)")
+                }
                 unnamedCount += 1
             } else {
-                newParams.append(trimmed)
+                if !hasLabel && trimmed != "()" {
+                    newParams.append("_ arg\(unnamedCount): " + escapedType)
+                    unnamedCount += 1
+                } else {
+                    newParams.append(labelPart + escapedType)
+                }
             }
         }
         return String(prefix) + newParams.joined(separator: ", ") + String(suffix)
     }
     
     func isModuleAvailable(_ name: String) -> Bool {
+        if ["Swift", "Foundation", "ObjectiveC"].contains(name) { return true }
         let sdkRoot = ConfigManager.sdkRoot
         
         // 1. Check if name is in usr/lib/swift (standard library modules)
@@ -882,6 +919,9 @@ class Parser {
     }
 
     func isTypeDefinedInFramework(module: String, typeName: String) -> Bool {
+        if ["Swift", "Foundation", "ObjectiveC"].contains(module) {
+            return true
+        }
         return getFrameworkDefinedTypes(module: module).contains(typeName)
     }
 
@@ -1088,7 +1128,7 @@ class Parser {
                         cleanedSig = cleanedSig.replacingOccurrences(of: " postfix(", with: "(")
                     }
                     cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
-                    cleanedSig = fixUnnamedParameters(cleanedSig)
+                    cleanedSig = Parser.fixUnnamedParameters(cleanedSig)
                     var returnType = "Void"
                     if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
                         returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
@@ -1118,15 +1158,14 @@ class Parser {
         
         // Phase 2: Generate type extensions
         for moduleName in sortedModuleNames {
-            if ["Swift", "Foundation", "ObjectiveC"].contains(moduleName) { continue }
-            if moduleName != defaultModule && isModuleAvailable(moduleName) {
+            if moduleName != defaultModule && isModuleAvailable(moduleName) && !["Swift", "Foundation", "ObjectiveC"].contains(moduleName) {
                 continue
             }
             guard let module = modules[moduleName] else { continue }
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             for type in sortedTypes {
                 let flattenedName = "\(moduleName)_\(type.name)"
-                if !definedTypes.contains(flattenedName) { continue }
+                if !definedTypes.contains(flattenedName) && type.extensionMembers.isEmpty { continue }
                 
                 let pathPrefix = (moduleName == defaultModule) ? "" : "\(moduleName)_"
                 output += type.generateExtensions(defaultModule: defaultModule, parser: self, path: pathPrefix)
@@ -1168,7 +1207,6 @@ class Parser {
         
         // Phase 4: Generate generic typealiases mapping flattened names to imported module types, OR stubs if missing
         for moduleName in sortedModuleNames {
-            if ["Swift", "Foundation", "ObjectiveC"].contains(moduleName) { continue }
             if moduleName == defaultModule { continue }
             guard let module = modules[moduleName] else { continue }
             
@@ -1525,31 +1563,46 @@ class Parser {
     }
 
     private func stripLabelsFromMethodSignature(_ t: String) -> String {
-        guard t.hasPrefix("(") else { return stripFunctionTypeLabels(t) }
+        var openParenIdx: String.Index? = nil
+        var genericDepth = 0
+        for (idx, char) in t.enumerated() {
+            if char == "<" {
+                genericDepth += 1
+            } else if char == ">" {
+                genericDepth = max(0, genericDepth - 1)
+            } else if char == "(" && genericDepth == 0 {
+                openParenIdx = t.index(t.startIndex, offsetBy: idx)
+                break
+            }
+        }
+        
+        guard let openParen = openParenIdx else { return stripFunctionTypeLabels(t) }
         
         // Find matching parenthesis for the top-level parameters
         var depth = 0
         var matchingIndex: String.Index? = nil
-        for (idx, char) in t.enumerated() {
+        let rest = String(t[t.index(after: openParen)...])
+        for (idx, char) in rest.enumerated() {
             if char == "(" {
                 depth += 1
             } else if char == ")" {
-                depth -= 1
                 if depth == 0 {
-                    matchingIndex = t.index(t.startIndex, offsetBy: idx)
+                    matchingIndex = rest.index(rest.startIndex, offsetBy: idx)
                     break
                 }
+                depth -= 1
             }
         }
         guard let closeParen = matchingIndex else { return stripFunctionTypeLabels(t) }
         
-        let paramsPart = String(t[t.index(after: t.startIndex)..<closeParen])
-        let afterPart = String(t[t.index(after: closeParen)...])
+        let prefix = String(t[..<openParen]) + "("
+        let paramsPart = String(rest[..<closeParen])
+        let afterPart = String(rest[rest.index(after: closeParen)...])
         
         let cleanedAfter = stripFunctionTypeLabels(afterPart)
         let cleanedParams = cleanMethodParams(paramsPart)
         
-        return "(" + cleanedParams + ")" + cleanedAfter
+        return prefix + cleanedParams + ")" + cleanedAfter
     }
 
     private func cleanMethodParams(_ s: String) -> String {
@@ -1611,5 +1664,258 @@ class Parser {
             }
         }
         return cleaned.joined(separator: ", ")
+    }
+
+    static func isNonOptionalFunctionType(_ typeStr: String) -> Bool {
+        let clean = typeStr.trimmingCharacters(in: .whitespaces)
+        if clean.hasSuffix("?") || clean.hasPrefix("Optional<") || clean.hasSuffix("!") {
+            return false
+        }
+        var depth_p = 0
+        var depth_a = 0
+        var depth_s = 0
+        var i = clean.index(before: clean.endIndex)
+        while i >= clean.startIndex {
+            let c = clean[i]
+            if c == ")" { depth_p += 1 }
+            else if c == "(" { depth_p -= 1 }
+            else if c == ">" { depth_a += 1 }
+            else if c == "<" { depth_a -= 1 }
+            else if c == "]" { depth_s += 1 }
+            else if c == "[" { depth_s -= 1 }
+            else if c == ">" && i > clean.startIndex && clean[clean.index(before: i)] == "-" {
+                if depth_p == 0 && depth_a == 0 && depth_s == 0 {
+                    return true
+                }
+            }
+            if i == clean.startIndex { break }
+            i = clean.index(before: i)
+        }
+        return false
+    }
+
+    static func escapeClosures(in typeStr: String, isTopLevelParameter: Bool = false) -> String {
+        let trimmed = typeStr.trimmingCharacters(in: .whitespaces)
+        
+        if trimmed.hasSuffix("?") || trimmed.hasPrefix("Optional<") || trimmed.hasSuffix("!") {
+            if trimmed.hasSuffix("?") {
+                let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
+                return escapeClosures(in: inner) + "?"
+            }
+            if trimmed.hasSuffix("!") {
+                let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
+                return escapeClosures(in: inner) + "!"
+            }
+            if trimmed.hasPrefix("Optional<") && trimmed.hasSuffix(">") {
+                let inner = String(trimmed.dropFirst(9).dropLast()).trimmingCharacters(in: .whitespaces)
+                return "Optional<" + escapeClosures(in: inner) + ">"
+            }
+        }
+        
+        var depth_p = 0
+        var depth_a = 0
+        var depth_s = 0
+        var arrowIdx: String.Index? = nil
+        
+        var i = trimmed.index(before: trimmed.endIndex)
+        while i >= trimmed.startIndex {
+            let c = trimmed[i]
+            if c == ">" && i > trimmed.startIndex && trimmed[trimmed.index(before: i)] == "-" {
+                if depth_p == 0 && depth_a == 0 && depth_s == 0 {
+                    arrowIdx = trimmed.index(before: i)
+                    break
+                }
+                i = trimmed.index(before: i)
+            }
+            else if c == ")" { depth_p += 1 }
+            else if c == "(" { depth_p -= 1 }
+            else if c == ">" { depth_a += 1 }
+            else if c == "<" { depth_a -= 1 }
+            else if c == "]" { depth_s += 1 }
+            else if c == "[" { depth_s -= 1 }
+            if i == trimmed.startIndex { break }
+            i = trimmed.index(before: i)
+        }
+        
+        guard let arrow = arrowIdx else {
+            if let openAngle = trimmed.firstIndex(of: "<"), trimmed.hasSuffix(">") {
+                let prefix = trimmed[..<openAngle]
+                let inner = String(trimmed[trimmed.index(after: openAngle)..<trimmed.index(before: trimmed.endIndex)])
+                var args = [String]()
+                var current = ""
+                var pD = 0
+                var aD = 0
+                var sD = 0
+                for c in inner {
+                    if c == "(" { pD += 1 }
+                    else if c == ")" { pD -= 1 }
+                    else if c == "<" { aD += 1 }
+                    else if c == ">" { aD -= 1 }
+                    else if c == "[" { sD += 1 }
+                    else if c == "]" { sD -= 1 }
+                    if c == "," && pD == 0 && aD == 0 && sD == 0 {
+                        args.append(current)
+                        current = ""
+                    } else {
+                        current.append(c)
+                    }
+                }
+                args.append(current)
+                let escapedArgs = args.map { escapeClosures(in: $0) }
+                return "\(prefix)<\(escapedArgs.joined(separator: ", "))>"
+            }
+            return trimmed
+        }
+        
+        var leftPart = String(trimmed[..<arrow]).trimmingCharacters(in: .whitespaces)
+        let rightPart = String(trimmed[trimmed.index(arrow, offsetBy: 2)...]).trimmingCharacters(in: .whitespaces)
+        
+        var throwsModifier = ""
+        while true {
+            if leftPart.hasSuffix("throws") {
+                leftPart = String(leftPart.dropLast(6)).trimmingCharacters(in: .whitespaces)
+                throwsModifier = "throws " + throwsModifier
+            } else if leftPart.hasSuffix("async") {
+                leftPart = String(leftPart.dropLast(5)).trimmingCharacters(in: .whitespaces)
+                throwsModifier = "async " + throwsModifier
+            } else if leftPart.hasSuffix("rethrows") {
+                leftPart = String(leftPart.dropLast(8)).trimmingCharacters(in: .whitespaces)
+                throwsModifier = "rethrows " + throwsModifier
+            } else {
+                break
+            }
+        }
+        if !throwsModifier.isEmpty {
+            throwsModifier = throwsModifier.trimmingCharacters(in: .whitespaces) + " "
+        }
+        
+        var attrs = ""
+        var paramsString = leftPart
+        if leftPart.hasSuffix(")") {
+            var depth = 0
+            var paramStartIdx: String.Index? = nil
+            var i = leftPart.index(before: leftPart.endIndex)
+            while i >= leftPart.startIndex {
+                let c = leftPart[i]
+                if c == ")" {
+                    depth += 1
+                } else if c == "(" {
+                    depth -= 1
+                    if depth == 0 {
+                        paramStartIdx = i
+                        break
+                    }
+                }
+                if i == leftPart.startIndex { break }
+                i = leftPart.index(before: i)
+            }
+            if let startIdx = paramStartIdx {
+                attrs = String(leftPart[..<startIdx]).trimmingCharacters(in: .whitespaces)
+                if !attrs.isEmpty {
+                    attrs = attrs + " "
+                }
+                paramsString = String(leftPart[startIdx...]).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        
+        var enclosingParens = false
+        if paramsString.hasPrefix("(") && paramsString.hasSuffix(")") {
+            var depth = 0
+            var matchedLast = true
+            let paramsChars = Array(paramsString)
+            for (idx, char) in paramsChars.enumerated() {
+                if char == "(" {
+                    depth += 1
+                } else if char == ")" {
+                    depth -= 1
+                    if depth == 0 && idx < paramsChars.count - 1 {
+                        matchedLast = false
+                        break
+                    }
+                }
+            }
+            if depth == 0 && matchedLast {
+                enclosingParens = true
+            }
+        }
+        
+        if enclosingParens {
+            paramsString.removeFirst()
+            paramsString.removeLast()
+        } else {
+            let escaped = escapeClosures(in: paramsString)
+            let isFunc = escaped.contains("->")
+            let isOpt = escaped.hasSuffix("?") || escaped.hasPrefix("Optional<")
+            let hasEsc = escaped.contains("@escaping")
+            let escPrefix = (isFunc && !isOpt && !hasEsc) ? "@escaping " : ""
+            let finalType = attrs + escPrefix + escaped + " " + throwsModifier + "-> " + escapeClosures(in: rightPart)
+            return isTopLevelParameter ? "@escaping " + finalType : finalType
+        }
+        
+        var paramList = [String]()
+        var current = ""
+        var pD = 0
+        var aD = 0
+        var sD = 0
+        for c in paramsString {
+            if c == "(" { pD += 1 }
+            else if c == ")" { pD -= 1 }
+            else if c == "<" { aD += 1 }
+            else if c == ">" { aD -= 1 }
+            else if c == "[" { sD += 1 }
+            else if c == "]" { sD -= 1 }
+            if c == "," && pD == 0 && aD == 0 && sD == 0 {
+                paramList.append(current)
+                current = ""
+            } else {
+                current.append(c)
+            }
+        }
+        paramList.append(current)
+        
+        var escapedParams = [String]()
+        for p in paramList {
+            let trimmedP = p.trimmingCharacters(in: .whitespaces)
+            if trimmedP.isEmpty { continue }
+            
+            var hasLabel = false
+            var label = ""
+            var type = trimmedP
+            var pD2 = 0
+            var aD2 = 0
+            var sD2 = 0
+            for (index, char) in trimmedP.enumerated() {
+                if char == "(" { pD2 += 1 }
+                else if char == ")" { pD2 -= 1 }
+                else if char == "<" { aD2 += 1 }
+                else if char == ">" { aD2 -= 1 }
+                else if char == "[" { sD2 += 1 }
+                else if char == "]" { sD2 -= 1 }
+                if char == ":" && pD2 == 0 && aD2 == 0 && sD2 == 0 {
+                    hasLabel = true
+                    let cIdx = trimmedP.index(trimmedP.startIndex, offsetBy: index)
+                    label = String(trimmedP[..<cIdx]) + ": "
+                    type = String(trimmedP[trimmedP.index(after: cIdx)...]).trimmingCharacters(in: .whitespaces)
+                    break
+                }
+            }
+            
+            let escapedType = escapeClosures(in: type)
+            let cleanEscType = escapedType.trimmingCharacters(in: .whitespaces)
+            let isFunc = cleanEscType.contains("->")
+            let isOpt = cleanEscType.hasSuffix("?") || cleanEscType.hasPrefix("Optional<")
+            let hasEsc = cleanEscType.contains("@escaping")
+            
+            let finalType: String
+            if isFunc && !isOpt && !hasEsc {
+                finalType = "@escaping " + cleanEscType
+            } else {
+                finalType = cleanEscType
+            }
+            escapedParams.append(label + finalType)
+        }
+        
+        let finalType = attrs + "(" + escapedParams.joined(separator: ", ") + ") " + throwsModifier + "-> " + escapeClosures(in: rightPart)
+        return isTopLevelParameter ? "@escaping " + finalType : finalType
     }
 }

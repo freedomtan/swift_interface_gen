@@ -60,24 +60,39 @@ swiftc -emit-module -module-name "$FRAMEWORK" "${FRAMEWORK}Interface.swift" \
     -emit-module-interface-path "$MODULE_DIR/arm64-apple-macos.swiftinterface" \
     -o "$MODULE_DIR/arm64-apple-macos.swiftmodule" || echo "Warning: Module emission had issues, continuing to mock library generation..."
 
-echo "--- Compiling Mock Dynamic Library ---"
+echo "--- Compiling Mock Dynamic Library (First Pass) ---"
 swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
     "${FRAMEWORK}Interface.swift" \
     -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
     -sdk "$SDK_ROOT" -language-mode 5
 
-# Generate aliases using comparison script
-rm -f aliases.txt
-./swift-interface-gen --compare "$TBD_PATH" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" aliases.txt
+# Generate stubs using the compare tool
+rm -f stubs.s stubs.o
+./swift-interface-gen --compare "${FRAMEWORK}_exports.txt" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" stubs.s
 
-if [ -f aliases.txt ] && [ -s aliases.txt ]; then
-    echo "--- Re-compiling Mock Dynamic Library with Symbol Aliases ---"
-    ALIAS_FLAGS=$(cat aliases.txt)
-    swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
-        "${FRAMEWORK}Interface.swift" \
-        -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
-        -sdk "$SDK_ROOT" -language-mode 5 $ALIAS_FLAGS
+if [ -f stubs.s ] && [ -s stubs.s ]; then
+    echo "--- Compiling Assembly Stubs ---"
+    clang -c stubs.s -o stubs.o
 fi
+
+echo "--- Re-compiling Mock Dynamic Library with Exact Symbol Alignment ---"
+LINKER_FLAGS=""
+if [ -f "${FRAMEWORK}_exports.txt" ]; then
+    LINKER_FLAGS="$LINKER_FLAGS -Xlinker -exported_symbols_list -Xlinker ${FRAMEWORK}_exports.txt"
+fi
+
+EXTRA_OBJECTS=""
+if [ -f stubs.o ]; then
+    EXTRA_OBJECTS="stubs.o"
+fi
+
+swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
+    "${FRAMEWORK}Interface.swift" $EXTRA_OBJECTS \
+    -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
+    -sdk "$SDK_ROOT" -language-mode 5 $LINKER_FLAGS
+
+# Clean up temporary files
+rm -f stubs.s stubs.o "${FRAMEWORK}_exports.txt"
 
 echo "--- Compiling Test Program ---"
 swiftc -F LocalFrameworks "$TEST_FILE" \

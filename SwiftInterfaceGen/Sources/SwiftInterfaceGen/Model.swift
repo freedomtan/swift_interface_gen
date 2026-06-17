@@ -9,7 +9,7 @@ enum MemberKind {
     case initializer(String)
     case property(name: String, type: String, isReadOnly: Bool, isStatic: Bool)
     case method(name: String, signature: String, isStatic: Bool)
-    case enumCase(name: String, payload: String?)
+    case enumCase(name: String, payload: String?, hasLabel: Bool)
     case associatedType(String)
     case other(String)
 }
@@ -185,7 +185,7 @@ class TypeNode {
         
         var hasCases = false
         for member in members.values {
-            if case .enumCase(_, _) = member { hasCases = true; break }
+            if case .enumCase(_, _, _) = member { hasCases = true; break }
             if case .property(_, let t, _, let isStatic) = member {
                 if isEnum && isStatic && (t == self.name || t.hasSuffix("." + self.name)) {
                     hasCases = true
@@ -355,9 +355,9 @@ class TypeNode {
         
         let sortedMembers = members.values.sorted(by: { 
             switch ($0, $1) {
-            case (.enumCase(let n1, _), .enumCase(let n2, _)): return n1 < n2
-            case (.enumCase(_, _), _): return true
-            case (_, .enumCase(_, _)): return false
+            case (.enumCase(let n1, _, _), .enumCase(let n2, _, _)): return n1 < n2
+            case (.enumCase(_, _, _), _): return true
+            case (_, .enumCase(_, _, _)): return false
             case (.initializer(_), .initializer(_)): return false
             case (.initializer(_), _): return true
             case (_, .initializer(_)): return false
@@ -391,7 +391,7 @@ class TypeNode {
             let overrideMod = isOverride ? "override " : ""
             
             switch member {
-            case .enumCase(let name, let payload):
+            case .enumCase(let name, let payload, let hasLabel):
                 if generatedEnumCases.contains(name) { continue }
                 generatedEnumCases.insert(name)
                 var indirectPrefix = ""
@@ -411,7 +411,11 @@ class TypeNode {
                         }
                     }
                     if topLevelCommas == 0 {
-                        lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(_: \(payload))")
+                        if hasLabel {
+                            lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(\(name): \(payload))")
+                        } else {
+                            lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(_: \(payload))")
+                        }
                     } else {
                         lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(\(payload))")
                     }
@@ -475,7 +479,9 @@ class TypeNode {
 
                 let staticMod = isStatic ? "static " : ""
                 let finalMod = (!isStatic && self.kind == "class" && self.finalMembers.contains(n)) ? "final " : ""
-                if isProtocol {
+                if n == "subscript" || n == "`subscript`" {
+                    lines.append(renderSubscript(cleanT: cleanT, isProtocol: isProtocol, isReadOnly: isReadOnly, staticMod: staticMod, finalMod: finalMod, overrideMod: overrideMod, nextIndent: nextIndent))
+                } else if isProtocol {
                     let suffix = isReadOnly ? "{ get }" : "{ get set }"
                     lines.append("\(nextIndent)\(staticMod)var \(n): \(cleanT) \(suffix)")
                 } else {
@@ -874,5 +880,66 @@ class TypeNode {
         }
         
         return output
+    }
+
+    private func splitFunctionType(_ typeStr: String) -> (params: String, ret: String)? {
+        let trimmed = typeStr.trimmingCharacters(in: .whitespaces)
+        var depth_p = 0
+        var depth_a = 0
+        var depth_s = 0
+        var arrowIdx: String.Index? = nil
+        var i = trimmed.index(before: trimmed.endIndex)
+        while i >= trimmed.startIndex {
+            let c = trimmed[i]
+            if c == ">" && i > trimmed.startIndex && trimmed[trimmed.index(before: i)] == "-" {
+                if depth_p == 0 && depth_a == 0 && depth_s == 0 {
+                    arrowIdx = trimmed.index(before: i)
+                    break
+                }
+                i = trimmed.index(before: i)
+            }
+            else if c == ")" { depth_p += 1 }
+            else if c == "(" { depth_p -= 1 }
+            else if c == ">" { depth_a += 1 }
+            else if c == "<" { depth_a -= 1 }
+            else if c == "]" { depth_s += 1 }
+            else if c == "[" { depth_s -= 1 }
+            if i == trimmed.startIndex { break }
+            i = trimmed.index(before: i)
+        }
+        guard let arrow = arrowIdx else { return nil }
+        let left = String(trimmed[..<arrow]).trimmingCharacters(in: .whitespaces)
+        let right = String(trimmed[trimmed.index(arrow, offsetBy: 2)...]).trimmingCharacters(in: .whitespaces)
+        return (left, right)
+    }
+
+    private func renderSubscript(cleanT: String, isProtocol: Bool, isReadOnly: Bool, staticMod: String, finalMod: String, overrideMod: String, nextIndent: String) -> String {
+        var params = cleanT
+        var retType = "Any"
+        var genericPart = ""
+        
+        if let split = splitFunctionType(cleanT) {
+            var paramsPart = split.params
+            retType = split.ret
+            
+            if paramsPart.hasPrefix("<") {
+                if let closeAngleIdx = paramsPart.firstIndex(of: ">") {
+                    genericPart = String(paramsPart[..<paramsPart.index(after: closeAngleIdx)]).trimmingCharacters(in: .whitespaces)
+                    paramsPart = String(paramsPart[paramsPart.index(after: closeAngleIdx)...]).trimmingCharacters(in: .whitespaces)
+                }
+            }
+            
+            params = Parser.fixUnnamedParameters(paramsPart, isSubscript: true)
+        }
+        
+        if isProtocol {
+            let suffix = isReadOnly ? "{ get }" : "{ get set }"
+            return "\(nextIndent)\(staticMod)subscript\(genericPart)\(params) -> \(retType) \(suffix)"
+        } else {
+            let defaultVal = TypeNode.defaultReturnValue(for: retType)
+            let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
+            let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set {} }"
+            return "\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)subscript\(genericPart)\(params) -> \(retType) \(suffix)"
+        }
     }
 }
