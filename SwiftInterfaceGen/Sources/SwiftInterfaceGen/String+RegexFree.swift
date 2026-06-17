@@ -1202,7 +1202,26 @@ extension String {
                         followedByGeneric = true
                     }
                     
-                    if !followedByGeneric {
+                    var precededByExtension = false
+                    var prevIdx = start - 1
+                    while prevIdx >= 0 && chars[prevIdx].isWhitespace {
+                        prevIdx -= 1
+                    }
+                    if prevIdx >= 8 {
+                        let sub = String(chars[(prevIdx - 8)...prevIdx])
+                        if sub == "extension" {
+                            if prevIdx - 9 < 0 {
+                                precededByExtension = true
+                            } else {
+                                let beforeC = chars[prevIdx - 9]
+                                if !beforeC.isLetter && !beforeC.isNumber && beforeC != "_" && beforeC != "$" {
+                                    precededByExtension = true
+                                }
+                            }
+                        }
+                    }
+                    
+                    if !followedByGeneric && !precededByExtension {
                         var count = 0
                         if let cVal = flatGenerics[word] {
                             count = cVal

@@ -440,11 +440,6 @@ struct SwiftInterfaceGen {
         // Handle AnySequence
         c = c.replaceWordWithoutGeneric("AnySequence", with: "AnySequence<Any>")
         
-        // Handle ~Escapable types
-        c = c.replaceWord("Span", with: "_Span")
-        c = c.replaceWord("MutableSpan", with: "_MutableSpan")
-        c = c.replaceWord("RawSpan", with: "_RawSpan")
-        c = c.replaceWord("MutableRawSpan", with: "_MutableRawSpan")
         
         // Fix prefix/postfix operators
         c = c.fixPrefixAndPostfixOperators()

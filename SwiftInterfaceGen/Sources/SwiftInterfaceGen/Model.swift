@@ -19,6 +19,7 @@ class TypeNode {
     var kind: String = "unknown"
     var members: [String: MemberKind] = [:]
     var extensionMembers: [String: MemberKind] = [:]
+    var constrainedExtensions: [String: [String: MemberKind]] = [:]
     var nestedTypes: [String: TypeNode] = [:]
     var conformances: Set<String> = []
     var isGeneric: Bool = false
@@ -287,13 +288,17 @@ class TypeNode {
         var seen = Set<String>()
         inheritsList = inheritsList.filter { seen.insert($0).inserted }
         if actualKind == "struct" || actualKind == "class" || actualKind == "enum" {
+            // Comparable is safe to keep — we emit the < stub and the descriptor is valuable.
+            // The rest cause compiler errors (require many complex protocol requirements).
             let forbiddenProtocols: Set<String> = [
-                "AdditiveArithmetic", "BinaryFloatingPoint", "Comparable", "ExpressibleByFloatLiteral",
+                "AdditiveArithmetic", "BinaryFloatingPoint", "ExpressibleByFloatLiteral",
                 "ExpressibleByIntegerLiteral", "FloatingPoint", "Numeric", "SignedNumeric", "Strideable"
             ]
             inheritsList = inheritsList.filter { !forbiddenProtocols.contains($0) }
         }
         if actualKind == "class" {
+            // Strip Equatable and Hashable — these generate extra conformance descriptors
+            // that the TBD does not export for class types.
             inheritsList = inheritsList.filter { !["Hashable", "Codable", "Sendable", "Equatable"].contains($0) }
         }
         
@@ -301,7 +306,7 @@ class TypeNode {
         
         let typeName = nameOverride ?? name
         var displayTypeName = escapeKeyword(typeName)
-        if isGeneric && !displayTypeName.contains("<") {
+        if isGeneric && !isProtocol && !displayTypeName.contains("<") {
             var count = 1
             if let parser = parser {
                 let fullPath1 = parser.defaultModule + "." + name
@@ -312,19 +317,44 @@ class TypeNode {
                     count = inferredCount
                 }
             }
+            
+            var assocTypes = [String]()
+            for member in members.values {
+                if case .associatedType(let code) = member {
+                    let parts = code.components(separatedBy: " ")
+                    if parts.count >= 2 {
+                        let cleaned = parts[1].components(separatedBy: ":").first!.trimmingCharacters(in: .whitespaces)
+                        assocTypes.append(cleaned)
+                    }
+                }
+            }
+            let sortedAssoc = assocTypes.sorted()
+            
             let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
             var params = [String]()
             for i in 0..<count {
-                if i < placeholders.count {
-                    params.append(placeholders[i])
+                if isProtocol {
+                    if i < sortedAssoc.count {
+                        params.append(sortedAssoc[i])
+                    } else {
+                        params.append(i < placeholders.count ? placeholders[i] : "A\(i)")
+                    }
                 } else {
-                    params.append("A\(i)")
+                    if i < placeholders.count {
+                        params.append(placeholders[i])
+                    } else {
+                        params.append("A\(i)")
+                    }
                 }
             }
             displayTypeName += "<\(params.joined(separator: ", "))>"
         }
         
-        lines.append("\(indent)public \(actualKind) \(displayTypeName)\(inheritance) {")
+        // NSObject subclasses need `open` so that library-evolution mode generates dispatch
+        // thunks (Tj) for overridable/required methods like init?(coder:).
+        let isNSObjectSubclass = baseClass == "NSObject"
+        let classVisibility = (actualKind == "class" && isNSObjectSubclass) ? "open" : "public"
+        lines.append("\(indent)\(classVisibility) \(actualKind) \(displayTypeName)\(inheritance) {")
         
         let nextIndent = indent + "    "
         
@@ -443,7 +473,16 @@ class TypeNode {
                 
                 if isProtocol { lines.append("\(nextIndent)\(cleanedSig)") }
                 else if isEnum { /* skip */ }
-                else { lines.append("\(nextIndent)public \(overrideMod)\(cleanedSig) {}") }
+                else {
+                    let initBody: String
+                    if isOverride && cleanedSig.starts(with: "init()") {
+                        // NSObject subclass: must call super.init()
+                        initBody = "{ super.init() }"
+                    } else {
+                        initBody = "{}"
+                    }
+                    lines.append("\(nextIndent)public \(overrideMod)\(cleanedSig) \(initBody)")
+                }
             case .property(let n, let t, let isReadOnly, let isStatic):
                 let propKey = "\(isStatic ? "static" : "instance")-\(n)"
                 if generatedProperties.contains(propKey) { continue }
@@ -686,6 +725,8 @@ class TypeNode {
             let hasInitFrom = members.values.contains { if case .initializer(let s) = $0, s.contains("init(from:") { return true }; return false }
             let hasEncodeTo = members.values.contains { if case .method(let n, _, _) = $0, n == "encode" { return true }; return false }
             let hasHashInto = members.values.contains { if case .method(let n, _, _) = $0, n == "hash" { return true }; return false }
+            let hasCoderInit = members.values.contains { if case .initializer(let s) = $0, s.contains("init(coder:") { return true }; return false }
+            let hasEncodeWith = members.values.contains { if case .method(let n, let s, _) = $0, n == "encode" && s.contains("with:") { return true }; return false }
 
             if (hasConformance("Decodable") || hasConformance("Codable")) && !hasInitFrom {
                 lines.append("\(nextIndent)public init(from decoder: any Decoder) throws { fatalError() }")
@@ -704,6 +745,20 @@ class TypeNode {
             }
             if hasConformance("CustomStringConvertible") && !hasDescriptionProperty() {
                 lines.append("\(nextIndent)public var description: String { get { return \"\" } }")
+            }
+            // NSCoding: open classes that NSObject subclasses need required init?(coder:) and encode(with:)
+            // so that library-evolution dispatch thunks (Tj) are generated.
+            let isNSObjectBase = baseClass == "NSObject"
+            if isNSObjectBase && hasConformance("NSCoding") {
+                if !hasCoderInit {
+                    lines.append("\(nextIndent)public required init?(coder: NSCoder) {}")
+                } else {
+                    // Replace non-required coder init with required version
+                    // (done at emit time: mark existing coder init as required)
+                }
+                if !hasEncodeWith {
+                    lines.append("\(nextIndent)open func encode(with coder: NSCoder) {}")
+                }
             }
         }
         
@@ -745,48 +800,63 @@ class TypeNode {
         let separator = (path.isEmpty || path.hasSuffix("_")) ? "" : "."
         let currentPath = path.isEmpty ? name : path + separator + name
         
-        if !extensionMembers.isEmpty {
-            var inScope = Set<String>()
-            if isGeneric {
-                let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
-                var count = 1
-                if let parser = parser {
-                    let fullPath1 = defaultModule + "." + name
-                    let fullPath2 = name
-                    if let inferredCount = parser.discoveredGenerics[fullPath1] {
-                        count = inferredCount
-                    } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
-                        count = inferredCount
-                    }
+        var inScope = Set<String>()
+        let isProtocol = kind == "protocol"
+        var assocTypes = [String]()
+        for member in members.values {
+            if case .associatedType(let code) = member {
+                let parts = code.components(separatedBy: " ")
+                if parts.count >= 2 {
+                    let cleaned = parts[1].components(separatedBy: ":").first!.trimmingCharacters(in: .whitespaces)
+                    assocTypes.append(cleaned)
+                    inScope.insert(cleaned)
                 }
-                for i in 0..<count {
+            }
+        }
+        let sortedAssoc = assocTypes.sorted()
+
+        if isGeneric {
+            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+            var count = 1
+            if let parser = parser {
+                let fullPath1 = defaultModule + "." + name
+                let fullPath2 = name
+                if let inferredCount = parser.discoveredGenerics[fullPath1] {
+                    count = inferredCount
+                } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
+                    count = inferredCount
+                }
+            }
+            for i in 0..<count {
+                if isProtocol {
+                    if i < sortedAssoc.count {
+                        inScope.insert(sortedAssoc[i])
+                    } else {
+                        inScope.insert(i < placeholders.count ? placeholders[i] : "A\(i)")
+                    }
+                } else {
                     inScope.insert(i < placeholders.count ? placeholders[i] : "A\(i)")
                 }
             }
-            for member in members.values {
-                if case .associatedType(let code) = member {
-                    let parts = code.components(separatedBy: " ")
-                    if parts.count >= 2 {
-                        inScope.insert(parts[1].trimmingCharacters(in: .whitespaces))
-                    }
+        }
+        let cleanScope = { (s: String) -> String in
+            var res = s
+            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+            for p in placeholders {
+                if !inScope.contains(p) {
+                    res = res.replaceWord(p, with: "Any")
                 }
             }
-            let cleanScope = { (s: String) -> String in
-                var res = s
-                let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
-                for p in placeholders {
-                    if !inScope.contains(p) {
-                        res = res.replaceWord(p, with: "Any")
-                    }
-                }
-                return res
-            }
+            return res
+        }
 
+        func generateOneExtension(membersList: [MemberKind], constraint: String?) -> String {
             var extLines = [String]()
-            extLines.append("extension \(currentPath) {")
+            let constraintSuffix = constraint != nil ? " " + constraint! : ""
+            extLines.append("extension \(currentPath)\(constraintSuffix) {")
             let extNextIndent = "    "
             
-            let sortedExt = extensionMembers.values.sorted(by: { 
+            let sortedExt = membersList.sorted(by: { 
                 switch ($0, $1) {
                 case (.initializer(_), .initializer(_)): return false
                 case (.initializer(_), _): return true
@@ -833,7 +903,25 @@ class TypeNode {
                 }
             }
             extLines.append("}")
-            output += extLines.joined(separator: "\n") + "\n\n"
+            return extLines.joined(separator: "\n") + "\n\n"
+        }
+
+        if !extensionMembers.isEmpty {
+            output += generateOneExtension(membersList: Array(extensionMembers.values), constraint: nil)
+        }
+        
+        let sortedConstraints = constrainedExtensions.keys.sorted()
+        for constraint in sortedConstraints {
+            if let membersMap = constrainedExtensions[constraint] {
+                var finalConstraint = constraint
+                if kind == "protocol" {
+                    finalConstraint = finalConstraint.replacingOccurrences(of: "where A:", with: "where Self:")
+                    finalConstraint = finalConstraint.replacingOccurrences(of: "where A ", with: "where Self ")
+                    finalConstraint = finalConstraint.replacingOccurrences(of: ", A:", with: ", Self:")
+                    finalConstraint = finalConstraint.replacingOccurrences(of: ", A ", with: ", Self ")
+                }
+                output += generateOneExtension(membersList: Array(membersMap.values), constraint: finalConstraint)
+            }
         }
         
         if kind == "protocol" {

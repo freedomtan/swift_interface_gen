@@ -169,6 +169,7 @@ class Parser {
         
         var d = demangled
         let d_orig = demangled
+        var constraints: String? = nil
         
         if d_orig.starts(with: "associated type descriptor for ") {
             let fullPath = d_orig.replacingOccurrences(of: "associated type descriptor for ", with: "").trimmingCharacters(in: .whitespaces)
@@ -257,14 +258,42 @@ class Parser {
         }
         
         if d_orig.contains("deinit") || 
-           d_orig.contains(" where ") || d_orig.contains("initializeBufferWithCopy") ||
+           (d_orig.contains(" where ") && !d_orig.contains("(extension in ")) ||
+           d_orig.contains("initializeBufferWithCopy") ||
            d_orig.contains("async function pointer") {
             return
         }
 
-        if d.starts(with: "(extension in ") {
-            if let colonIndex = d.firstIndex(of: ":") {
-                d = String(d[d.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+        var body = d
+        var isStaticExtension = false
+        if body.starts(with: "static ") {
+            body = String(body.dropFirst(7))
+            isStaticExtension = true
+        }
+        
+        if body.starts(with: "(extension in ") {
+            if let colonIndex = body.firstIndex(of: ":") {
+                let actualBody = String(body[body.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+                d = isStaticExtension ? "static " + actualBody : actualBody
+                
+                // Parse constraints if actualBody contains "< where "
+                if let range = actualBody.range(of: "< where ") {
+                    var depth = 1
+                    var scanIdx = range.upperBound
+                    while scanIdx < actualBody.endIndex && depth > 0 {
+                        let char = actualBody[scanIdx]
+                        if char == "<" { depth += 1 }
+                        else if char == ">" { depth -= 1 }
+                        scanIdx = actualBody.index(after: scanIdx)
+                    }
+                    if depth == 0 {
+                        let rawConstraints = String(actualBody[range.upperBound..<actualBody.index(before: scanIdx)]).trimmingCharacters(in: .whitespaces)
+                        var simplified = simplifyType(rawConstraints)
+                        simplified = simplified.replacingOccurrences(of: ": any ", with: ": ")
+                        simplified = simplified.replacingOccurrences(of: ":any ", with: ": ")
+                        constraints = "where " + simplified
+                    }
+                }
             }
         }
 
@@ -393,6 +422,10 @@ class Parser {
                         let initSig = Parser.fixUnnamedParameters(signature, escapingMap: symbolEscapingMap[mangled])
                         if mangled.contains("PAAE") {
                             node.extensionMembers["init" + initSig] = .initializer("init" + initSig)
+                        } else if let constraints = constraints {
+                            node.constrainedExtensions[constraints, default: [:]]["init" + initSig] = .initializer("init" + initSig)
+                        } else if mangled.contains("PA") && mangled.contains("rlE") {
+                            node.extensionMembers["init" + initSig] = .initializer("init" + initSig)
                         } else {
                             node.members["init" + initSig] = .initializer("init" + initSig)
                         }
@@ -400,6 +433,10 @@ class Parser {
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
                         let fixedSignature = Parser.fixUnnamedParameters(escapedMemberName + signature, escapingMap: symbolEscapingMap[mangled])
                         if mangled.contains("PAAE") {
+                            node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                        } else if let constraints = constraints {
+                            node.constrainedExtensions[constraints, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                        } else if mangled.contains("PA") && mangled.contains("rlE") {
                             node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                         } else {
                             node.members[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
@@ -449,6 +486,10 @@ class Parser {
                 let escapedMemberName = escapeKeyword(memberName)
                 if mangled.contains("PAAE") {
                     node.extensionMembers[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                } else if let constraints = constraints {
+                    node.constrainedExtensions[constraints, default: [:]][escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                } else if mangled.contains("PA") && mangled.contains("rlE") {
+                    node.extensionMembers[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                 } else {
                     node.members[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                 }
@@ -489,6 +530,7 @@ class Parser {
     }
 
     private func findOrCreateType(name: String) -> TypeNode {
+        if name.contains("<") { fputs("findOrCreateType with <: \(name)\n", stderr) }
         var parts = name.components(separatedBy: ".")
 
         let isTopLevel = isModuleAvailable(parts[0]) || parts[0] == "__C" || parts[0] == defaultModule
@@ -531,7 +573,7 @@ class Parser {
         var n = name.stripGenericAngles().stripLongNumbers()
         
         if n.contains("(extension in ") {
-            for ext in discoveredNamespaces {
+            for ext in discoveredNamespaces.union([defaultModule]) {
                 n = n.replacingOccurrences(of: "(extension in \(ext)):", with: "")
             }
         }
@@ -607,8 +649,13 @@ class Parser {
             if word == "__C" {
                 t = t.replaceWordDot(word, with: "")
             } else if word != "Swift" && word != defaultModule && isModuleAvailable(word) {
-                t = t.replaceWordDot(word, with: "")
-                referencedModules.insert(word)
+                let workspaceFrameworks = ["CoreAICommon", "ODIE", "ModelCatalog", "CoreAICompiler"]
+                if workspaceFrameworks.contains(word) {
+                    referencedModules.insert(word)
+                } else {
+                    t = t.replaceWordDot(word, with: "")
+                    referencedModules.insert(word)
+                }
             }
         }
         
@@ -630,6 +677,8 @@ class Parser {
              if t.contains(mod) {
                   if mod == defaultModule {
                       t = t.replaceWordDot(mod, with: "")
+                  } else if isModuleAvailable(mod) {
+                      // Keep the qualified module name prefix for available modules
                   } else {
                       t = t.replaceWordDot(mod, with: "\(mod)_")
                   }
@@ -935,7 +984,12 @@ class Parser {
     }
 
     func isTypeDefinedInFramework(module: String, typeName: String) -> Bool {
-        if ["Swift", "Foundation", "ObjectiveC"].contains(module) {
+        let systemModules: Set<String> = [
+            "Swift", "Foundation", "ObjectiveC", "__C", "Dispatch", 
+            "Metal", "IOSurface", "CoreGraphics", "CoreVideo", 
+            "CoreMedia", "CoreImage", "CoreML", "UniformTypeIdentifiers"
+        ]
+        if systemModules.contains(module) {
             return true
         }
         return getFrameworkDefinedTypes(module: module).contains(typeName)
@@ -988,6 +1042,39 @@ class Parser {
             if let node = modules["ModelCatalog"]?.nestedTypes["LLMModelBase"] {
                 node.members["dependencies"] = .property(name: "dependencies", type: "Array<any ManagedResource>", isReadOnly: true, isStatic: false)
                 node.members["runtimeInformation"] = .property(name: "runtimeInformation", type: "Array<ManagedRuntimeInformation>", isReadOnly: true, isStatic: false)
+            }
+        }
+        
+        // Auto-detect NSObject subclasses: any class with an init(coder: NSCoder) member is an
+        // NSObject subclass conforming to NSCoding. Mark them so Model.swift emits the correct
+        // `open class X: NSObject, NSCoding` declaration with `required init?(coder:)`.
+        // This is essential because library-evolution mode only generates dispatch thunks (Tj)
+        // for `open` classes, and NSCoding requires the `required` designation.
+        func markNSObjectSubclasses(node: TypeNode) {
+            if node.kind == "class" && node.baseClass == nil {
+                let hasCoderInit = node.members.values.contains {
+                    if case .initializer(let s) = $0, s.contains("init(coder:") { return true }
+                    return false
+                }
+                if hasCoderInit {
+                    node.baseClass = "NSObject"
+                    node.conformances.insert("NSCoding")
+                    // Ensure the coder init uses the required init?(coder:) form
+                    // Remove plain init(coder:) and let Model.swift emit the required form
+                    let keysToRemove = node.members.keys.filter {
+                        if case .initializer(let s) = node.members[$0]!, s.contains("init(coder:") { return true }
+                        return false
+                    }
+                    for k in keysToRemove { node.members.removeValue(forKey: k) }
+                }
+            }
+            for nested in node.nestedTypes.values {
+                markNSObjectSubclasses(node: nested)
+            }
+        }
+        for module in modules.values {
+            for type in module.nestedTypes.values {
+                markNSObjectSubclasses(node: type)
             }
         }
         
@@ -1066,6 +1153,32 @@ class Parser {
 
     func generateAll() -> String {
         applyTypeFixups()
+        
+        let systemTypes: Set<String> = [
+            "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
+            "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
+            "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
+            "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
+            "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
+            "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Identifiable",
+            "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
+            "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
+            "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
+            "AnySequence", "FloatingPointRoundingRule", "Task", "Mutex", "CustomStringConvertible", "CustomDebugStringConvertible", "CodingKey",
+            "ExpressibleByExtendedGraphemeClusterLiteral", "ExpressibleByStringLiteral", "ExpressibleByUnicodeScalarLiteral",
+            "ExpressibleByIntegerLiteral", "ExpressibleByFloatLiteral", "ExpressibleByBooleanLiteral",
+            "ExpressibleByNilLiteral", "ExpressibleByArrayLiteral", "ExpressibleByDictionaryLiteral",
+            "LocalizedError", "CustomNSError", "Logger", "NSXPCConnection", "NSXPCInterface", "Protocol", "NSCopying",
+            "Swift", "Foundation", "CoreFoundation", "Metal", "IOSurface", "CoreGraphics", "CoreVideo", "CoreMedia", "CoreImage", "CoreML", "Dispatch", "os", "ObjectiveC", "Synchronization",
+            "Strideable", "AdditiveArithmetic", "BinaryFloatingPoint", "FloatingPoint", "FloatingPointSign", "Numeric", "SignedNumeric",
+            "MTLDevice", "MTLBuffer", "MTLTexture", "IOSurfaceRef", "CVBufferRef", "CVBuffer",
+            "Span", "MutableSpan", "RawSpan", "MutableRawSpan",
+            // Additional System Types to prevent shadowing and matching issues:
+            "NSNumber", "NSCoder", "Date", "DispatchQueue", "URLComponents", "UUID", "NSZone", "AnyHashable", "UTType", "Decimal", "IndexSet", "URLRequest", "URLSessionTask", "OS_dispatch_queue",
+            "AsyncStream", "AsyncThrowingStream",
+            "NSCoding", "NSSecureCoding", "NSObjectProtocol"
+        ]
+
         fputs("discoveredProtocols: \(discoveredProtocols)\n", stderr)
         // Set all referenced but undefined types to struct
         func defaultUnknownTypes(node: TypeNode) {
@@ -1116,6 +1229,9 @@ class Parser {
             
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             for type in sortedTypes {
+                if moduleName == "__C" && systemTypes.contains(type.name) {
+                    continue
+                }
                 let flattenedName = "\(moduleName)_\(type.name)"
                 if definedTypes.contains(flattenedName) { continue }
                 
@@ -1181,7 +1297,7 @@ class Parser {
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             for type in sortedTypes {
                 let flattenedName = "\(moduleName)_\(type.name)"
-                if !definedTypes.contains(flattenedName) && type.extensionMembers.isEmpty { continue }
+                if !definedTypes.contains(flattenedName) && type.extensionMembers.isEmpty && type.constrainedExtensions.isEmpty { continue }
                 
                 let pathPrefix = (moduleName == defaultModule) ? "" : "\(moduleName)_"
                 output += type.generateExtensions(defaultModule: defaultModule, parser: self, path: pathPrefix)
@@ -1267,26 +1383,6 @@ class Parser {
         // Find all defined types in output
         let allDefinedInOutput = output.scanFrameworkDefinedTypes()
         
-        let systemTypes: Set<String> = [
-            "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
-            "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
-            "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
-            "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
-            "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
-            "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Identifiable",
-            "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
-            "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
-            "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
-            "AnySequence", "FloatingPointRoundingRule", "Task", "Mutex", "CustomStringConvertible", "CustomDebugStringConvertible", "CodingKey",
-            "ExpressibleByExtendedGraphemeClusterLiteral", "ExpressibleByStringLiteral", "ExpressibleByUnicodeScalarLiteral",
-            "ExpressibleByIntegerLiteral", "ExpressibleByFloatLiteral", "ExpressibleByBooleanLiteral",
-            "ExpressibleByNilLiteral", "ExpressibleByArrayLiteral", "ExpressibleByDictionaryLiteral",
-            "LocalizedError", "CustomNSError", "Logger", "NSXPCConnection", "NSXPCInterface", "Protocol", "NSCopying",
-            "Swift", "Foundation", "CoreFoundation", "Metal", "IOSurface", "CoreGraphics", "CoreVideo", "CoreMedia", "CoreImage", "CoreML", "Dispatch", "os", "ObjectiveC", "Synchronization",
-            "Strideable", "AdditiveArithmetic", "BinaryFloatingPoint", "FloatingPoint", "FloatingPointSign", "Numeric", "SignedNumeric",
-            "MTLDevice", "MTLBuffer", "MTLTexture", "IOSurfaceRef", "CVBufferRef", "CVBuffer"
-        ]
-        
         let sortedTypes = referencedTypes.sorted()
         for type in sortedTypes {
             if systemTypes.contains(type) || type == defaultModule || type == "___SHIELDED_\(defaultModule)___" || discoveredNamespaces.contains(type) { continue }
@@ -1294,7 +1390,17 @@ class Parser {
             if type.hasPrefix("JSON") { continue }
             
             // Check if defined
-            let isDefined = allDefinedInOutput.contains(type)
+            var isDefined = allDefinedInOutput.contains(type)
+            if !isDefined {
+                for ns in discoveredNamespaces {
+                    if ns != defaultModule && isModuleAvailable(ns) {
+                        if isTypeDefinedInFramework(module: ns, typeName: type) {
+                            isDefined = true
+                            break
+                        }
+                    }
+                }
+            }
             if !isDefined {
                 // Check if used with "any", ends with "_P", or is in discoveredProtocols
                 let flatDiscoveredProtocols = Set(discoveredProtocols.map { $0.replacingOccurrences(of: ".", with: "_") })
