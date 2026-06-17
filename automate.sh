@@ -68,7 +68,7 @@ swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
 
 # Generate aliases using comparison script
 rm -f aliases.txt
-python3 compare_symbols.py "$TBD_PATH" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" aliases.txt
+./swift-interface-gen --compare "$TBD_PATH" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" aliases.txt
 
 if [ -f aliases.txt ] && [ -s aliases.txt ]; then
     echo "--- Re-compiling Mock Dynamic Library with Symbol Aliases ---"

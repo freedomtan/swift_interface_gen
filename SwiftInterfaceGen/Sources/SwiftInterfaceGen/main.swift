@@ -4,8 +4,12 @@ import Foundation
 struct SwiftInterfaceGen {
     static func main() {
         let args = CommandLine.arguments
+        if args.contains("--compare") {
+            runCompare(args: args)
+            return
+        }
         if args.count < 2 {
-            print("Usage: swift-interface-gen <path_to_tbd> [--config <path_to_config.json>]")
+            print("Usage: swift-interface-gen <path_to_tbd> [--config <path_to_config.json>] or swift-interface-gen --compare <tbd_path> <dylib_path> [aliases_output_path]")
             return
         }
 
@@ -314,6 +318,145 @@ struct SwiftInterfaceGen {
         c = newLines.joined(separator: "\n")
         
         return c
+    }
+
+    static func runCompare(args: [String]) {
+        guard let compareIdx = args.firstIndex(of: "--compare"),
+              compareIdx + 2 < args.count else {
+            print("Usage: swift-interface-gen --compare <tbd_path> <dylib_path> [aliases_output_path]")
+            exit(1)
+        }
+        
+        let tbdPath = args[compareIdx + 1]
+        let dylibPath = args[compareIdx + 2]
+        let aliasesOutputPath = (compareIdx + 3 < args.count) ? args[compareIdx + 3] : nil
+        
+        guard let tbdContent = try? String(contentsOfFile: tbdPath, encoding: .utf8) else {
+            print("Error: Could not read TBD file at \(tbdPath)")
+            exit(1)
+        }
+        
+        let tbdSyms = extractSymbols(from: tbdContent)
+        let dylibSyms = extractDylibSymbols(dylibPath: dylibPath)
+        
+        print("Total symbols in TBD: \(tbdSyms.count)")
+        print("Total symbols in Dylib: \(dylibSyms.count)")
+        
+        func normalize(_ sym: String) -> String {
+            if sym.hasPrefix("_") {
+                return String(sym.dropFirst())
+            }
+            return sym
+        }
+        
+        var normalizedTbd = [String: String]()
+        for s in tbdSyms {
+            normalizedTbd[normalize(s)] = s
+        }
+        
+        var normalizedDylib = [String: String]()
+        for s in dylibSyms {
+            normalizedDylib[normalize(s)] = s
+        }
+        
+        var missing = [String]()
+        for (norm, orig) in normalizedTbd {
+            if normalizedDylib[norm] == nil {
+                missing.append(orig)
+            }
+        }
+        missing.sort()
+        
+        var extra = [String]()
+        for (norm, orig) in normalizedDylib {
+            if normalizedTbd[norm] == nil {
+                extra.append(orig)
+            }
+        }
+        extra.sort()
+        
+        print("\n--- Missing Symbols (in TBD but not in Dylib) ---")
+        print("Count: \(missing.count)")
+        for s in missing.prefix(50) {
+            print("  \(s)")
+        }
+        if missing.count > 50 {
+            print("  ... and \(missing.count - 50) more")
+        }
+        
+        print("\n--- Extra Symbols (in Dylib but not in TBD) ---")
+        print("Count: \(extra.count)")
+        for s in extra.prefix(50) {
+            print("  \(s)")
+        }
+        if extra.count > 50 {
+            print("  ... and \(extra.count - 50) more")
+        }
+        
+        if let aliasesPath = aliasesOutputPath {
+            print("\nGenerating alias flags to \(aliasesPath)...")
+            
+            var demangledMap = [String: String]()
+            let allSymbolsToDemangle = Set(missing).union(Set(extra))
+            for s in allSymbolsToDemangle {
+                if let dem = demangle(symbol: s) {
+                    demangledMap[s] = dem
+                }
+            }
+            
+            var demangledToExtra = [String: String]()
+            for extraSym in extra {
+                if let demExtra = demangledMap[extraSym] {
+                    demangledToExtra[demExtra] = extraSym
+                }
+            }
+            
+            var aliasFlags = [String]()
+            for missSym in missing {
+                if let demMiss = demangledMap[missSym],
+                   let extraSym = demangledToExtra[demMiss] {
+                    aliasFlags.append("-Xlinker -alias -Xlinker \(extraSym) -Xlinker \(missSym)")
+                }
+            }
+            
+            let aliasesContent = aliasFlags.joined(separator: " ")
+            do {
+                try aliasesContent.write(toFile: aliasesPath, atomically: true, encoding: .utf8)
+                print("Generated \(aliasFlags.count) symbol aliases.")
+            } catch {
+                print("Error writing aliases file: \(error)")
+            }
+        }
+    }
+    
+    static func extractDylibSymbols(dylibPath: String) -> Set<String> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/nm")
+        process.arguments = ["-gU", dylibPath]
+        
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            if let output = String(data: data, encoding: .utf8) {
+                var symbols = Set<String>()
+                output.enumerateLines { line, _ in
+                    let parts = line.split { $0.isWhitespace }
+                    if parts.count >= 3 {
+                        symbols.insert(String(parts[2]))
+                    } else if parts.count == 2 {
+                        symbols.insert(String(parts[1]))
+                    }
+                }
+                return symbols
+            }
+        } catch {
+            print("Error running nm: \(error)")
+        }
+        return []
     }
 
     struct StandardError: TextOutputStream {
