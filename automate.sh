@@ -67,7 +67,8 @@ swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
     -sdk "$SDK_ROOT" -language-mode 5
 
 # Generate stubs using the compare tool
-rm -f stubs.s stubs.o
+rm -f stubs.s stubs.o dummy_stubs.s
+echo "--- Comparing Symbols (First Pass / Pre-Alignment) ---"
 ./swift-interface-gen --compare "${FRAMEWORK}_exports.txt" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" stubs.s
 
 if [ -f stubs.s ] && [ -s stubs.s ]; then
@@ -91,8 +92,11 @@ swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
     -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
     -sdk "$SDK_ROOT" -language-mode 5 $LINKER_FLAGS
 
+echo "--- Comparing Symbols (Final Pass / Post-Alignment) ---"
+./swift-interface-gen --compare "${FRAMEWORK}_exports.txt" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" dummy_stubs.s
+
 # Clean up temporary files
-rm -f stubs.s stubs.o "${FRAMEWORK}_exports.txt"
+rm -f stubs.s stubs.o dummy_stubs.s "${FRAMEWORK}_exports.txt"
 
 echo "--- Compiling Test Program ---"
 swiftc -F LocalFrameworks "$TEST_FILE" \
