@@ -26,6 +26,7 @@ class Parser {
     private var scannedLocalSwiftFiles = false
     var tbdSymbols = Set<String>()
     var referencedModules = Set<String>()
+    var symbolEscapingMap: [String: [Int: Bool]] = [:]
 
     init() {}
 
@@ -192,7 +193,8 @@ class Parser {
             "ObjC resilient class stub for ",
             "reflection metadata for ",
             "value witness table for ",
-            "protocol conformance descriptor for "
+            "protocol conformance descriptor for ",
+            "base conformance descriptor for "
         ]
         
         var forcedKind: String? = nil
@@ -207,12 +209,15 @@ class Parser {
                     if mangled.hasSuffix("OMn") { forcedKind = "enum" }
                     else if mangled.hasSuffix("VMn") { forcedKind = "struct" }
                     else if mangled.hasSuffix("CMn") { forcedKind = "class" }
-                } else if desc.contains("protocol conformance descriptor") {
-                    let parts = d.components(separatedBy: " : ")
+                } else if desc.contains("conformance descriptor") {
+                    let parts = d.components(separatedBy: ":")
                     if parts.count == 2 {
                         var typePath = parts[0].trimmingCharacters(in: .whitespaces)
                         if typePath.contains("protocol conformance descriptor for ") {
                             typePath = typePath.replacingOccurrences(of: "protocol conformance descriptor for ", with: "")
+                        }
+                        if typePath.contains("base conformance descriptor for ") {
+                            typePath = typePath.replacingOccurrences(of: "base conformance descriptor for ", with: "")
                         }
                         var protoPath = parts[1].trimmingCharacters(in: .whitespaces)
                         if let inIndex = protoPath.range(of: " in ") {
@@ -220,6 +225,10 @@ class Parser {
                         }
                         
                         let node = findOrCreateType(name: cleanType(typePath))
+                        if desc.contains("base conformance") {
+                            setKind("protocol", for: node)
+                        }
+                        
                         let simplifiedProto = simplifyType(protoPath)
                         node.conformances.insert(simplifiedProto)
                         
@@ -247,7 +256,7 @@ class Parser {
             }
         }
         
-        if d_orig.contains("deinit") || d_orig.contains("__allocating_init") || 
+        if d_orig.contains("deinit") || 
            d_orig.contains(" where ") || d_orig.contains("initializeBufferWithCopy") ||
            d_orig.contains("async function pointer") {
             return
@@ -341,8 +350,14 @@ class Parser {
         if isRealMethod, let openParenIndex = cleanD.firstIndex(of: "(") {
             let prefix = String(cleanD[..<openParenIndex])
             if !prefix.hasSuffix("<") && cleanD.contains(" -> ") {
-                let fullMemberPath = prefix.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " :", with: "")
-                if fullMemberPath.contains(".__") { return }
+                var fullMemberPath = prefix.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " :", with: "")
+                if fullMemberPath.contains(".__") {
+                    if fullMemberPath.hasSuffix(".__allocating_init") {
+                        fullMemberPath = fullMemberPath.replacingOccurrences(of: ".__allocating_init", with: ".init")
+                    } else {
+                        return
+                    }
+                }
                 
                 var signatureRaw = String(cleanD[openParenIndex...])
                 let (typeName, memberNameRaw) = splitPath(fullMemberPath)
@@ -375,7 +390,7 @@ class Parser {
                         }
                         
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
-                        let initSig = Parser.fixUnnamedParameters(signature)
+                        let initSig = Parser.fixUnnamedParameters(signature, escapingMap: symbolEscapingMap[mangled])
                         if mangled.contains("PAAE") {
                             node.extensionMembers["init" + initSig] = .initializer("init" + initSig)
                         } else {
@@ -383,7 +398,7 @@ class Parser {
                         }
                     } else {
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
-                        let fixedSignature = Parser.fixUnnamedParameters(escapedMemberName + signature)
+                        let fixedSignature = Parser.fixUnnamedParameters(escapedMemberName + signature, escapingMap: symbolEscapingMap[mangled])
                         if mangled.contains("PAAE") {
                             node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                         } else {
@@ -710,7 +725,7 @@ class Parser {
         }
     }
 
-    static func fixUnnamedParameters(_ sig: String, isSubscript: Bool = false) -> String {
+    static func fixUnnamedParameters(_ sig: String, isSubscript: Bool = false, escapingMap: [Int: Bool]? = nil) -> String {
         guard let openParen = sig.firstIndex(of: "(") else { return sig }
         let prefix = sig[..<sig.index(after: openParen)]
         let rest = String(sig[sig.index(after: openParen)...])
@@ -767,7 +782,7 @@ class Parser {
 
         var newParams = [String]()
         var unnamedCount = 1
-        for p in paramList {
+        for (paramIndex, p) in paramList.enumerated() {
             let trimmed = p.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
             
@@ -799,7 +814,8 @@ class Parser {
                 typePart = String(trimmed[trimmed.index(after: cIdx)...]).trimmingCharacters(in: .whitespaces)
             }
 
-            let escapedType = Parser.escapeClosures(in: typePart, isTopLevelParameter: true)
+            let isEsc = escapingMap?[paramIndex] ?? true
+            let escapedType = Parser.escapeClosures(in: typePart, isTopLevelParameter: true, isEscaping: isEsc)
 
             if isSubscript {
                 if hasLabel && labelName != "_" {
@@ -1694,21 +1710,21 @@ class Parser {
         return false
     }
 
-    static func escapeClosures(in typeStr: String, isTopLevelParameter: Bool = false) -> String {
+    static func escapeClosures(in typeStr: String, isTopLevelParameter: Bool = false, isEscaping: Bool = true) -> String {
         let trimmed = typeStr.trimmingCharacters(in: .whitespaces)
         
         if trimmed.hasSuffix("?") || trimmed.hasPrefix("Optional<") || trimmed.hasSuffix("!") {
             if trimmed.hasSuffix("?") {
                 let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
-                return escapeClosures(in: inner) + "?"
+                return escapeClosures(in: inner, isEscaping: isEscaping) + "?"
             }
             if trimmed.hasSuffix("!") {
                 let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
-                return escapeClosures(in: inner) + "!"
+                return escapeClosures(in: inner, isEscaping: isEscaping) + "!"
             }
             if trimmed.hasPrefix("Optional<") && trimmed.hasSuffix(">") {
                 let inner = String(trimmed.dropFirst(9).dropLast()).trimmingCharacters(in: .whitespaces)
-                return "Optional<" + escapeClosures(in: inner) + ">"
+                return "Optional<" + escapeClosures(in: inner, isEscaping: isEscaping) + ">"
             }
         }
         
@@ -1847,9 +1863,9 @@ class Parser {
             let isFunc = escaped.contains("->")
             let isOpt = escaped.hasSuffix("?") || escaped.hasPrefix("Optional<")
             let hasEsc = escaped.contains("@escaping")
-            let escPrefix = (isFunc && !isOpt && !hasEsc) ? "@escaping " : ""
+            let escPrefix = (isFunc && !isOpt && !hasEsc && isEscaping) ? "@escaping " : ""
             let finalType = attrs + escPrefix + escaped + " " + throwsModifier + "-> " + escapeClosures(in: rightPart)
-            return isTopLevelParameter ? "@escaping " + finalType : finalType
+            return (isTopLevelParameter && isEscaping) ? "@escaping " + finalType : finalType
         }
         
         var paramList = [String]()
@@ -1916,6 +1932,6 @@ class Parser {
         }
         
         let finalType = attrs + "(" + escapedParams.joined(separator: ", ") + ") " + throwsModifier + "-> " + escapeClosures(in: rightPart)
-        return isTopLevelParameter ? "@escaping " + finalType : finalType
+        return (isTopLevelParameter && isEscaping) ? "@escaping " + finalType : finalType
     }
 }

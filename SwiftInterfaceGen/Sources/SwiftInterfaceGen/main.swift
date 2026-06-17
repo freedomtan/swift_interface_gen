@@ -119,6 +119,14 @@ struct SwiftInterfaceGen {
             }
         }
         print("Demangling took: \(Date().timeIntervalSince(start))s", to: &Self.standardError)
+
+        let symbolsWithClosures = demangledMap.filter { $0.demangled.contains("->") }.map { $0.mangled }
+        if !symbolsWithClosures.isEmpty {
+            let startExpand = Date()
+            let escapingResults = runDemangleExpand(symbols: symbolsWithClosures)
+            parser.symbolEscapingMap.merge(escapingResults) { (_, new) in new }
+            print("Demangle --expand for \(symbolsWithClosures.count) symbols took: \(Date().timeIntervalSince(startExpand))s", to: &Self.standardError)
+        }
         
         // Swift ABI Nominal Type Discovery Pass
         parser.discoverNominalTypes(demangledMap: demangledMap, currentModule: module)
@@ -194,6 +202,190 @@ struct SwiftInterfaceGen {
             }
         }
         return "\(sdkRoot)\(lib).tbd"
+    }
+
+    struct TreeNode {
+        let kind: String
+        let text: String?
+        let indent: Int
+    }
+
+    static func runDemangleExpand(symbols: [String]) -> [String: [Int: Bool]] {
+        var allResults: [String: [Int: Bool]] = [:]
+        let chunkSize = 100
+        for i in stride(from: 0, to: symbols.count, by: chunkSize) {
+            let end = min(i + chunkSize, symbols.count)
+            let chunk = Array(symbols[i..<end])
+            let chunkResult = runDemangleExpandChunk(symbols: chunk)
+            allResults.merge(chunkResult) { (_, new) in new }
+        }
+        return allResults
+    }
+
+    static func runDemangleExpandChunk(symbols: [String]) -> [String: [Int: Bool]] {
+        var result: [String: [Int: Bool]] = [:]
+        if symbols.isEmpty { return result }
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["swift-demangle", "--expand"]
+        
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        
+        do {
+            try process.run()
+        } catch {
+            print("Failed to run swift-demangle --expand: \(error)", to: &Self.standardError)
+            return result
+        }
+        
+        let symbolsData = (symbols.joined(separator: "\n") + "\n").data(using: .utf8)!
+        try? inputPipe.fileHandleForWriting.write(contentsOf: symbolsData)
+        try? inputPipe.fileHandleForWriting.close()
+        
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        
+        guard let output = String(data: data, encoding: .utf8) else { return result }
+        
+        return parseExpandTree(output: output)
+    }
+
+    static func parseExpandTree(output: String) -> [String: [Int: Bool]] {
+        var result: [String: [Int: Bool]] = [:]
+        
+        let lines = output.components(separatedBy: .newlines)
+        var currentSymbol: String? = nil
+        var symbolLines: [String] = []
+        
+        for line in lines {
+            if line.isEmpty { continue }
+            if line.hasPrefix("Demangling for ") {
+                if let sym = currentSymbol {
+                    result[sym] = parseParameters(from: symbolLines)
+                }
+                currentSymbol = line.replacingOccurrences(of: "Demangling for ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                symbolLines = []
+            } else if currentSymbol != nil {
+                if !line.hasPrefix(" ") && !line.contains("kind=") {
+                    // This is the demangled name line, end of tree for this symbol
+                    if let sym = currentSymbol {
+                        result[sym] = parseParameters(from: symbolLines)
+                    }
+                    currentSymbol = nil
+                    symbolLines = []
+                } else {
+                    symbolLines.append(line)
+                }
+            }
+        }
+        if let sym = currentSymbol {
+            result[sym] = parseParameters(from: symbolLines)
+        }
+        return result
+    }
+
+    static func parseParameters(from lines: [String]) -> [Int: Bool] {
+        var nodes: [TreeNode] = []
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("kind=") else { continue }
+            
+            var spaces = 0
+            for char in line {
+                if char == " " { spaces += 1 } else { break }
+            }
+            
+            let parts = trimmed.components(separatedBy: ", ")
+            let kindPart = parts[0]
+            let kind = kindPart.replacingOccurrences(of: "kind=", with: "")
+            
+            var text: String? = nil
+            if parts.count > 1 {
+                let textPart = parts[1]
+                if textPart.hasPrefix("text=\"") && textPart.hasSuffix("\"") {
+                    text = String(textPart.dropFirst(6).dropLast())
+                }
+            }
+            nodes.append(TreeNode(kind: kind, text: text, indent: spaces))
+        }
+        
+        func getChildren(ofParentIndex idx: Int) -> [Int] {
+            guard idx < nodes.count else { return [] }
+            let parentIndent = nodes[idx].indent
+            var childrenIndices = [Int]()
+            var i = idx + 1
+            while i < nodes.count {
+                let childIndent = nodes[i].indent
+                if childIndent <= parentIndent {
+                    break
+                }
+                if childIndent == parentIndent + 2 {
+                    childrenIndices.append(i)
+                }
+                i += 1
+            }
+            return childrenIndices
+        }
+        
+        var mainFuncIdx: Int? = nil
+        for (idx, node) in nodes.enumerated() {
+            if node.kind == "FunctionType" || node.kind == "NoEscapeFunctionType" {
+                mainFuncIdx = idx
+                break
+            }
+        }
+        
+        guard let funcIdx = mainFuncIdx else { return [:] }
+        
+        let funcChildren = getChildren(ofParentIndex: funcIdx)
+        guard let argTupleIdx = funcChildren.first(where: { nodes[$0].kind == "ArgumentTuple" }) else { return [:] }
+        
+        let argChildren = getChildren(ofParentIndex: argTupleIdx)
+        guard let typeIdx = argChildren.first(where: { nodes[$0].kind == "Type" }) else { return [:] }
+        
+        let typeChildren = getChildren(ofParentIndex: typeIdx)
+        guard let firstChildIdx = typeChildren.first else { return [:] }
+        
+        var parameterNodeIndices = [Int]()
+        if nodes[firstChildIdx].kind == "Tuple" {
+            let tupleChildren = getChildren(ofParentIndex: firstChildIdx)
+            parameterNodeIndices = tupleChildren.filter { nodes[$0].kind == "TupleElement" }
+        } else {
+            parameterNodeIndices = [typeIdx]
+        }
+        
+        var parameterEscaping: [Int: Bool] = [:]
+        for (paramIndex, paramNodeIdx) in parameterNodeIndices.enumerated() {
+            let paramIndent = nodes[paramNodeIdx].indent
+            var descIdx = paramNodeIdx + 1
+            var hasFunctionType = false
+            var isNoEscape = false
+            
+            while descIdx < nodes.count {
+                let desc = nodes[descIdx]
+                if desc.indent <= paramIndent {
+                    break
+                }
+                if desc.kind == "NoEscapeFunctionType" {
+                    hasFunctionType = true
+                    isNoEscape = true
+                } else if desc.kind == "FunctionType" {
+                    hasFunctionType = true
+                }
+                descIdx += 1
+            }
+            
+            if hasFunctionType {
+                parameterEscaping[paramIndex] = !isNoEscape
+            }
+        }
+        
+        return parameterEscaping
     }
 
     static func demangle(symbol mangledName: String) -> String? {
