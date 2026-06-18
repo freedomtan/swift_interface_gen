@@ -180,7 +180,9 @@ class Parser {
             if !typeName.isEmpty && !assocName.isEmpty {
                 let node = findOrCreateType(name: cleanType(typeName))
                 setKind("protocol", for: node)
-                node.members[assocName] = .associatedType("associatedtype \(assocName)")
+                if node.members[assocName] == nil {
+                    node.members[assocName] = .associatedType("associatedtype \(assocName)")
+                }
             }
             return
         }
@@ -215,7 +217,41 @@ class Parser {
                     else if mangled.hasSuffix("VMn") { forcedKind = "struct" }
                     else if mangled.hasSuffix("CMn") { forcedKind = "class" }
                 } else if desc.contains("associated conformance descriptor") {
-                    // associated conformance descriptor — early return, handled via stubs.s
+                    let parts = d.components(separatedBy: ":")
+                    if parts.count == 2 {
+                        let pathPart = parts[0].trimmingCharacters(in: .whitespaces)
+                        let protoPath = parts[1].trimmingCharacters(in: .whitespaces)
+                        
+                        let pathTokens = pathPart.components(separatedBy: ".")
+                        if pathTokens.count >= 2 {
+                            let assocName = pathTokens.last!
+                            var typePathTokens = Array(pathTokens.dropLast())
+                            // Fix demangling verbosity: Module.Protocol.Module.Protocol.AssocName -> Module.Protocol
+                            let typePathRaw = typePathTokens.joined(separator: ".")
+                            let typePath: String
+                            let half = typePathRaw.count / 2
+                            if typePathRaw.count > 3 && typePathRaw[typePathRaw.index(typePathRaw.startIndex, offsetBy: half)] == "." &&
+                               String(typePathRaw[..<typePathRaw.index(typePathRaw.startIndex, offsetBy: half)]) == String(typePathRaw[typePathRaw.index(typePathRaw.startIndex, offsetBy: half + 1)...]) {
+                                typePath = String(typePathRaw[..<typePathRaw.index(typePathRaw.startIndex, offsetBy: half)])
+                            } else {
+                                typePath = typePathRaw
+                            }
+                            
+                            let node = findOrCreateType(name: cleanType(typePath))
+                            setKind("protocol", for: node)
+                            let simplifiedProto = simplifyType(protoPath)
+                            fputs("Parsed assoc conformance: \(typePath).\(assocName) -> \(simplifiedProto)\n", stderr)
+                            if case .associatedType(let existing) = node.members[assocName] {
+                                let cleanConstraint = simplifiedProto.replacingOccurrences(of: "any ", with: "")
+                                if !existing.contains(cleanConstraint) {
+                                    node.members[assocName] = .associatedType("\(existing): \(cleanConstraint)")
+                                }
+                            } else {
+                                let cleanConstraint = simplifiedProto.replacingOccurrences(of: "any ", with: "")
+                                node.members[assocName] = .associatedType("associatedtype \(assocName): \(cleanConstraint)")
+                            }
+                        }
+                    }
                     return
                 } else if desc.contains("conformance descriptor") {
                     let parts = d.components(separatedBy: ":")
@@ -561,6 +597,14 @@ class Parser {
         }
         
         let moduleName = parts[0]
+        
+        // Skip creating nodes for __C module as they should be resolved via imports or typealiases
+        if moduleName == "__C" {
+            // We return a dummy node so the caller doesn't crash, but it won't be in modules dictionary
+            var current = TypeNode(name: name)
+            return current
+        }
+
         if modules[moduleName] == nil {
             modules[moduleName] = TypeNode(name: moduleName)
         }
@@ -611,6 +655,7 @@ class Parser {
             }
         }
         
+        n = n.replacingOccurrences(of: "__C\\.UAF([a-zA-Z0-9_]+)", with: "UnifiedAssetFramework.UAF$1", options: .regularExpression)
         if n.hasSuffix(".Array") { n = n.replacingOccurrences(of: ".Array", with: ".JSONArray") }
         if n.hasSuffix(".Dictionary") { n = n.replacingOccurrences(of: ".Dictionary", with: ".JSONDictionary") }
         if n.hasSuffix(".Object") { n = n.replacingOccurrences(of: ".Object", with: ".JSONObject") }
@@ -621,6 +666,9 @@ class Parser {
 
     func simplifyType(_ type: String, parentName: String? = nil, isMethodSignature: Bool = false) -> String {
         var t = type.replacingOccurrences(of: "CVBufferRef", with: "CVBuffer")
+        t = t.replacingOccurrences(of: "__C\\.UAF([a-zA-Z0-9_]+)", with: "UnifiedAssetFramework.UAF$1", options: .regularExpression)
+        t = t.replacingOccurrences(of: "__C.UAFSubscriptionDownloadStatus", with: "UnifiedAssetFramework.UAFSubscriptionDownloadStatus")
+        t = t.replacingOccurrences(of: "__C\\.OS_xpc_object", with: "XPC.OS_xpc_object", options: .regularExpression)
         
         // For each discovered protocol, add 'any' prefix when used as an existential type.
         // Track which ones are "ambiguous" (also have a concrete type with the same short name)

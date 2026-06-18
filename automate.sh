@@ -67,19 +67,20 @@ SWIFTEOF
         -emit-module-path "LocalFrameworks/AppleIntelligenceReporting.framework/Modules/AppleIntelligenceReporting.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
 fi
 
-# FeatureFlags stub
-if [ ! -d "LocalFrameworks/FeatureFlags.framework/Modules" ]; then
-    mkdir -p "LocalFrameworks/FeatureFlags.framework/Modules/FeatureFlags.swiftmodule"
-    cat > /tmp/_ff_stub.swift << 'SWIFTEOF'
-public protocol FeatureFlagsKey {
-    var domain: StaticString { get }
-    var feature: StaticString { get }
-}
+# UnifiedAssetFramework stub
+if [ ! -d "LocalFrameworks/UnifiedAssetFramework.framework/Modules" ]; then
+    mkdir -p "LocalFrameworks/UnifiedAssetFramework.framework/Modules/UnifiedAssetFramework.swiftmodule"
+    cat > /tmp/_uaf_stub.swift << 'SWIFTEOF'
+import Foundation
+public class UAFAssetSetConsistencyToken: NSObject {}
+public class UAFAsset: NSObject {}
+public class UAFAssetSet: NSObject {}
+public class UAFSubscriptionDownloadStatus: NSObject {}
 SWIFTEOF
-    swiftc -emit-library -o "LocalFrameworks/FeatureFlags.framework/FeatureFlags" \
-        /tmp/_ff_stub.swift -enable-library-evolution -module-name FeatureFlags -sdk "$SDK_ROOT" -language-mode 5 \
-        -emit-module-interface-path "LocalFrameworks/FeatureFlags.framework/Modules/FeatureFlags.swiftmodule/arm64-apple-macos.swiftinterface" \
-        -emit-module-path "LocalFrameworks/FeatureFlags.framework/Modules/FeatureFlags.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
+    swiftc -emit-library -o "LocalFrameworks/UnifiedAssetFramework.framework/UnifiedAssetFramework" \
+        /tmp/_uaf_stub.swift -enable-library-evolution -module-name UnifiedAssetFramework -sdk "$SDK_ROOT" -language-mode 5 \
+        -emit-module-interface-path "LocalFrameworks/UnifiedAssetFramework.framework/Modules/UnifiedAssetFramework.swiftmodule/arm64-apple-macos.swiftinterface" \
+        -emit-module-path "LocalFrameworks/UnifiedAssetFramework.framework/Modules/UnifiedAssetFramework.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
 fi
 
 echo "--- Generating Interface for $FRAMEWORK ---"
@@ -132,7 +133,7 @@ echo "--- Comparing Symbols (Final Pass / Post-Alignment) ---"
 ./swift-interface-gen --compare "${FRAMEWORK}_exports.txt" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" dummy_stubs.s
 
 # Clean up temporary files
-rm -f stubs.s stubs.o dummy_stubs.s "${FRAMEWORK}_exports.txt"
+# rm -f stubs.s stubs.o dummy_stubs.s "${FRAMEWORK}_exports.txt"
 
 echo "--- Compiling Test Program ---"
 swiftc -F LocalFrameworks "$TEST_FILE" \

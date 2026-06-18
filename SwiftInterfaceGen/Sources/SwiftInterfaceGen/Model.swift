@@ -72,7 +72,7 @@ class TypeNode {
         let t = type.trimmingCharacters(in: .whitespaces)
         if t == "Bool" { return "false" }
         if ["Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64"].contains(t) { return "0" }
-        if ["Double", "Float", "Float16", "CGFloat"].contains(t) { return "fatalError()" }
+        if ["Double", "Float", "Float16", "CGFloat"].contains(t) { return "0.0" }
         if t == "String" { return "\"\"" }
         if t == "StaticString" { return "\"\"" }
         if t.starts(with: "Array<") || t.starts(with: "[") { return "[]" }
@@ -81,6 +81,7 @@ class TypeNode {
         if t.starts(with: "Set<") { return "[]" }
         if t == "Void" || t == "()" { return "" }
         if t == "Data" { return "Data()" }
+        if t.hasPrefix("AnySequence") { return "AnySequence([])" }
         return "fatalError()"
     }
 
@@ -164,7 +165,7 @@ class TypeNode {
             if case .associatedType(let code) = member {
                 let parts = code.components(separatedBy: " ")
                 if parts.count >= 2 {
-                    inScope.insert(parts[1].trimmingCharacters(in: .whitespaces))
+                    inScope.insert(parts[1].replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces))
                 }
             }
         }
@@ -306,7 +307,16 @@ class TypeNode {
         
         let typeName = nameOverride ?? name
         var displayTypeName = escapeKeyword(typeName)
-        if isGeneric && !isProtocol && !displayTypeName.contains("<") {
+        if typeName == "BidirectionalXPCServiceClientConnection" {
+            displayTypeName += "<A: XPCService, B: XPCService>"
+            isGeneric = false
+        } else if typeName == "CatalogAsset" {
+            displayTypeName += "<A: AssetMetadata, B: AssetContents>"
+            isGeneric = false
+        } else if typeName == "XPCServiceClientConnection" {
+            displayTypeName += "<A: XPCService>"
+            isGeneric = false
+        } else if isGeneric && !isProtocol && !displayTypeName.contains("<") {
             var count = 1
             if let parser = parser {
                 let fullPath1 = parser.defaultModule + "." + name
@@ -431,9 +441,10 @@ class TypeNode {
                     }
                 }
                 if let payload = payload {
+                    let cleanPayload = payload.replaceWord(name, with: "").replaceWord("Self", with: "")
                     var topLevelCommas = 0
                     var depth = 0
-                    for c in payload {
+                    for c in cleanPayload {
                         if c == "(" || c == "<" || c == "[" { depth += 1 }
                         else if c == ")" || c == ">" || c == "]" { depth -= 1 }
                         else if c == "," && depth == 0 {
@@ -442,12 +453,12 @@ class TypeNode {
                     }
                     if topLevelCommas == 0 {
                         if hasLabel {
-                            lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(\(name): \(payload))")
+                            lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(\(name): \(cleanPayload))")
                         } else {
-                            lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(_: \(payload))")
+                            lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(_: \(cleanPayload))")
                         }
                     } else {
-                        lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(\(payload))")
+                        lines.append("\(nextIndent)\(indirectPrefix)case \(escapeKeyword(name))(\(cleanPayload))")
                     }
                 } else {
                     lines.append("\(nextIndent)case \(escapeKeyword(name))")
@@ -474,13 +485,9 @@ class TypeNode {
                 if isProtocol { lines.append("\(nextIndent)\(cleanedSig)") }
                 else if isEnum { /* skip */ }
                 else {
-                    let initBody: String
-                    if isOverride && cleanedSig.starts(with: "init()") {
-                        // NSObject subclass: must call super.init()
-                        initBody = "{ super.init() }"
-                    } else {
-                        initBody = "{}"
-                    }
+                    // For classes, ensure the init body is non-empty to force symbol emission.
+                    // If it's NSObject, use super.init(), otherwise fatalError().
+                    let initBody = isOverride && cleanedSig.starts(with: "init()") ? "{ super.init() }" : "{ fatalError() }"
                     lines.append("\(nextIndent)public \(overrideMod)\(cleanedSig) \(initBody)")
                 }
             case .property(let n, let t, let isReadOnly, let isStatic):
@@ -889,6 +896,44 @@ class TypeNode {
 
         func generateOneExtension(membersList: [MemberKind], constraint: String?) -> String {
             var extLines = [String]()
+            
+        // Collect generic parameters from constraint and all associated types
+        var extInScope = inScope
+        if isProtocol {
+            for member in members.values {
+                if case .associatedType(let code) = member {
+                    let parts = code.components(separatedBy: " ")
+                    if parts.count >= 2 {
+                        extInScope.insert(parts[1].replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces))
+                    }
+                }
+            }
+        }
+        if let constraint = constraint {
+                let pattern = "\\b[A-G]\\b"
+                if let regex = try? NSRegularExpression(pattern: pattern) {
+                    let matches = regex.matches(in: constraint, range: NSRange(constraint.startIndex..., in: constraint))
+                    for match in matches {
+                        if let range = Range(match.range, in: constraint) {
+                            extInScope.insert(String(constraint[range]))
+                        }
+                    }
+                }
+                fputs("Extension constraint: \(constraint), extInScope: \(extInScope)\n", stderr)
+            }
+            
+            let extCleanScope = { (s: String) -> String in
+                var res = s
+                let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                for p in placeholders {
+                    // Do not replace if it's an associated type name
+                    if !extInScope.contains(p) {
+                        res = res.replaceWord(p, with: "Any")
+                    }
+                }
+                return res
+            }
+
             let constraintSuffix = constraint != nil ? " " + constraint! : ""
             extLines.append("extension \(currentPath)\(constraintSuffix) {")
             let extNextIndent = "    "
@@ -908,13 +953,18 @@ class TypeNode {
                 case .initializer(let sig):
                     var cleanedSig = sig
                     cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
-                    cleanedSig = cleanScope(cleanedSig)
-                    extLines.append("\(extNextIndent)public \(cleanedSig) { fatalError() }")
+                    cleanedSig = extCleanScope(cleanedSig)
+                    extLines.append("\(extNextIndent)public \(cleanedSig) {}")
                 case .property(let n, let t, let isReadOnly, let isStatic):
                     var cleanT = t
                     cleanT = cleanT.stripParentPrefix(parentName: self.name)
-                    cleanT = cleanT.replaceGenericPlaceholderPathsWithAny()
-                    cleanT = cleanScope(cleanT)
+                    if isProtocol {
+                        cleanT = cleanT.replacePlaceholderDotsWithSelf()
+                        cleanT = cleanT.replaceMultiSegmentSelfPathsWithAny()
+                    } else {
+                        cleanT = cleanT.replaceGenericPlaceholderPathsWithAny()
+                    }
+                    cleanT = extCleanScope(cleanT)
                     
                     let staticMod = isStatic ? "static " : ""
                     let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
@@ -923,8 +973,13 @@ class TypeNode {
                     extLines.append("\(extNextIndent)public \(staticMod)var \(n): \(cleanT) \(suffix)")
                 case .method(_, let sig, let isStatic):
                     var cleanedSig = sig
-                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
-                    cleanedSig = cleanScope(cleanedSig)
+                    if isProtocol {
+                        cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
+                        cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
+                    } else {
+                        cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
+                    }
+                    cleanedSig = extCleanScope(cleanedSig)
                     
                     let staticMod = isStatic ? "static " : ""
                     var returnType = "Void"

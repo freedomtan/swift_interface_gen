@@ -81,6 +81,8 @@ struct SwiftInterfaceGen {
         if code.contains("CIImage") { imports.insert("CoreImage") }
         if code.contains("MLModel") { imports.insert("CoreML") }
         if code.contains("DispatchQueue") { imports.insert("Dispatch") }
+        if code.contains("OS_xpc_object") { imports.insert("XPC") }
+        if code.contains("UAF") { imports.insert("UnifiedAssetFramework") }
         
         for mod in parser.discoveredNamespaces {
             if code.contains("\(mod).") && mod != currentModule {
@@ -97,6 +99,9 @@ struct SwiftInterfaceGen {
     }
 
     static func processSymbols(_ symbols: [String], parser: Parser, module: String, depth: Int = 0) {
+        for symbol in symbols {
+            if symbol.contains("UAF") { fputs("Processing symbol: \(symbol)\n", stderr) }
+        }
         parser.tbdSymbols.formUnion(symbols)
         if parser.processedModules.contains(module) { return }
         parser.processedModules.insert(module)
@@ -243,7 +248,7 @@ struct SwiftInterfaceGen {
     }
 
     static func runDemangleExpandChunk(symbols: [String]) -> [String: [Int: Bool]] {
-        var result: [String: [Int: Bool]] = [:]
+        let result: [String: [Int: Bool]] = [:]
         if symbols.isEmpty { return result }
         
         let process = Process()
