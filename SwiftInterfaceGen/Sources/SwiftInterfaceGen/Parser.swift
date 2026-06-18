@@ -27,6 +27,8 @@ class Parser {
     var tbdSymbols = Set<String>()
     var referencedModules = Set<String>()
     var symbolEscapingMap: [String: [Int: Bool]] = [:]
+    // Maps base function mangled symbol → set of parameter indices that have default values
+    var defaultArgMap: [String: Set<Int>] = [:]
 
     init() {}
 
@@ -151,6 +153,7 @@ class Parser {
     }
 
     func parse(mangled: String, demangled: String, currentModule: String) {
+        let originalMangled = mangled
         var mangled = mangled
         if mangled.hasSuffix("Tj") {
             mangled = String(mangled.dropLast(2))
@@ -195,7 +198,8 @@ class Parser {
             "reflection metadata for ",
             "value witness table for ",
             "protocol conformance descriptor for ",
-            "base conformance descriptor for "
+            "base conformance descriptor for ",
+            "associated conformance descriptor for "
         ]
         
         var forcedKind: String? = nil
@@ -210,6 +214,9 @@ class Parser {
                     if mangled.hasSuffix("OMn") { forcedKind = "enum" }
                     else if mangled.hasSuffix("VMn") { forcedKind = "struct" }
                     else if mangled.hasSuffix("CMn") { forcedKind = "class" }
+                } else if desc.contains("associated conformance descriptor") {
+                    // associated conformance descriptor — early return, handled via stubs.s
+                    return
                 } else if desc.contains("conformance descriptor") {
                     let parts = d.components(separatedBy: ":")
                     if parts.count == 2 {
@@ -224,15 +231,15 @@ class Parser {
                         if let inIndex = protoPath.range(of: " in ") {
                             protoPath = String(protoPath[..<inIndex.lowerBound]).trimmingCharacters(in: .whitespaces)
                         }
-                        
+
                         let node = findOrCreateType(name: cleanType(typePath))
                         if desc.contains("base conformance") {
                             setKind("protocol", for: node)
                         }
-                        
+
                         let simplifiedProto = simplifyType(protoPath)
                         node.conformances.insert(simplifiedProto)
-                        
+
                         let cleanProto = cleanType(protoPath)
                         discoveredProtocols.insert(cleanProto)
                         let shortProto = cleanProto.components(separatedBy: ".").last ?? cleanProto
@@ -245,7 +252,11 @@ class Parser {
         }
         
         if !isPrimaryDescriptor {
-            let junkKeywords = ["descriptor", "type metadata", "metadata accessor", "metadata instantiation", "witness table", "helper", "offset", "lookup function", "variable", "function pointer", "default argument", "lazy cache", "block copy", "block destroy", "property descriptor", "reflection metadata", "resilient class stub"]
+            // Default argument symbols are handled in pre-pass in processSymbols
+            if d_orig.contains("default argument") {
+                return
+            }
+            let junkKeywords = ["descriptor", "type metadata", "metadata accessor", "metadata instantiation", "witness table", "helper", "offset", "lookup function", "variable", "function pointer", "lazy cache", "block copy", "block destroy", "property descriptor", "reflection metadata", "resilient class stub"]
             for junk in junkKeywords {
                 if d_orig.contains(junk) {
                     if (d_orig.contains("dispatch thunk") || d_orig.contains("method descriptor")) && d_orig.contains("(") {
@@ -414,24 +425,31 @@ class Parser {
                             }
                             j = signatureRaw.index(after: j)
                         }
+                        // Detect failable init: return type is Optional (ends with '?' or is 'Optional<...>' / 'Swift.Optional<...>')
+                        var isFailable = false
                         if let arrow = arrowIndex {
+                            let returnPart = String(signatureRaw[signatureRaw.index(arrow, offsetBy: 2)...]).trimmingCharacters(in: .whitespaces)
+                            isFailable = returnPart.hasSuffix("?") ||
+                                         returnPart.hasPrefix("Optional<") ||
+                                         returnPart.hasPrefix("Swift.Optional<")
                             signatureRaw = String(signatureRaw[..<arrow]).trimmingCharacters(in: .whitespaces)
                         }
-                        
+
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
-                        let initSig = Parser.fixUnnamedParameters(signature, escapingMap: symbolEscapingMap[mangled])
+                        let initSig = Parser.fixUnnamedParameters(signature, escapingMap: symbolEscapingMap[originalMangled] ?? symbolEscapingMap[mangled], defaultArgs: defaultArgMap[mangled])
+                        let initKeyword = isFailable ? "init?" : "init"
                         if mangled.contains("PAAE") {
-                            node.extensionMembers["init" + initSig] = .initializer("init" + initSig)
+                            node.extensionMembers[initKeyword + initSig] = .initializer(initKeyword + initSig)
                         } else if let constraints = constraints {
-                            node.constrainedExtensions[constraints, default: [:]]["init" + initSig] = .initializer("init" + initSig)
+                            node.constrainedExtensions[constraints, default: [:]][initKeyword + initSig] = .initializer(initKeyword + initSig)
                         } else if mangled.contains("PA") && mangled.contains("rlE") {
-                            node.extensionMembers["init" + initSig] = .initializer("init" + initSig)
+                            node.extensionMembers[initKeyword + initSig] = .initializer(initKeyword + initSig)
                         } else {
-                            node.members["init" + initSig] = .initializer("init" + initSig)
+                            node.members[initKeyword + initSig] = .initializer(initKeyword + initSig)
                         }
                     } else {
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
-                        let fixedSignature = Parser.fixUnnamedParameters(escapedMemberName + signature, escapingMap: symbolEscapingMap[mangled])
+                        let fixedSignature = Parser.fixUnnamedParameters(escapedMemberName + signature, escapingMap: symbolEscapingMap[originalMangled] ?? symbolEscapingMap[mangled], defaultArgs: defaultArgMap[mangled])
                         if mangled.contains("PAAE") {
                             node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                         } else if let constraints = constraints {
@@ -560,7 +578,22 @@ class Parser {
     }
 
     private func splitPath(_ path: String) -> (String, String) {
-        let parts = path.components(separatedBy: ".")
+        // Split by '.' only at angle-bracket depth 0 to handle generic types like
+        // "SupportedArgument<A where A: Swift.Equatable>.all"
+        var parts = [String]()
+        var current = ""
+        var depth = 0
+        for ch in path {
+            if ch == "<" { depth += 1; current.append(ch) }
+            else if ch == ">" { depth -= 1; current.append(ch) }
+            else if ch == "." && depth == 0 {
+                parts.append(current)
+                current = ""
+            } else {
+                current.append(ch)
+            }
+        }
+        if !current.isEmpty { parts.append(current) }
         if parts.count == 1 {
             return (defaultModule, parts[0])
         }
@@ -774,7 +807,7 @@ class Parser {
         }
     }
 
-    static func fixUnnamedParameters(_ sig: String, isSubscript: Bool = false, escapingMap: [Int: Bool]? = nil) -> String {
+    static func fixUnnamedParameters(_ sig: String, isSubscript: Bool = false, escapingMap: [Int: Bool]? = nil, defaultArgs: Set<Int>? = nil) -> String {
         guard let openParen = sig.firstIndex(of: "(") else { return sig }
         let prefix = sig[..<sig.index(after: openParen)]
         let rest = String(sig[sig.index(after: openParen)...])
@@ -1153,7 +1186,7 @@ class Parser {
 
     func generateAll() -> String {
         applyTypeFixups()
-        
+
         let systemTypes: Set<String> = [
             "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
             "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",

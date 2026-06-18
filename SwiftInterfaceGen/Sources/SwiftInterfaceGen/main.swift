@@ -137,6 +137,26 @@ struct SwiftInterfaceGen {
         }
         print("Precompute took: \(Date().timeIntervalSince(startPre))s", to: &Self.standardError)
         
+        // Pre-pass: collect default argument positions before parsing functions
+        for entry in demangledMap {
+            guard entry.demangled.hasPrefix("default argument ") else { continue }
+            let mangled = entry.mangled
+            let argIndex: Int
+            if mangled.hasSuffix("fA_") { argIndex = 0 }
+            else if mangled.hasSuffix("fA0_") { argIndex = 1 }
+            else if mangled.hasSuffix("fA1_") { argIndex = 2 }
+            else if mangled.hasSuffix("fA2_") { argIndex = 3 }
+            else if mangled.hasSuffix("fA3_") { argIndex = 4 }
+            else if mangled.hasSuffix("fA4_") { argIndex = 5 }
+            else { continue }
+            // Derive base mangled by stripping fAN_ suffix
+            var baseMangled = mangled
+            if let range = baseMangled.range(of: "fA", options: .backwards) {
+                baseMangled = String(baseMangled[..<range.lowerBound])
+            }
+            parser.defaultArgMap[baseMangled, default: []].insert(argIndex)
+        }
+
         let startParse = Date()
         for entry in demangledMap {
             parser.parse(mangled: entry.mangled, demangled: entry.demangled, currentModule: module)

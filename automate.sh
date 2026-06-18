@@ -46,6 +46,42 @@ cd SwiftInterfaceGen/Sources/SwiftInterfaceGen
 swiftc -O -parse-as-library main.swift Parser.swift Model.swift Config.swift String+RegexFree.swift -o ../../../swift-interface-gen
 cd ../../../
 
+echo "--- Building Dependency Stub Frameworks ---"
+# Create minimal stub frameworks for private dependencies that lack Swift modules.
+# These are needed so that the generated interface can import real module-qualified types.
+
+# AppleIntelligenceReporting stub
+if [ ! -d "LocalFrameworks/AppleIntelligenceReporting.framework/Modules" ]; then
+    mkdir -p "LocalFrameworks/AppleIntelligenceReporting.framework/Modules/AppleIntelligenceReporting.swiftmodule"
+    cat > /tmp/_air_stub.swift << 'SWIFTEOF'
+import Foundation
+public protocol AppleIntelligenceError: Error {
+    var underlyingErrors: [any AppleIntelligenceError] { get }
+    var category: AppleIntelligenceErrorCategory { get }
+}
+public struct AppleIntelligenceErrorCategory: Codable, Hashable, Sendable { public init() {} }
+SWIFTEOF
+    swiftc -emit-library -o "LocalFrameworks/AppleIntelligenceReporting.framework/AppleIntelligenceReporting" \
+        /tmp/_air_stub.swift -enable-library-evolution -module-name AppleIntelligenceReporting -sdk "$SDK_ROOT" -language-mode 5 \
+        -emit-module-interface-path "LocalFrameworks/AppleIntelligenceReporting.framework/Modules/AppleIntelligenceReporting.swiftmodule/arm64-apple-macos.swiftinterface" \
+        -emit-module-path "LocalFrameworks/AppleIntelligenceReporting.framework/Modules/AppleIntelligenceReporting.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
+fi
+
+# FeatureFlags stub
+if [ ! -d "LocalFrameworks/FeatureFlags.framework/Modules" ]; then
+    mkdir -p "LocalFrameworks/FeatureFlags.framework/Modules/FeatureFlags.swiftmodule"
+    cat > /tmp/_ff_stub.swift << 'SWIFTEOF'
+public protocol FeatureFlagsKey {
+    var domain: StaticString { get }
+    var feature: StaticString { get }
+}
+SWIFTEOF
+    swiftc -emit-library -o "LocalFrameworks/FeatureFlags.framework/FeatureFlags" \
+        /tmp/_ff_stub.swift -enable-library-evolution -module-name FeatureFlags -sdk "$SDK_ROOT" -language-mode 5 \
+        -emit-module-interface-path "LocalFrameworks/FeatureFlags.framework/Modules/FeatureFlags.swiftmodule/arm64-apple-macos.swiftinterface" \
+        -emit-module-path "LocalFrameworks/FeatureFlags.framework/Modules/FeatureFlags.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
+fi
+
 echo "--- Generating Interface for $FRAMEWORK ---"
 ./swift-interface-gen "$TBD_PATH" > "${FRAMEWORK}Interface.swift"
 

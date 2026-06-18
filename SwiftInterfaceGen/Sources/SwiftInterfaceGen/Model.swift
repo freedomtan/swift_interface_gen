@@ -573,8 +573,43 @@ class TypeNode {
                 } else {
                     cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
                 }
-                cleanedSig = cleanScope(cleanedSig)
-                
+                // Extract method-level generic params (e.g. <A> in withLock<A>) and add to local scope
+                // so cleanScope doesn't erase them to Any.
+                var methodGenericInScope = Set<String>()
+                if let openAngle = cleanedSig.firstIndex(of: "<"),
+                   let openParen = cleanedSig.firstIndex(of: "("),
+                   openAngle < openParen {
+                    var depth = 0
+                    var closeAngle: String.Index? = nil
+                    var i = openAngle
+                    while i < openParen {
+                        if cleanedSig[i] == "<" { depth += 1 }
+                        else if cleanedSig[i] == ">" {
+                            depth -= 1
+                            if depth == 0 { closeAngle = i; break }
+                        }
+                        i = cleanedSig.index(after: i)
+                    }
+                    if let ca = closeAngle {
+                        let inside = String(cleanedSig[cleanedSig.index(after: openAngle)..<ca])
+                        for param in inside.components(separatedBy: ",") {
+                            let p = param.trimmingCharacters(in: .whitespaces)
+                            if !p.isEmpty { methodGenericInScope.insert(p) }
+                        }
+                    }
+                }
+                let effectiveScope = inScope.union(methodGenericInScope)
+                cleanedSig = {
+                    var res = cleanedSig
+                    let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                    for p in placeholders {
+                        if !effectiveScope.contains(p) {
+                            res = res.replaceWord(p, with: "Any")
+                        }
+                    }
+                    return res
+                }()
+
                 if cleanN == "==" && (sig.contains(".Type") || sig.contains(".`Type`")) {
                     continue
                 }
