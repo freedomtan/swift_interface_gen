@@ -92,6 +92,13 @@ class TypeNode {
         let actualKind = kind == "unknown" ? "struct" : kind
         let isProtocol = actualKind == "protocol"
         let isEnum = actualKind == "enum"
+
+        // Swift 6: protocols used as `any P` associated values in Sendable enums/structs
+        // must themselves inherit Sendable. If this protocol is nested inside a Sendable
+        // parent, propagate Sendable into the protocol's conformance list.
+        if isProtocol, let parentNode = parent, parentNode.hasConformance("Sendable") {
+            conformances.insert("Sendable")
+        }
         
         if !isProtocol && !isEnum {
             var hasCatalogResource = false
@@ -882,16 +889,6 @@ class TypeNode {
                     inScope.insert(i < placeholders.count ? placeholders[i] : "A\(i)")
                 }
             }
-        }
-        let cleanScope = { (s: String) -> String in
-            var res = s
-            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
-            for p in placeholders {
-                if !inScope.contains(p) {
-                    res = res.replaceWord(p, with: "Any")
-                }
-            }
-            return res
         }
 
         func generateOneExtension(membersList: [MemberKind], constraint: String?) -> String {

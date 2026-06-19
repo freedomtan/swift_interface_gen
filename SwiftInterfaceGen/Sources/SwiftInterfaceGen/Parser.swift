@@ -225,7 +225,7 @@ class Parser {
                         let pathTokens = pathPart.components(separatedBy: ".")
                         if pathTokens.count >= 2 {
                             let assocName = pathTokens.last!
-                            var typePathTokens = Array(pathTokens.dropLast())
+                            let typePathTokens = Array(pathTokens.dropLast())
                             // Fix demangling verbosity: Module.Protocol.Module.Protocol.AssocName -> Module.Protocol
                             let typePathRaw = typePathTokens.joined(separator: ".")
                             let typePath: String
@@ -601,7 +601,7 @@ class Parser {
         // Skip creating nodes for __C module as they should be resolved via imports or typealiases
         if moduleName == "__C" {
             // We return a dummy node so the caller doesn't crash, but it won't be in modules dictionary
-            var current = TypeNode(name: name)
+            let current = TypeNode(name: name)
             return current
         }
 
@@ -2081,7 +2081,6 @@ class Parser {
             let trimmedP = p.trimmingCharacters(in: .whitespaces)
             if trimmedP.isEmpty { continue }
             
-            var hasLabel = false
             var label = ""
             var type = trimmedP
             var pD2 = 0
@@ -2095,7 +2094,6 @@ class Parser {
                 else if char == "[" { sD2 += 1 }
                 else if char == "]" { sD2 -= 1 }
                 if char == ":" && pD2 == 0 && aD2 == 0 && sD2 == 0 {
-                    hasLabel = true
                     let cIdx = trimmedP.index(trimmedP.startIndex, offsetBy: index)
                     label = String(trimmedP[..<cIdx]) + ": "
                     type = String(trimmedP[trimmedP.index(after: cIdx)...]).trimmingCharacters(in: .whitespaces)

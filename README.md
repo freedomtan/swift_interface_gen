@@ -35,6 +35,14 @@ The easiest way to use the tool is via the included `automate.sh` script, which 
 
 This script will output the reconstructed framework into the `LocalFrameworks/` directory and execute your test binary.
 
+> [!NOTE]
+> **Cross-Framework Dependencies:**
+> If a framework depends on another private framework (e.g., `CoreAICompiler` requires `CoreAICommon`), the dependency framework must be generated first and reside in the `LocalFrameworks/` folder. For example, you must run:
+> ```bash
+> ./automate.sh CoreAICommon test_CoreAICommon.swift
+> ./automate.sh CoreAICompiler test_CoreAICompiler.swift
+> ```
+
 ## Manual Usage
 
 If you prefer to run the steps manually:
