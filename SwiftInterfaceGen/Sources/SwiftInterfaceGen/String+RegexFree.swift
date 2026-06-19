@@ -513,14 +513,19 @@ extension String {
                     let suffixComponents = Array(components.dropFirst())
                     let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
                     
-                    if inScope.contains(prefix) {
+                    var basePrefix = prefix
+                    while let last = basePrefix.last, last.isNumber {
+                        basePrefix = String(basePrefix.dropLast())
+                    }
+                    if inScope.contains(prefix) || inScope.contains(basePrefix) {
+                        let actualPrefix = inScope.contains(prefix) ? prefix : basePrefix
                         if allAllowed {
                             let sub = suffixComponents.joined(separator: ".")
-                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "\(prefix).\(sub)")
-                            startSearch = result.index(prefixStartIdx, offsetBy: prefix.count + 1 + sub.count, limitedBy: result.endIndex) ?? result.endIndex
+                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "\(actualPrefix).\(sub)")
+                            startSearch = result.index(prefixStartIdx, offsetBy: actualPrefix.count + 1 + sub.count, limitedBy: result.endIndex) ?? result.endIndex
                         } else {
-                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "\(prefix).\(lastComponent)")
-                            startSearch = result.index(prefixStartIdx, offsetBy: prefix.count + 1 + lastComponent.count, limitedBy: result.endIndex) ?? result.endIndex
+                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "\(actualPrefix).\(lastComponent)")
+                            startSearch = result.index(prefixStartIdx, offsetBy: actualPrefix.count + 1 + lastComponent.count, limitedBy: result.endIndex) ?? result.endIndex
                         }
                     } else if ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"].contains(lastComponent) {
                         if allAllowed {
@@ -1498,7 +1503,9 @@ extension String {
                             }
                             if depth == 0 {
                                 let params = String(chars[(i + 1)..<(j - 1)])
-                                results.append((name: name, params: params))
+                                if !params.contains("where ") {
+                                    results.append((name: name, params: params))
+                                }
                             }
                         }
                     }
