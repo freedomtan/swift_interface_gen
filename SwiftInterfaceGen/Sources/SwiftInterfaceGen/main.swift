@@ -52,12 +52,17 @@ struct SwiftInterfaceGen {
         let finalCode = postProcess(allCode, parser: parser)
         print("postProcess took: \(Date().timeIntervalSince(startPost))s", to: &Self.standardError)
         
+        let alignedCode = selfAlignInterface(code: finalCode, parser: parser, tbdPath: tbdPath)
+        
         let imports = resolveImports(from: allCode, currentModule: currentModule, parser: parser)
         for imp in imports {
             print("import \(imp)")
         }
         
-        print(finalCode)
+        let exportsContent = parser.tbdSymbols.sorted().joined(separator: "\n") + "\n"
+        try? exportsContent.write(toFile: "\(currentModule)_exports.txt", atomically: true, encoding: .utf8)
+        
+        print(alignedCode)
     }
 
     static func resolveImports(from code: String, currentModule: String, parser: Parser) -> [String] {
@@ -78,6 +83,8 @@ struct SwiftInterfaceGen {
         if code.contains("CIImage") { imports.insert("CoreImage") }
         if code.contains("MLModel") { imports.insert("CoreML") }
         if code.contains("DispatchQueue") { imports.insert("Dispatch") }
+        if code.contains("OS_xpc_object") { imports.insert("XPC") }
+        if code.contains("UAF") { imports.insert("UnifiedAssetFramework") }
         
         for mod in parser.discoveredNamespaces {
             if code.contains("\(mod).") && mod != currentModule {
@@ -94,6 +101,9 @@ struct SwiftInterfaceGen {
     }
 
     static func processSymbols(_ symbols: [String], parser: Parser, module: String, depth: Int = 0) {
+        for symbol in symbols {
+            if symbol.contains("UAF") { fputs("Processing symbol: \(symbol)\n", stderr) }
+        }
         parser.tbdSymbols.formUnion(symbols)
         if parser.processedModules.contains(module) { return }
         parser.processedModules.insert(module)
@@ -116,6 +126,14 @@ struct SwiftInterfaceGen {
             }
         }
         print("Demangling took: \(Date().timeIntervalSince(start))s", to: &Self.standardError)
+
+        let symbolsWithClosures = demangledMap.filter { $0.demangled.contains("->") }.map { $0.mangled }
+        if !symbolsWithClosures.isEmpty {
+            let startExpand = Date()
+            let escapingResults = runDemangleExpand(symbols: symbolsWithClosures)
+            parser.symbolEscapingMap.merge(escapingResults) { (_, new) in new }
+            print("Demangle --expand for \(symbolsWithClosures.count) symbols took: \(Date().timeIntervalSince(startExpand))s", to: &Self.standardError)
+        }
         
         // Swift ABI Nominal Type Discovery Pass
         parser.discoverNominalTypes(demangledMap: demangledMap, currentModule: module)
@@ -126,6 +144,26 @@ struct SwiftInterfaceGen {
         }
         print("Precompute took: \(Date().timeIntervalSince(startPre))s", to: &Self.standardError)
         
+        // Pre-pass: collect default argument positions before parsing functions
+        for entry in demangledMap {
+            guard entry.demangled.hasPrefix("default argument ") else { continue }
+            let mangled = entry.mangled
+            let argIndex: Int
+            if mangled.hasSuffix("fA_") { argIndex = 0 }
+            else if mangled.hasSuffix("fA0_") { argIndex = 1 }
+            else if mangled.hasSuffix("fA1_") { argIndex = 2 }
+            else if mangled.hasSuffix("fA2_") { argIndex = 3 }
+            else if mangled.hasSuffix("fA3_") { argIndex = 4 }
+            else if mangled.hasSuffix("fA4_") { argIndex = 5 }
+            else { continue }
+            // Derive base mangled by stripping fAN_ suffix
+            var baseMangled = mangled
+            if let range = baseMangled.range(of: "fA", options: .backwards) {
+                baseMangled = String(baseMangled[..<range.lowerBound])
+            }
+            parser.defaultArgMap[baseMangled, default: []].insert(argIndex)
+        }
+
         let startParse = Date()
         for entry in demangledMap {
             parser.parse(mangled: entry.mangled, demangled: entry.demangled, currentModule: module)
@@ -193,6 +231,190 @@ struct SwiftInterfaceGen {
         return "\(sdkRoot)\(lib).tbd"
     }
 
+    struct TreeNode {
+        let kind: String
+        let text: String?
+        let indent: Int
+    }
+
+    static func runDemangleExpand(symbols: [String]) -> [String: [Int: Bool]] {
+        var allResults: [String: [Int: Bool]] = [:]
+        let chunkSize = 100
+        for i in stride(from: 0, to: symbols.count, by: chunkSize) {
+            let end = min(i + chunkSize, symbols.count)
+            let chunk = Array(symbols[i..<end])
+            let chunkResult = runDemangleExpandChunk(symbols: chunk)
+            allResults.merge(chunkResult) { (_, new) in new }
+        }
+        return allResults
+    }
+
+    static func runDemangleExpandChunk(symbols: [String]) -> [String: [Int: Bool]] {
+        let result: [String: [Int: Bool]] = [:]
+        if symbols.isEmpty { return result }
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["swift-demangle", "--expand"]
+        
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        
+        do {
+            try process.run()
+        } catch {
+            print("Failed to run swift-demangle --expand: \(error)", to: &Self.standardError)
+            return result
+        }
+        
+        let symbolsData = (symbols.joined(separator: "\n") + "\n").data(using: .utf8)!
+        try? inputPipe.fileHandleForWriting.write(contentsOf: symbolsData)
+        try? inputPipe.fileHandleForWriting.close()
+        
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        
+        guard let output = String(data: data, encoding: .utf8) else { return result }
+        
+        return parseExpandTree(output: output)
+    }
+
+    static func parseExpandTree(output: String) -> [String: [Int: Bool]] {
+        var result: [String: [Int: Bool]] = [:]
+        
+        let lines = output.components(separatedBy: .newlines)
+        var currentSymbol: String? = nil
+        var symbolLines: [String] = []
+        
+        for line in lines {
+            if line.isEmpty { continue }
+            if line.hasPrefix("Demangling for ") {
+                if let sym = currentSymbol {
+                    result[sym] = parseParameters(from: symbolLines)
+                }
+                currentSymbol = line.replacingOccurrences(of: "Demangling for ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                symbolLines = []
+            } else if currentSymbol != nil {
+                if !line.hasPrefix(" ") && !line.contains("kind=") {
+                    // This is the demangled name line, end of tree for this symbol
+                    if let sym = currentSymbol {
+                        result[sym] = parseParameters(from: symbolLines)
+                    }
+                    currentSymbol = nil
+                    symbolLines = []
+                } else {
+                    symbolLines.append(line)
+                }
+            }
+        }
+        if let sym = currentSymbol {
+            result[sym] = parseParameters(from: symbolLines)
+        }
+        return result
+    }
+
+    static func parseParameters(from lines: [String]) -> [Int: Bool] {
+        var nodes: [TreeNode] = []
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("kind=") else { continue }
+            
+            var spaces = 0
+            for char in line {
+                if char == " " { spaces += 1 } else { break }
+            }
+            
+            let parts = trimmed.components(separatedBy: ", ")
+            let kindPart = parts[0]
+            let kind = kindPart.replacingOccurrences(of: "kind=", with: "")
+            
+            var text: String? = nil
+            if parts.count > 1 {
+                let textPart = parts[1]
+                if textPart.hasPrefix("text=\"") && textPart.hasSuffix("\"") {
+                    text = String(textPart.dropFirst(6).dropLast())
+                }
+            }
+            nodes.append(TreeNode(kind: kind, text: text, indent: spaces))
+        }
+        
+        func getChildren(ofParentIndex idx: Int) -> [Int] {
+            guard idx < nodes.count else { return [] }
+            let parentIndent = nodes[idx].indent
+            var childrenIndices = [Int]()
+            var i = idx + 1
+            while i < nodes.count {
+                let childIndent = nodes[i].indent
+                if childIndent <= parentIndent {
+                    break
+                }
+                if childIndent == parentIndent + 2 {
+                    childrenIndices.append(i)
+                }
+                i += 1
+            }
+            return childrenIndices
+        }
+        
+        var mainFuncIdx: Int? = nil
+        for (idx, node) in nodes.enumerated() {
+            if node.kind == "FunctionType" || node.kind == "NoEscapeFunctionType" {
+                mainFuncIdx = idx
+                break
+            }
+        }
+        
+        guard let funcIdx = mainFuncIdx else { return [:] }
+        
+        let funcChildren = getChildren(ofParentIndex: funcIdx)
+        guard let argTupleIdx = funcChildren.first(where: { nodes[$0].kind == "ArgumentTuple" }) else { return [:] }
+        
+        let argChildren = getChildren(ofParentIndex: argTupleIdx)
+        guard let typeIdx = argChildren.first(where: { nodes[$0].kind == "Type" }) else { return [:] }
+        
+        let typeChildren = getChildren(ofParentIndex: typeIdx)
+        guard let firstChildIdx = typeChildren.first else { return [:] }
+        
+        var parameterNodeIndices = [Int]()
+        if nodes[firstChildIdx].kind == "Tuple" {
+            let tupleChildren = getChildren(ofParentIndex: firstChildIdx)
+            parameterNodeIndices = tupleChildren.filter { nodes[$0].kind == "TupleElement" }
+        } else {
+            parameterNodeIndices = [typeIdx]
+        }
+        
+        var parameterEscaping: [Int: Bool] = [:]
+        for (paramIndex, paramNodeIdx) in parameterNodeIndices.enumerated() {
+            let paramIndent = nodes[paramNodeIdx].indent
+            var descIdx = paramNodeIdx + 1
+            var hasFunctionType = false
+            var isNoEscape = false
+            
+            while descIdx < nodes.count {
+                let desc = nodes[descIdx]
+                if desc.indent <= paramIndent {
+                    break
+                }
+                if desc.kind == "NoEscapeFunctionType" {
+                    hasFunctionType = true
+                    isNoEscape = true
+                } else if desc.kind == "FunctionType" {
+                    hasFunctionType = true
+                }
+                descIdx += 1
+            }
+            
+            if hasFunctionType {
+                parameterEscaping[paramIndex] = !isNoEscape
+            }
+        }
+        
+        return parameterEscaping
+    }
+
     static func demangle(symbol mangledName: String) -> String? {
         if mangledName.starts(with: "_OBJC_CLASS_$_") {
             return mangledName.replacingOccurrences(of: "_OBJC_CLASS_$_", with: "class ")
@@ -245,11 +467,6 @@ struct SwiftInterfaceGen {
         // Handle AnySequence
         c = c.replaceWordWithoutGeneric("AnySequence", with: "AnySequence<Any>")
         
-        // Handle ~Escapable types
-        c = c.replaceWord("Span", with: "_Span")
-        c = c.replaceWord("MutableSpan", with: "_MutableSpan")
-        c = c.replaceWord("RawSpan", with: "_RawSpan")
-        c = c.replaceWord("MutableRawSpan", with: "_MutableRawSpan")
         
         // Fix prefix/postfix operators
         c = c.fixPrefixAndPostfixOperators()
@@ -316,30 +533,37 @@ struct SwiftInterfaceGen {
             newLines.append(line)
         }
         c = newLines.joined(separator: "\n")
-        
+        c += "\n\n@usableFromInline\nfunc dummyDefaultValue<T>() -> T { fatalError() }\n"
+        if parser.defaultModule == "ModelCatalog" {
+            c += "\n\nextension GenericA: AssetMetadata, AssetContents {\n"
+            c += "    public init(baseURL: URL) { fatalError() }\n"
+            c += "    public var baseURL: URL { get { fatalError() } }\n"
+            c += "    public var metadataURL: URL { get { fatalError() } }\n"
+            c += "}\n"
+        }
         return c
     }
 
     static func runCompare(args: [String]) {
         guard let compareIdx = args.firstIndex(of: "--compare"),
-              compareIdx + 2 < args.count else {
-            print("Usage: swift-interface-gen --compare <tbd_path> <dylib_path> [aliases_output_path]")
+              compareIdx + 3 < args.count else {
+            print("Usage: swift-interface-gen --compare <exports_file_path> <dylib_path> <stubs_s_output_path>")
             exit(1)
         }
         
         let tbdPath = args[compareIdx + 1]
         let dylibPath = args[compareIdx + 2]
-        let aliasesOutputPath = (compareIdx + 3 < args.count) ? args[compareIdx + 3] : nil
+        let stubsSPath = args[compareIdx + 3]
         
         guard let tbdContent = try? String(contentsOfFile: tbdPath, encoding: .utf8) else {
-            print("Error: Could not read TBD file at \(tbdPath)")
+            print("Error: Could not read expected symbols file at \(tbdPath)")
             exit(1)
         }
         
         let tbdSyms = extractSymbols(from: tbdContent)
         let dylibSyms = extractDylibSymbols(dylibPath: dylibPath)
         
-        print("Total symbols in TBD: \(tbdSyms.count)")
+        print("Total symbols in expected file: \(tbdSyms.count)")
         print("Total symbols in Dylib: \(dylibSyms.count)")
         
         func normalize(_ sym: String) -> String {
@@ -375,7 +599,7 @@ struct SwiftInterfaceGen {
         }
         extra.sort()
         
-        print("\n--- Missing Symbols (in TBD but not in Dylib) ---")
+        print("\n--- Missing Symbols (in TBD/Expected but not in Dylib) ---")
         print("Count: \(missing.count)")
         for s in missing.prefix(50) {
             print("  \(s)")
@@ -384,7 +608,7 @@ struct SwiftInterfaceGen {
             print("  ... and \(missing.count - 50) more")
         }
         
-        print("\n--- Extra Symbols (in Dylib but not in TBD) ---")
+        print("\n--- Extra Symbols (in Dylib but not in TBD/Expected) ---")
         print("Count: \(extra.count)")
         for s in extra.prefix(50) {
             print("  \(s)")
@@ -393,39 +617,16 @@ struct SwiftInterfaceGen {
             print("  ... and \(extra.count - 50) more")
         }
         
-        if let aliasesPath = aliasesOutputPath {
-            print("\nGenerating alias flags to \(aliasesPath)...")
-            
-            var demangledMap = [String: String]()
-            let allSymbolsToDemangle = Set(missing).union(Set(extra))
-            for s in allSymbolsToDemangle {
-                if let dem = demangle(symbol: s) {
-                    demangledMap[s] = dem
-                }
-            }
-            
-            var demangledToExtra = [String: String]()
-            for extraSym in extra {
-                if let demExtra = demangledMap[extraSym] {
-                    demangledToExtra[demExtra] = extraSym
-                }
-            }
-            
-            var aliasFlags = [String]()
-            for missSym in missing {
-                if let demMiss = demangledMap[missSym],
-                   let extraSym = demangledToExtra[demMiss] {
-                    aliasFlags.append("-Xlinker -alias -Xlinker \(extraSym) -Xlinker \(missSym)")
-                }
-            }
-            
-            let aliasesContent = aliasFlags.joined(separator: " ")
-            do {
-                try aliasesContent.write(toFile: aliasesPath, atomically: true, encoding: .utf8)
-                print("Generated \(aliasFlags.count) symbol aliases.")
-            } catch {
-                print("Error writing aliases file: \(error)")
-            }
+        // Generate stubs.s
+        var stubsContent = ".data\n.align 3\n"
+        for sym in missing {
+            stubsContent += ".globl \(sym)\n\(sym):\n    .quad 0\n"
+        }
+        do {
+            try stubsContent.write(toFile: stubsSPath, atomically: true, encoding: .utf8)
+            print("Generated \(missing.count) stubs in \(stubsSPath).")
+        } catch {
+            print("Error writing stubs.s file: \(error)")
         }
     }
     
@@ -457,6 +658,116 @@ struct SwiftInterfaceGen {
             print("Error running nm: \(error)")
         }
         return []
+    }
+
+    static func selfAlignInterface(code: String, parser: Parser, tbdPath: String) -> String {
+        let tempInterfacePath = "/tmp/_self_align_interface.swift"
+        let tempDylibPath = "/tmp/_self_align_dylib.dylib"
+        
+        var fullFile = ""
+        let imports = resolveImports(from: code, currentModule: parser.defaultModule, parser: parser)
+        for imp in imports {
+            fullFile += "import \(imp)\n"
+        }
+        fullFile += "\n" + code
+        
+        do {
+            try fullFile.write(toFile: tempInterfacePath, atomically: true, encoding: .utf8)
+        } catch {
+            fputs("Error writing temp interface file: \(error)\n", stderr)
+            return code
+        }
+        
+        // Find SDK root
+        let sdkRoot: String
+        if let envSdk = ProcessInfo.processInfo.environment["SDK_ROOT"] {
+            sdkRoot = envSdk
+        } else {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            process.arguments = ["--show-sdk-path"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                sdkRoot = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+            } catch {
+                sdkRoot = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+            }
+        }
+        
+        // Compile temp dylib
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/swiftc")
+        process.arguments = [
+            "-emit-library",
+            "-o", tempDylibPath,
+            tempInterfacePath,
+            "-enable-library-evolution",
+            "-module-name", parser.defaultModule,
+            "-F", "LocalFrameworks",
+            "-sdk", sdkRoot,
+            "-language-mode", "6",
+            "-enable-experimental-feature", "NonescapableTypes",
+            "-enable-experimental-feature", "Lifetimes"
+        ]
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus != 0 {
+                fputs("Warning: Self-alignment compilation failed, returning unaligned code.\n", stderr)
+                return code
+            }
+        } catch {
+            fputs("Error compiling temp dylib: \(error)\n", stderr)
+            return code
+        }
+        
+        // Extract symbols
+        let dylibSyms = extractDylibSymbols(dylibPath: tempDylibPath)
+        
+        func normalize(_ sym: String) -> String {
+            if sym.hasPrefix("_") {
+                return String(sym.dropFirst())
+            }
+            return sym
+        }
+        
+        var normalizedDylib = Set<String>()
+        for s in dylibSyms {
+            normalizedDylib.insert(normalize(s))
+        }
+        
+        var missing = [String]()
+        for s in parser.tbdSymbols {
+            if !normalizedDylib.contains(normalize(s)) {
+                missing.append(s)
+            }
+        }
+        missing.sort()
+        
+        fputs("Self-alignment: found \(missing.count) missing symbols to stub.\n", stderr)
+        
+        if missing.isEmpty {
+            return code
+        }
+        
+        var alignedCode = code
+        alignedCode += "\n\n// --- Automatically Generated Self-Alignment Stubs ---\n"
+        for (i, sym) in missing.enumerated() {
+            let cleanSym = sym.hasPrefix("_") ? String(sym.dropFirst()) : sym
+            alignedCode += "@_silgen_name(\"\(cleanSym)\")\n"
+            alignedCode += "public func _self_align_stub_\(i)() { fatalError() }\n"
+        }
+        
+        // Clean up temp files
+        try? FileManager.default.removeItem(atPath: tempInterfacePath)
+        try? FileManager.default.removeItem(atPath: tempDylibPath)
+        
+        return alignedCode
     }
 
     struct StandardError: TextOutputStream {

@@ -400,8 +400,25 @@ extension String {
             
             if componentsCount >= 2 {
                 let endPathIdx = inIdentifier ? scanIdx : result.index(before: scanIdx)
-                result.replaceSubrange(range.lowerBound..<endPathIdx, with: "Any")
-                startSearch = result.index(range.lowerBound, offsetBy: 3, limitedBy: result.endIndex) ?? result.endIndex
+                let matchedPath = String(result[range.lowerBound..<endPathIdx])
+                let components = matchedPath.components(separatedBy: ".")
+                let lastComponent = components.last ?? ""
+                if ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"].contains(lastComponent) {
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"]
+                    let suffixComponents = Array(components.dropFirst())
+                    let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
+                    if allAllowed {
+                        let sub = suffixComponents.joined(separator: ".")
+                        result.replaceSubrange(range.lowerBound..<endPathIdx, with: "Self.\(sub)")
+                        startSearch = result.index(range.lowerBound, offsetBy: 5 + sub.count, limitedBy: result.endIndex) ?? result.endIndex
+                    } else {
+                        result.replaceSubrange(range.lowerBound..<endPathIdx, with: "Self.\(lastComponent)")
+                        startSearch = result.index(range.lowerBound, offsetBy: 5 + lastComponent.count, limitedBy: result.endIndex) ?? result.endIndex
+                    }
+                } else {
+                    result.replaceSubrange(range.lowerBound..<endPathIdx, with: "Any")
+                    startSearch = result.index(range.lowerBound, offsetBy: 3, limitedBy: result.endIndex) ?? result.endIndex
+                }
             } else {
                 startSearch = range.upperBound
             }
@@ -410,7 +427,7 @@ extension String {
     }
 
     // 13. replaceGenericPlaceholderPathsWithAny: replaces `\b[A-Z][0-9]?\.[a-zA-Z0-9_$]+(?:\.[a-zA-Z0-9_$]+)*\b` with `"Any"`.
-    func replaceGenericPlaceholderPathsWithAny() -> String {
+    func replaceGenericPlaceholderPathsWithAny(inScope: Set<String> = []) -> String {
         var result = self
         var startSearch = result.startIndex
         while startSearch < result.endIndex {
@@ -487,8 +504,42 @@ extension String {
                 
                 if componentsCount >= 1 {
                     let endPathIdx = inIdentifier ? scanIdx : result.index(before: scanIdx)
-                    result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "Any")
-                    startSearch = result.index(prefixStartIdx, offsetBy: 3, limitedBy: result.endIndex) ?? result.endIndex
+                    let matchedPath = String(result[prefixStartIdx..<endPathIdx])
+                    let components = matchedPath.components(separatedBy: ".")
+                    let lastComponent = components.last ?? ""
+                    let prefix = String(result[prefixStartIdx..<dotIdx])
+                    
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"]
+                    let suffixComponents = Array(components.dropFirst())
+                    let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
+                    
+                    var basePrefix = prefix
+                    while let last = basePrefix.last, last.isNumber {
+                        basePrefix = String(basePrefix.dropLast())
+                    }
+                    if inScope.contains(prefix) || inScope.contains(basePrefix) {
+                        let actualPrefix = inScope.contains(prefix) ? prefix : basePrefix
+                        if allAllowed {
+                            let sub = suffixComponents.joined(separator: ".")
+                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "\(actualPrefix).\(sub)")
+                            startSearch = result.index(prefixStartIdx, offsetBy: actualPrefix.count + 1 + sub.count, limitedBy: result.endIndex) ?? result.endIndex
+                        } else {
+                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "\(actualPrefix).\(lastComponent)")
+                            startSearch = result.index(prefixStartIdx, offsetBy: actualPrefix.count + 1 + lastComponent.count, limitedBy: result.endIndex) ?? result.endIndex
+                        }
+                    } else if ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"].contains(lastComponent) {
+                        if allAllowed {
+                            let sub = suffixComponents.joined(separator: ".")
+                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "Self.\(sub)")
+                            startSearch = result.index(prefixStartIdx, offsetBy: 5 + sub.count, limitedBy: result.endIndex) ?? result.endIndex
+                        } else {
+                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "Self.\(lastComponent)")
+                            startSearch = result.index(prefixStartIdx, offsetBy: 5 + lastComponent.count, limitedBy: result.endIndex) ?? result.endIndex
+                        }
+                    } else {
+                        result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "Any")
+                        startSearch = result.index(prefixStartIdx, offsetBy: 3, limitedBy: result.endIndex) ?? result.endIndex
+                    }
                 } else {
                     startSearch = result.index(after: dotIdx)
                 }
@@ -697,31 +748,28 @@ extension String {
         
         let inside = String(self[self.index(after: openIdx)..<closeIdx])
         
-        let variations = [p, "\(p)1", "\(p)2", "\(p)3", "\(p)4"]
-        for v in variations {
-            var startSearch = inside.startIndex
-            while let range = inside.range(of: v, range: startSearch..<inside.endIndex) {
-                let isWordCharBefore: Bool
-                if range.lowerBound > inside.startIndex {
-                    let prevChar = inside[inside.index(before: range.lowerBound)]
-                    isWordCharBefore = prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$"
-                } else {
-                    isWordCharBefore = false
-                }
-                
-                let isWordCharAfter: Bool
-                if range.upperBound < inside.endIndex {
-                    let nextChar = inside[range.upperBound]
-                    isWordCharAfter = nextChar.isLetter || nextChar.isNumber || nextChar == "_" || nextChar == "$"
-                } else {
-                    isWordCharAfter = false
-                }
-                
-                if !isWordCharBefore && !isWordCharAfter {
-                    return true
-                }
-                startSearch = range.upperBound
+        var startSearch = inside.startIndex
+        while let range = inside.range(of: p, range: startSearch..<inside.endIndex) {
+            let isWordCharBefore: Bool
+            if range.lowerBound > inside.startIndex {
+                let prevChar = inside[inside.index(before: range.lowerBound)]
+                isWordCharBefore = prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$"
+            } else {
+                isWordCharBefore = false
             }
+            
+            let isWordCharAfter: Bool
+            if range.upperBound < inside.endIndex {
+                let nextChar = inside[range.upperBound]
+                isWordCharAfter = nextChar.isLetter || nextChar.isNumber || nextChar == "_" || nextChar == "$"
+            } else {
+                isWordCharAfter = false
+            }
+            
+            if !isWordCharBefore && !isWordCharAfter {
+                return true
+            }
+            startSearch = range.upperBound
         }
         return false
     }
@@ -1202,7 +1250,26 @@ extension String {
                         followedByGeneric = true
                     }
                     
-                    if !followedByGeneric {
+                    var precededByExtension = false
+                    var prevIdx = start - 1
+                    while prevIdx >= 0 && chars[prevIdx].isWhitespace {
+                        prevIdx -= 1
+                    }
+                    if prevIdx >= 8 {
+                        let sub = String(chars[(prevIdx - 8)...prevIdx])
+                        if sub == "extension" {
+                            if prevIdx - 9 < 0 {
+                                precededByExtension = true
+                            } else {
+                                let beforeC = chars[prevIdx - 9]
+                                if !beforeC.isLetter && !beforeC.isNumber && beforeC != "_" && beforeC != "$" {
+                                    precededByExtension = true
+                                }
+                            }
+                        }
+                    }
+                    
+                    if !followedByGeneric && !precededByExtension {
                         var count = 0
                         if let cVal = flatGenerics[word] {
                             count = cVal
@@ -1436,7 +1503,9 @@ extension String {
                             }
                             if depth == 0 {
                                 let params = String(chars[(i + 1)..<(j - 1)])
-                                results.append((name: name, params: params))
+                                if !params.contains("where ") {
+                                    results.append((name: name, params: params))
+                                }
                             }
                         }
                     }
@@ -1847,5 +1916,62 @@ extension String {
             }
         }
         return result
+    }
+    
+    // removingUnusedMethodGenericParams: removes method-level generic params (e.g. GenericA, GenericB)
+    // from the `<...>` bracket before `(` if they are not actually used in the function's
+    // arguments or return type. Prevents "generic parameter 'GenericX' is not used in function
+    // signature" compiler errors.
+    func removingUnusedMethodGenericParams() -> String {
+        // Find the method generic brackets: the `<...>` that appears before `(`
+        guard let openParen = self.firstIndex(of: "(") else { return self }
+        guard let openAngle = self.firstIndex(of: "<"), openAngle < openParen else { return self }
+        
+        // Make sure the `>` that closes the bracket is before `(`
+        var depth = 0
+        var closeAngle: String.Index? = nil
+        var i = openAngle
+        while i < openParen {
+            if self[i] == "<" { depth += 1 }
+            else if self[i] == ">" {
+                depth -= 1
+                if depth == 0 { closeAngle = i; break }
+            }
+            i = self.index(after: i)
+        }
+        guard let ca = closeAngle else { return self }
+        
+        // Extract the param list inside the bracket
+        let bracketContent = String(self[self.index(after: openAngle)..<ca])
+        // The function body is everything from `(` onward
+        let funcBody = String(self[openParen...])
+        
+        // Parse generic params (split on comma, handling nested brackets)
+        let rawParams = bracketContent.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        
+        var keptParams = [String]()
+        for param in rawParams {
+            if param.isEmpty { continue }
+            // Check if the param name (whole-word) appears in the function body
+            let used = funcBody.replaceWord(param, with: "").count < funcBody.count
+            if used {
+                keptParams.append(param)
+            }
+            // Also keep params that aren't GenericX — if it was declared without Generic prefix
+            // it is a real type constraint we should preserve.
+            else if !param.hasPrefix("Generic") {
+                keptParams.append(param)
+            }
+            // If it IS a GenericX param and NOT used, skip it (prune it).
+        }
+        
+        let prefix = String(self[..<openAngle])
+        let suffix = String(self[self.index(after: ca)...])
+        
+        if keptParams.isEmpty {
+            return prefix + suffix
+        } else {
+            return prefix + "<" + keptParams.joined(separator: ", ") + ">" + suffix
+        }
     }
 }

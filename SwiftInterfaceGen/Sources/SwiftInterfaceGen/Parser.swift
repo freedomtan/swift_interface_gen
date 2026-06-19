@@ -23,9 +23,38 @@ class Parser {
     var frameworkInterfaceCache: [String: String] = [:]
     var namespaceFrameworkCache: [String: Bool] = [:]
     var frameworkDefinedTypesCache: [String: Set<String>] = [:]
+    
+    var defaultArguments = [String: Set<Int>]()
+    
+    func splitTopLevelCommas(_ s: String) -> [String] {
+        var result = [String]()
+        var current = ""
+        var depth = 0
+        for ch in s {
+            if ch == "(" || ch == "<" || ch == "[" {
+                depth += 1
+                current.append(ch)
+            } else if ch == ")" || ch == ">" || ch == "]" {
+                depth -= 1
+                current.append(ch)
+            } else if ch == "," && depth == 0 {
+                result.append(current)
+                current = ""
+            } else {
+                current.append(ch)
+            }
+        }
+        if !current.isEmpty {
+            result.append(current)
+        }
+        return result
+    }
     private var scannedLocalSwiftFiles = false
     var tbdSymbols = Set<String>()
     var referencedModules = Set<String>()
+    var symbolEscapingMap: [String: [Int: Bool]] = [:]
+    // Maps base function mangled symbol → set of parameter indices that have default values
+    var defaultArgMap: [String: Set<Int>] = [:]
 
     init() {}
 
@@ -150,6 +179,7 @@ class Parser {
     }
 
     func parse(mangled: String, demangled: String, currentModule: String) {
+        let originalMangled = mangled
         var mangled = mangled
         if mangled.hasSuffix("Tj") {
             mangled = String(mangled.dropLast(2))
@@ -158,6 +188,51 @@ class Parser {
         }
         self.defaultModule = currentModule
         self.currentPrecomputeModule = currentModule
+        
+        // Parse default arguments from demangled string
+        if demangled.contains("default argument ") {
+            let parts = demangled.components(separatedBy: " of ")
+            if parts.count >= 2 {
+                let defArgPart = parts[0]
+                let funcPartFull = parts[1]
+                
+                let indexStr = defArgPart.replacingOccurrences(of: "default argument ", with: "").trimmingCharacters(in: .whitespaces)
+                if let index = Int(indexStr) {
+                    var funcPart = funcPartFull
+                    if funcPart.hasPrefix("static ") {
+                        funcPart = String(funcPart.dropFirst(7))
+                    }
+                    if let arrowRange = funcPart.range(of: " -> ", options: .backwards) {
+                        funcPart = String(funcPart[..<arrowRange.lowerBound])
+                    }
+                    
+                    if let openParen = funcPart.firstIndex(of: "("), let closeParen = funcPart.lastIndex(of: ")") {
+                        let funcName = String(funcPart[..<openParen]).trimmingCharacters(in: .whitespaces)
+                        let paramsStr = String(funcPart[funcPart.index(after: openParen)..<closeParen])
+                        
+                        let params = splitTopLevelCommas(paramsStr)
+                        var labels = [String]()
+                        for param in params {
+                            let trimmed = param.trimmingCharacters(in: .whitespaces)
+                            if let colonIdx = trimmed.firstIndex(of: ":") {
+                                let labelOrBoth = String(trimmed[..<colonIdx]).trimmingCharacters(in: .whitespaces)
+                                let labelParts = labelOrBoth.components(separatedBy: " ")
+                                let label = labelParts.first ?? "_"
+                                labels.append(label)
+                            } else {
+                                labels.append("_")
+                            }
+                        }
+                        
+                        let key = "\(funcName)(\(labels.joined(separator: ":"))\(labels.isEmpty ? "" : ":"))"
+                        if defaultArguments[key] == nil {
+                            defaultArguments[key] = Set<Int>()
+                        }
+                        defaultArguments[key]?.insert(index)
+                    }
+                }
+            }
+        }
         
         if !scannedLocalSwiftFiles {
             scannedLocalSwiftFiles = true
@@ -168,6 +243,7 @@ class Parser {
         
         var d = demangled
         let d_orig = demangled
+        var constraints: String? = nil
         
         if d_orig.starts(with: "associated type descriptor for ") {
             let fullPath = d_orig.replacingOccurrences(of: "associated type descriptor for ", with: "").trimmingCharacters(in: .whitespaces)
@@ -175,7 +251,9 @@ class Parser {
             if !typeName.isEmpty && !assocName.isEmpty {
                 let node = findOrCreateType(name: cleanType(typeName))
                 setKind("protocol", for: node)
-                node.members[assocName] = .associatedType("associatedtype \(assocName)")
+                if node.members[assocName] == nil {
+                    node.members[assocName] = .associatedType("associatedtype \(assocName)")
+                }
             }
             return
         }
@@ -192,7 +270,9 @@ class Parser {
             "ObjC resilient class stub for ",
             "reflection metadata for ",
             "value witness table for ",
-            "protocol conformance descriptor for "
+            "protocol conformance descriptor for ",
+            "base conformance descriptor for ",
+            "associated conformance descriptor for "
         ]
         
         var forcedKind: String? = nil
@@ -207,22 +287,64 @@ class Parser {
                     if mangled.hasSuffix("OMn") { forcedKind = "enum" }
                     else if mangled.hasSuffix("VMn") { forcedKind = "struct" }
                     else if mangled.hasSuffix("CMn") { forcedKind = "class" }
-                } else if desc.contains("protocol conformance descriptor") {
-                    let parts = d.components(separatedBy: " : ")
+                } else if desc.contains("associated conformance descriptor") {
+                    let parts = d.components(separatedBy: ":")
+                    if parts.count == 2 {
+                        let pathPart = parts[0].trimmingCharacters(in: .whitespaces)
+                        let protoPath = parts[1].trimmingCharacters(in: .whitespaces)
+                        
+                        let pathTokens = pathPart.components(separatedBy: ".")
+                        if pathTokens.count >= 2 {
+                            let assocName = pathTokens.last!
+                            let typePathTokens = Array(pathTokens.dropLast())
+                            // Fix demangling verbosity: Module.Protocol.Module.Protocol.AssocName -> Module.Protocol
+                            let typePathRaw = typePathTokens.joined(separator: ".")
+                            let typePath: String
+                            let half = typePathRaw.count / 2
+                            if typePathRaw.count > 3 && typePathRaw[typePathRaw.index(typePathRaw.startIndex, offsetBy: half)] == "." &&
+                               String(typePathRaw[..<typePathRaw.index(typePathRaw.startIndex, offsetBy: half)]) == String(typePathRaw[typePathRaw.index(typePathRaw.startIndex, offsetBy: half + 1)...]) {
+                                typePath = String(typePathRaw[..<typePathRaw.index(typePathRaw.startIndex, offsetBy: half)])
+                            } else {
+                                typePath = typePathRaw
+                            }
+                            
+                            let node = findOrCreateType(name: cleanType(typePath))
+                            setKind("protocol", for: node)
+                            let simplifiedProto = simplifyType(protoPath)
+                            fputs("Parsed assoc conformance: \(typePath).\(assocName) -> \(simplifiedProto)\n", stderr)
+                            
+                            let cleanConstraint = simplifiedProto.replacingOccurrences(of: "any ", with: "")
+                            var code = "associatedtype \(assocName): \(cleanConstraint)"
+                            if assocName == "CatalogAssetType" && (typePath == "AssetBackedResource" || typePath.hasSuffix(".AssetBackedResource")) {
+                                code += " = CatalogAsset<GenericA, GenericA>"
+                            }
+                            node.members[assocName] = .associatedType(code)
+                        }
+                    }
+                    return
+                } else if desc.contains("conformance descriptor") {
+                    let parts = d.components(separatedBy: ":")
                     if parts.count == 2 {
                         var typePath = parts[0].trimmingCharacters(in: .whitespaces)
                         if typePath.contains("protocol conformance descriptor for ") {
                             typePath = typePath.replacingOccurrences(of: "protocol conformance descriptor for ", with: "")
                         }
+                        if typePath.contains("base conformance descriptor for ") {
+                            typePath = typePath.replacingOccurrences(of: "base conformance descriptor for ", with: "")
+                        }
                         var protoPath = parts[1].trimmingCharacters(in: .whitespaces)
                         if let inIndex = protoPath.range(of: " in ") {
                             protoPath = String(protoPath[..<inIndex.lowerBound]).trimmingCharacters(in: .whitespaces)
                         }
-                        
+
                         let node = findOrCreateType(name: cleanType(typePath))
+                        if desc.contains("base conformance") {
+                            setKind("protocol", for: node)
+                        }
+
                         let simplifiedProto = simplifyType(protoPath)
                         node.conformances.insert(simplifiedProto)
-                        
+
                         let cleanProto = cleanType(protoPath)
                         discoveredProtocols.insert(cleanProto)
                         let shortProto = cleanProto.components(separatedBy: ".").last ?? cleanProto
@@ -235,7 +357,11 @@ class Parser {
         }
         
         if !isPrimaryDescriptor {
-            let junkKeywords = ["descriptor", "type metadata", "metadata accessor", "metadata instantiation", "witness table", "helper", "offset", "lookup function", "variable", "function pointer", "default argument", "lazy cache", "block copy", "block destroy", "property descriptor", "reflection metadata", "resilient class stub"]
+            // Default argument symbols are handled in pre-pass in processSymbols
+            if d_orig.contains("default argument") {
+                return
+            }
+            let junkKeywords = ["descriptor", "type metadata", "metadata accessor", "metadata instantiation", "witness table", "helper", "offset", "lookup function", "variable", "function pointer", "lazy cache", "block copy", "block destroy", "property descriptor", "reflection metadata", "resilient class stub"]
             for junk in junkKeywords {
                 if d_orig.contains(junk) {
                     if (d_orig.contains("dispatch thunk") || d_orig.contains("method descriptor")) && d_orig.contains("(") {
@@ -247,15 +373,43 @@ class Parser {
             }
         }
         
-        if d_orig.contains("deinit") || d_orig.contains("__allocating_init") || 
-           d_orig.contains(" where ") || d_orig.contains("initializeBufferWithCopy") ||
+        if d_orig.contains("deinit") || 
+           (d_orig.contains(" where ") && !d_orig.contains("(extension in ")) ||
+           d_orig.contains("initializeBufferWithCopy") ||
            d_orig.contains("async function pointer") {
             return
         }
 
-        if d.starts(with: "(extension in ") {
-            if let colonIndex = d.firstIndex(of: ":") {
-                d = String(d[d.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+        var body = d
+        var isStaticExtension = false
+        if body.starts(with: "static ") {
+            body = String(body.dropFirst(7))
+            isStaticExtension = true
+        }
+        
+        if body.starts(with: "(extension in ") {
+            if let colonIndex = body.firstIndex(of: ":") {
+                let actualBody = String(body[body.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+                d = isStaticExtension ? "static " + actualBody : actualBody
+                
+                // Parse constraints if actualBody contains "< where "
+                if let range = actualBody.range(of: "< where ") {
+                    var depth = 1
+                    var scanIdx = range.upperBound
+                    while scanIdx < actualBody.endIndex && depth > 0 {
+                        let char = actualBody[scanIdx]
+                        if char == "<" { depth += 1 }
+                        else if char == ">" { depth -= 1 }
+                        scanIdx = actualBody.index(after: scanIdx)
+                    }
+                    if depth == 0 {
+                        let rawConstraints = String(actualBody[range.upperBound..<actualBody.index(before: scanIdx)]).trimmingCharacters(in: .whitespaces)
+                        var simplified = simplifyType(rawConstraints)
+                        simplified = simplified.replacingOccurrences(of: ": any ", with: ": ")
+                        simplified = simplified.replacingOccurrences(of: ":any ", with: ": ")
+                        constraints = "where " + simplified
+                    }
+                }
             }
         }
 
@@ -304,13 +458,14 @@ class Parser {
                         }
                     }
                     
-                    node.members[caseName] = .enumCase(name: caseName, payload: payload)
+                    let hasLabel = mangled.contains("tc")
+                    node.members[caseName] = .enumCase(name: caseName, payload: payload, hasLabel: hasLabel)
                 }
             }
             return
         }
 
-        let modulesToStrip = [defaultModule, "Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "Synchronization"]
+        let modulesToStrip = [defaultModule]
         for mod in modulesToStrip {
             if d.starts(with: mod + ".") {
                 d = String(d.dropFirst(mod.count + 1))
@@ -340,21 +495,63 @@ class Parser {
         if isRealMethod, let openParenIndex = cleanD.firstIndex(of: "(") {
             let prefix = String(cleanD[..<openParenIndex])
             if !prefix.hasSuffix("<") && cleanD.contains(" -> ") {
-                let fullMemberPath = prefix.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " :", with: "")
-                if fullMemberPath.contains(".__") { return }
+                var fullMemberPath = prefix.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " :", with: "")
+                if fullMemberPath.contains(".__") {
+                    if fullMemberPath.hasSuffix(".__allocating_init") {
+                        fullMemberPath = fullMemberPath.replacingOccurrences(of: ".__allocating_init", with: ".init")
+                    } else {
+                        return
+                    }
+                }
+                
+                var methodGenericsPart = ""
+                var methodWhereClause = ""
+                if let openAngleIndex = fullMemberPath.firstIndex(of: "<") {
+                    let genericPart = String(fullMemberPath[openAngleIndex...])
+                    if genericPart.contains(">") {
+                        let typePath = String(fullMemberPath[..<openAngleIndex])
+                        
+                        var cleanGenericPart = genericPart
+                        let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                        for p in placeholders {
+                            cleanGenericPart = cleanGenericPart.replaceWord(p, with: "\(p)1", allowPrecededByDot: false)
+                        }
+                        cleanGenericPart = cleanGenericPart.replacingOccurrences(of: "Swift.Error", with: "Error")
+                        
+                        // Move any `where` clause from inside <...> to after function signature.
+                        // Swift 6 requires: func foo<A, B>(...) where B: Error  (NOT <A, B where B: Error>)
+                        if let whereRange = cleanGenericPart.range(of: " where ") {
+                            let beforeWhere = String(cleanGenericPart[..<whereRange.lowerBound])
+                            let afterWhere = String(cleanGenericPart[whereRange.upperBound...])
+                            // afterWhere may end with `>` — strip it for clause body
+                            let clauseBody = afterWhere.hasSuffix(">") ? String(afterWhere.dropLast()) : afterWhere
+                            methodWhereClause = " where " + clauseBody
+                            cleanGenericPart = beforeWhere + ">"
+                        }
+                        
+                        methodGenericsPart = cleanGenericPart
+                        fullMemberPath = typePath
+                    }
+                }
                 
                 var signatureRaw = String(cleanD[openParenIndex...])
+                if !methodGenericsPart.isEmpty {
+                    let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                    for p in placeholders {
+                        signatureRaw = signatureRaw.replaceWord(p, with: "\(p)1", allowPrecededByDot: false)
+                    }
+                }
                 let (typeName, memberNameRaw) = splitPath(fullMemberPath)
                 let memberName = memberNameRaw.replacingOccurrences(of: " :", with: "").trimmingCharacters(in: .whitespaces)
                 
                 if !typeName.isEmpty && !memberName.isEmpty {
                     if memberName.contains("getter") || memberName.contains("setter") { return }
-
+ 
                     let parentName = typeName.components(separatedBy: ".").last!
                     let node = findOrCreateType(name: cleanType(typeName))
                     if let k = forcedKind { setKind(k, for: node) }
                     
-                    let escapedMemberName = escapeKeyword(memberName)
+                    let escapedMemberName = escapeKeyword(memberName) + methodGenericsPart
                     
                     if memberName == "init" {
                         var depth = 0
@@ -369,21 +566,39 @@ class Parser {
                             }
                             j = signatureRaw.index(after: j)
                         }
+                        // Detect failable init: return type is Optional (ends with '?' or is 'Optional<...>' / 'Swift.Optional<...>')
+                        var isFailable = false
                         if let arrow = arrowIndex {
+                            let returnPart = String(signatureRaw[signatureRaw.index(arrow, offsetBy: 2)...]).trimmingCharacters(in: .whitespaces)
+                            isFailable = returnPart.hasSuffix("?") ||
+                                         returnPart.hasPrefix("Optional<") ||
+                                         returnPart.hasPrefix("Swift.Optional<")
                             signatureRaw = String(signatureRaw[..<arrow]).trimmingCharacters(in: .whitespaces)
                         }
-                        
+
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
-                        let initSig = fixUnnamedParameters(signature)
+                        let initSig = Parser.fixUnnamedParameters(signature, escapingMap: symbolEscapingMap[originalMangled] ?? symbolEscapingMap[mangled], defaultArgs: defaultArgMap[mangled])
+                        let initKeyword = isFailable ? "init?" : "init"
                         if mangled.contains("PAAE") {
-                            node.extensionMembers["init" + initSig] = .initializer("init" + initSig)
+                            node.extensionMembers[initKeyword + initSig] = .initializer(initKeyword + initSig)
+                        } else if let constraints = constraints {
+                            node.constrainedExtensions[constraints, default: [:]][initKeyword + initSig] = .initializer(initKeyword + initSig)
+                        } else if mangled.contains("PA") && mangled.contains("rlE") {
+                            node.extensionMembers[initKeyword + initSig] = .initializer(initKeyword + initSig)
                         } else {
-                            node.members["init" + initSig] = .initializer("init" + initSig)
+                            node.members[initKeyword + initSig] = .initializer(initKeyword + initSig)
                         }
                     } else {
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
-                        let fixedSignature = fixUnnamedParameters(escapedMemberName + signature)
+                        var fixedSignature = Parser.fixUnnamedParameters(escapedMemberName + signature, escapingMap: symbolEscapingMap[originalMangled] ?? symbolEscapingMap[mangled], defaultArgs: defaultArgMap[mangled])
+                        if !methodWhereClause.isEmpty {
+                            fixedSignature += methodWhereClause
+                        }
                         if mangled.contains("PAAE") {
+                            node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                        } else if let constraints = constraints {
+                            node.constrainedExtensions[constraints, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                        } else if mangled.contains("PA") && mangled.contains("rlE") {
                             node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                         } else {
                             node.members[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
@@ -418,7 +633,8 @@ class Parser {
             
             let (typeName, memberName) = splitPath(fullMemberPath)
             let parentName = typeName.components(separatedBy: ".").last!
-            let type = simplifyType(parts[1], parentName: parentName)
+            let isSubscript = memberName == "subscript" || memberName == "`subscript`"
+            let type = simplifyType(parts[1], parentName: parentName, isMethodSignature: isSubscript)
             
             if !typeName.isEmpty && !memberName.isEmpty {
                 let node = findOrCreateType(name: cleanType(typeName))
@@ -431,6 +647,10 @@ class Parser {
 
                 let escapedMemberName = escapeKeyword(memberName)
                 if mangled.contains("PAAE") {
+                    node.extensionMembers[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                } else if let constraints = constraints {
+                    node.constrainedExtensions[constraints, default: [:]][escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                } else if mangled.contains("PA") && mangled.contains("rlE") {
                     node.extensionMembers[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                 } else {
                     node.members[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
@@ -472,6 +692,7 @@ class Parser {
     }
 
     private func findOrCreateType(name: String) -> TypeNode {
+        if name.contains("<") { fputs("findOrCreateType with <: \(name)\n", stderr) }
         var parts = name.components(separatedBy: ".")
 
         let isTopLevel = isModuleAvailable(parts[0]) || parts[0] == "__C" || parts[0] == defaultModule
@@ -484,6 +705,14 @@ class Parser {
         }
         
         let moduleName = parts[0]
+        
+        // Skip creating nodes for __C module as they should be resolved via imports or typealiases
+        if moduleName == "__C" {
+            // We return a dummy node so the caller doesn't crash, but it won't be in modules dictionary
+            let current = TypeNode(name: name)
+            return current
+        }
+
         if modules[moduleName] == nil {
             modules[moduleName] = TypeNode(name: moduleName)
         }
@@ -501,7 +730,22 @@ class Parser {
     }
 
     private func splitPath(_ path: String) -> (String, String) {
-        let parts = path.components(separatedBy: ".")
+        // Split by '.' only at angle-bracket depth 0 to handle generic types like
+        // "SupportedArgument<A where A: Swift.Equatable>.all"
+        var parts = [String]()
+        var current = ""
+        var depth = 0
+        for ch in path {
+            if ch == "<" { depth += 1; current.append(ch) }
+            else if ch == ">" { depth -= 1; current.append(ch) }
+            else if ch == "." && depth == 0 {
+                parts.append(current)
+                current = ""
+            } else {
+                current.append(ch)
+            }
+        }
+        if !current.isEmpty { parts.append(current) }
         if parts.count == 1 {
             return (defaultModule, parts[0])
         }
@@ -514,11 +758,12 @@ class Parser {
         var n = name.stripGenericAngles().stripLongNumbers()
         
         if n.contains("(extension in ") {
-            for ext in discoveredNamespaces {
+            for ext in discoveredNamespaces.union([defaultModule]) {
                 n = n.replacingOccurrences(of: "(extension in \(ext)):", with: "")
             }
         }
         
+        n = n.replacingOccurrences(of: "__C\\.UAF([a-zA-Z0-9_]+)", with: "UnifiedAssetFramework.UAF$1", options: .regularExpression)
         if n.hasSuffix(".Array") { n = n.replacingOccurrences(of: ".Array", with: ".JSONArray") }
         if n.hasSuffix(".Dictionary") { n = n.replacingOccurrences(of: ".Dictionary", with: ".JSONDictionary") }
         if n.hasSuffix(".Object") { n = n.replacingOccurrences(of: ".Object", with: ".JSONObject") }
@@ -529,6 +774,9 @@ class Parser {
 
     func simplifyType(_ type: String, parentName: String? = nil, isMethodSignature: Bool = false) -> String {
         var t = type.replacingOccurrences(of: "CVBufferRef", with: "CVBuffer")
+        t = t.replacingOccurrences(of: "__C\\.UAF([a-zA-Z0-9_]+)", with: "UnifiedAssetFramework.UAF$1", options: .regularExpression)
+        t = t.replacingOccurrences(of: "__C.UAFSubscriptionDownloadStatus", with: "UnifiedAssetFramework.UAFSubscriptionDownloadStatus")
+        t = t.replacingOccurrences(of: "__C\\.OS_xpc_object", with: "XPC.OS_xpc_object", options: .regularExpression)
         
         // For each discovered protocol, add 'any' prefix when used as an existential type.
         // Track which ones are "ambiguous" (also have a concrete type with the same short name)
@@ -590,8 +838,13 @@ class Parser {
             if word == "__C" {
                 t = t.replaceWordDot(word, with: "")
             } else if word != "Swift" && word != defaultModule && isModuleAvailable(word) {
-                t = t.replaceWordDot(word, with: "")
-                referencedModules.insert(word)
+                let workspaceFrameworks = ["CoreAICommon", "ODIE", "ModelCatalog", "CoreAICompiler", "UnifiedAssetFramework", "AppleIntelligenceReporting", "FeatureFlags"]
+                if workspaceFrameworks.contains(word) {
+                    referencedModules.insert(word)
+                } else {
+                    t = t.replaceWordDot(word, with: "")
+                    referencedModules.insert(word)
+                }
             }
         }
         
@@ -613,6 +866,8 @@ class Parser {
              if t.contains(mod) {
                   if mod == defaultModule {
                       t = t.replaceWordDot(mod, with: "")
+                  } else if isModuleAvailable(mod) {
+                      // Keep the qualified module name prefix for available modules
                   } else {
                       t = t.replaceWordDot(mod, with: "\(mod)_")
                   }
@@ -703,11 +958,12 @@ class Parser {
         if isMethodSignature {
             return stripLabelsFromMethodSignature(t)
         } else {
-            return stripFunctionTypeLabels(t)
+            let stripped = stripFunctionTypeLabels(t)
+            return Parser.escapeClosures(in: stripped, isTopLevelParameter: false)
         }
     }
 
-    private func fixUnnamedParameters(_ sig: String) -> String {
+    static func fixUnnamedParameters(_ sig: String, isSubscript: Bool = false, escapingMap: [Int: Bool]? = nil, defaultArgs: Set<Int>? = nil) -> String {
         guard let openParen = sig.firstIndex(of: "(") else { return sig }
         let prefix = sig[..<sig.index(after: openParen)]
         let rest = String(sig[sig.index(after: openParen)...])
@@ -734,13 +990,23 @@ class Parser {
         var pDepth = 0
         var aDepth = 0
         var sDepth = 0
-        for c in paramsPart {
+        
+        let chars = Array(paramsPart)
+        var idx = 0
+        while idx < chars.count {
+            let c = chars[idx]
             if c == "(" { pDepth += 1 }
             else if c == ")" { pDepth -= 1 }
-            else if c == "<" { aDepth += 1 }
-            else if c == ">" { aDepth -= 1 }
             else if c == "[" { sDepth += 1 }
             else if c == "]" { sDepth -= 1 }
+            else if c == "<" { aDepth += 1 }
+            else if c == ">" {
+                if idx > 0 && chars[idx - 1] == "-" {
+                    // Ignore ->
+                } else {
+                    aDepth -= 1
+                }
+            }
             
             if c == "," && pDepth == 0 && aDepth == 0 && sDepth == 0 {
                 paramList.append(current)
@@ -748,12 +1014,13 @@ class Parser {
             } else {
                 current.append(c)
             }
+            idx += 1
         }
         paramList.append(current)
 
         var newParams = [String]()
         var unnamedCount = 1
-        for p in paramList {
+        for (paramIndex, p) in paramList.enumerated() {
             let trimmed = p.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
             
@@ -761,30 +1028,54 @@ class Parser {
             var depth_p = 0
             var depth_a = 0
             var depth_s = 0
-            for c in trimmed {
-                if c == "(" { depth_p += 1 }
-                else if c == ")" { depth_p -= 1 }
-                else if c == "<" { depth_a += 1 }
-                else if c == ">" { depth_a -= 1 }
-                else if c == "[" { depth_s += 1 }
-                else if c == "]" { depth_s -= 1 }
-                else if c == ":" && depth_p == 0 && depth_a == 0 && depth_s == 0 {
+            var colonIdx: String.Index? = nil
+            for (index, char) in trimmed.enumerated() {
+                if char == "(" { depth_p += 1 }
+                else if char == ")" { depth_p -= 1 }
+                else if char == "<" { depth_a += 1 }
+                else if char == ">" { depth_a -= 1 }
+                else if char == "[" { depth_s += 1 }
+                else if char == "]" { depth_s -= 1 }
+                else if char == ":" && depth_p == 0 && depth_a == 0 && depth_s == 0 {
                     hasLabel = true
+                    colonIdx = trimmed.index(trimmed.startIndex, offsetBy: index)
                     break
                 }
             }
 
-            if !hasLabel && trimmed != "()" {
-                newParams.append("_ arg\(unnamedCount): " + trimmed)
+            var labelPart = ""
+            var typePart = trimmed
+            var labelName = ""
+            if hasLabel, let cIdx = colonIdx {
+                labelName = String(trimmed[..<cIdx]).trimmingCharacters(in: .whitespaces)
+                labelPart = labelName + ": "
+                typePart = String(trimmed[trimmed.index(after: cIdx)...]).trimmingCharacters(in: .whitespaces)
+            }
+
+            let isEsc = escapingMap?[paramIndex] ?? true
+            let escapedType = Parser.escapeClosures(in: typePart, isTopLevelParameter: true, isEscaping: isEsc)
+
+            if isSubscript {
+                if hasLabel && labelName != "_" {
+                    newParams.append("\(labelName) arg\(unnamedCount): \(escapedType)")
+                } else {
+                    newParams.append("_ arg\(unnamedCount): \(escapedType)")
+                }
                 unnamedCount += 1
             } else {
-                newParams.append(trimmed)
+                if !hasLabel && trimmed != "()" {
+                    newParams.append("_ arg\(unnamedCount): " + escapedType)
+                    unnamedCount += 1
+                } else {
+                    newParams.append(labelPart + escapedType)
+                }
             }
         }
         return String(prefix) + newParams.joined(separator: ", ") + String(suffix)
     }
     
     func isModuleAvailable(_ name: String) -> Bool {
+        if ["Swift", "Foundation", "ObjectiveC"].contains(name) { return true }
         let sdkRoot = ConfigManager.sdkRoot
         
         // 1. Check if name is in usr/lib/swift (standard library modules)
@@ -882,6 +1173,14 @@ class Parser {
     }
 
     func isTypeDefinedInFramework(module: String, typeName: String) -> Bool {
+        let systemModules: Set<String> = [
+            "Swift", "Foundation", "ObjectiveC", "__C", "Dispatch", 
+            "Metal", "IOSurface", "CoreGraphics", "CoreVideo", 
+            "CoreMedia", "CoreImage", "CoreML", "UniformTypeIdentifiers"
+        ]
+        if systemModules.contains(module) {
+            return true
+        }
         return getFrameworkDefinedTypes(module: module).contains(typeName)
     }
 
@@ -932,6 +1231,39 @@ class Parser {
             if let node = modules["ModelCatalog"]?.nestedTypes["LLMModelBase"] {
                 node.members["dependencies"] = .property(name: "dependencies", type: "Array<any ManagedResource>", isReadOnly: true, isStatic: false)
                 node.members["runtimeInformation"] = .property(name: "runtimeInformation", type: "Array<ManagedRuntimeInformation>", isReadOnly: true, isStatic: false)
+            }
+        }
+        
+        // Auto-detect NSObject subclasses: any class with an init(coder: NSCoder) member is an
+        // NSObject subclass conforming to NSCoding. Mark them so Model.swift emits the correct
+        // `open class X: NSObject, NSCoding` declaration with `required init?(coder:)`.
+        // This is essential because library-evolution mode only generates dispatch thunks (Tj)
+        // for `open` classes, and NSCoding requires the `required` designation.
+        func markNSObjectSubclasses(node: TypeNode) {
+            if node.kind == "class" && node.baseClass == nil {
+                let hasCoderInit = node.members.values.contains {
+                    if case .initializer(let s) = $0, s.contains("init(coder:") { return true }
+                    return false
+                }
+                if hasCoderInit {
+                    node.baseClass = "NSObject"
+                    node.conformances.insert("NSCoding")
+                    // Ensure the coder init uses the required init?(coder:) form
+                    // Remove plain init(coder:) and let Model.swift emit the required form
+                    let keysToRemove = node.members.keys.filter {
+                        if case .initializer(let s) = node.members[$0]!, s.contains("init(coder:") { return true }
+                        return false
+                    }
+                    for k in keysToRemove { node.members.removeValue(forKey: k) }
+                }
+            }
+            for nested in node.nestedTypes.values {
+                markNSObjectSubclasses(node: nested)
+            }
+        }
+        for module in modules.values {
+            for type in module.nestedTypes.values {
+                markNSObjectSubclasses(node: type)
             }
         }
         
@@ -1010,6 +1342,32 @@ class Parser {
 
     func generateAll() -> String {
         applyTypeFixups()
+
+        let systemTypes: Set<String> = [
+            "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
+            "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
+            "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
+            "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
+            "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
+            "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Identifiable",
+            "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
+            "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
+            "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
+            "AnySequence", "FloatingPointRoundingRule", "Task", "Mutex", "CustomStringConvertible", "CustomDebugStringConvertible", "CodingKey",
+            "ExpressibleByExtendedGraphemeClusterLiteral", "ExpressibleByStringLiteral", "ExpressibleByUnicodeScalarLiteral",
+            "ExpressibleByIntegerLiteral", "ExpressibleByFloatLiteral", "ExpressibleByBooleanLiteral",
+            "ExpressibleByNilLiteral", "ExpressibleByArrayLiteral", "ExpressibleByDictionaryLiteral",
+            "LocalizedError", "CustomNSError", "Logger", "NSXPCConnection", "NSXPCInterface", "Protocol", "NSCopying",
+            "Swift", "Foundation", "CoreFoundation", "Metal", "IOSurface", "CoreGraphics", "CoreVideo", "CoreMedia", "CoreImage", "CoreML", "Dispatch", "os", "ObjectiveC", "Synchronization",
+            "Strideable", "AdditiveArithmetic", "BinaryFloatingPoint", "FloatingPoint", "FloatingPointSign", "Numeric", "SignedNumeric",
+            "MTLDevice", "MTLBuffer", "MTLTexture", "IOSurfaceRef", "CVBufferRef", "CVBuffer",
+            "Span", "MutableSpan", "RawSpan", "MutableRawSpan",
+            // Additional System Types to prevent shadowing and matching issues:
+            "NSNumber", "NSCoder", "Date", "DispatchQueue", "URLComponents", "UUID", "NSZone", "AnyHashable", "UTType", "Decimal", "IndexSet", "URLRequest", "URLSessionTask", "OS_dispatch_queue",
+            "AsyncStream", "AsyncThrowingStream",
+            "NSCoding", "NSSecureCoding", "NSObjectProtocol"
+        ]
+
         fputs("discoveredProtocols: \(discoveredProtocols)\n", stderr)
         // Set all referenced but undefined types to struct
         func defaultUnknownTypes(node: TypeNode) {
@@ -1060,6 +1418,9 @@ class Parser {
             
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             for type in sortedTypes {
+                if moduleName == "__C" && systemTypes.contains(type.name) {
+                    continue
+                }
                 let flattenedName = "\(moduleName)_\(type.name)"
                 if definedTypes.contains(flattenedName) { continue }
                 
@@ -1088,7 +1449,7 @@ class Parser {
                         cleanedSig = cleanedSig.replacingOccurrences(of: " postfix(", with: "(")
                     }
                     cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
-                    cleanedSig = fixUnnamedParameters(cleanedSig)
+                    cleanedSig = Parser.fixUnnamedParameters(cleanedSig)
                     var returnType = "Void"
                     if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
                         returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
@@ -1118,15 +1479,14 @@ class Parser {
         
         // Phase 2: Generate type extensions
         for moduleName in sortedModuleNames {
-            if ["Swift", "Foundation", "ObjectiveC"].contains(moduleName) { continue }
-            if moduleName != defaultModule && isModuleAvailable(moduleName) {
+            if moduleName != defaultModule && isModuleAvailable(moduleName) && !["Swift", "Foundation", "ObjectiveC"].contains(moduleName) {
                 continue
             }
             guard let module = modules[moduleName] else { continue }
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             for type in sortedTypes {
                 let flattenedName = "\(moduleName)_\(type.name)"
-                if !definedTypes.contains(flattenedName) { continue }
+                if !definedTypes.contains(flattenedName) && type.extensionMembers.isEmpty && type.constrainedExtensions.isEmpty { continue }
                 
                 let pathPrefix = (moduleName == defaultModule) ? "" : "\(moduleName)_"
                 output += type.generateExtensions(defaultModule: defaultModule, parser: self, path: pathPrefix)
@@ -1168,7 +1528,6 @@ class Parser {
         
         // Phase 4: Generate generic typealiases mapping flattened names to imported module types, OR stubs if missing
         for moduleName in sortedModuleNames {
-            if ["Swift", "Foundation", "ObjectiveC"].contains(moduleName) { continue }
             if moduleName == defaultModule { continue }
             guard let module = modules[moduleName] else { continue }
             
@@ -1213,34 +1572,24 @@ class Parser {
         // Find all defined types in output
         let allDefinedInOutput = output.scanFrameworkDefinedTypes()
         
-        let systemTypes: Set<String> = [
-            "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
-            "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
-            "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
-            "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
-            "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
-            "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Identifiable",
-            "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
-            "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
-            "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
-            "AnySequence", "FloatingPointRoundingRule", "Task", "Mutex", "CustomStringConvertible", "CustomDebugStringConvertible", "CodingKey",
-            "ExpressibleByExtendedGraphemeClusterLiteral", "ExpressibleByStringLiteral", "ExpressibleByUnicodeScalarLiteral",
-            "ExpressibleByIntegerLiteral", "ExpressibleByFloatLiteral", "ExpressibleByBooleanLiteral",
-            "ExpressibleByNilLiteral", "ExpressibleByArrayLiteral", "ExpressibleByDictionaryLiteral",
-            "LocalizedError", "CustomNSError", "Logger", "NSXPCConnection", "NSXPCInterface", "Protocol", "NSCopying",
-            "Swift", "Foundation", "CoreFoundation", "Metal", "IOSurface", "CoreGraphics", "CoreVideo", "CoreMedia", "CoreImage", "CoreML", "Dispatch", "os", "ObjectiveC", "Synchronization",
-            "Strideable", "AdditiveArithmetic", "BinaryFloatingPoint", "FloatingPoint", "FloatingPointSign", "Numeric", "SignedNumeric",
-            "MTLDevice", "MTLBuffer", "MTLTexture", "IOSurfaceRef", "CVBufferRef", "CVBuffer"
-        ]
-        
         let sortedTypes = referencedTypes.sorted()
         for type in sortedTypes {
-            if systemTypes.contains(type) || type == defaultModule || type == "___SHIELDED_\(defaultModule)___" || discoveredNamespaces.contains(type) { continue }
+            if systemTypes.contains(type) || type == defaultModule || type == "___SHIELDED_\(defaultModule)___" || discoveredNamespaces.contains(type) || isModuleAvailable(type) || ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"].contains(type) { continue }
             if type.count == 1 { continue }
             if type.hasPrefix("JSON") { continue }
             
             // Check if defined
-            let isDefined = allDefinedInOutput.contains(type)
+            var isDefined = allDefinedInOutput.contains(type)
+            if !isDefined {
+                for ns in discoveredNamespaces {
+                    if ns != defaultModule && isModuleAvailable(ns) {
+                        if isTypeDefinedInFramework(module: ns, typeName: type) {
+                            isDefined = true
+                            break
+                        }
+                    }
+                }
+            }
             if !isDefined {
                 // Check if used with "any", ends with "_P", or is in discoveredProtocols
                 let flatDiscoveredProtocols = Set(discoveredProtocols.map { $0.replacingOccurrences(of: ".", with: "_") })
@@ -1525,31 +1874,46 @@ class Parser {
     }
 
     private func stripLabelsFromMethodSignature(_ t: String) -> String {
-        guard t.hasPrefix("(") else { return stripFunctionTypeLabels(t) }
+        var openParenIdx: String.Index? = nil
+        var genericDepth = 0
+        for (idx, char) in t.enumerated() {
+            if char == "<" {
+                genericDepth += 1
+            } else if char == ">" {
+                genericDepth = max(0, genericDepth - 1)
+            } else if char == "(" && genericDepth == 0 {
+                openParenIdx = t.index(t.startIndex, offsetBy: idx)
+                break
+            }
+        }
+        
+        guard let openParen = openParenIdx else { return stripFunctionTypeLabels(t) }
         
         // Find matching parenthesis for the top-level parameters
         var depth = 0
         var matchingIndex: String.Index? = nil
-        for (idx, char) in t.enumerated() {
+        let rest = String(t[t.index(after: openParen)...])
+        for (idx, char) in rest.enumerated() {
             if char == "(" {
                 depth += 1
             } else if char == ")" {
-                depth -= 1
                 if depth == 0 {
-                    matchingIndex = t.index(t.startIndex, offsetBy: idx)
+                    matchingIndex = rest.index(rest.startIndex, offsetBy: idx)
                     break
                 }
+                depth -= 1
             }
         }
         guard let closeParen = matchingIndex else { return stripFunctionTypeLabels(t) }
         
-        let paramsPart = String(t[t.index(after: t.startIndex)..<closeParen])
-        let afterPart = String(t[t.index(after: closeParen)...])
+        let prefix = String(t[..<openParen]) + "("
+        let paramsPart = String(rest[..<closeParen])
+        let afterPart = String(rest[rest.index(after: closeParen)...])
         
         let cleanedAfter = stripFunctionTypeLabels(afterPart)
         let cleanedParams = cleanMethodParams(paramsPart)
         
-        return "(" + cleanedParams + ")" + cleanedAfter
+        return prefix + cleanedParams + ")" + cleanedAfter
     }
 
     private func cleanMethodParams(_ s: String) -> String {
@@ -1611,5 +1975,256 @@ class Parser {
             }
         }
         return cleaned.joined(separator: ", ")
+    }
+
+    static func isNonOptionalFunctionType(_ typeStr: String) -> Bool {
+        let clean = typeStr.trimmingCharacters(in: .whitespaces)
+        if clean.hasSuffix("?") || clean.hasPrefix("Optional<") || clean.hasSuffix("!") {
+            return false
+        }
+        var depth_p = 0
+        var depth_a = 0
+        var depth_s = 0
+        var i = clean.index(before: clean.endIndex)
+        while i >= clean.startIndex {
+            let c = clean[i]
+            if c == ")" { depth_p += 1 }
+            else if c == "(" { depth_p -= 1 }
+            else if c == ">" { depth_a += 1 }
+            else if c == "<" { depth_a -= 1 }
+            else if c == "]" { depth_s += 1 }
+            else if c == "[" { depth_s -= 1 }
+            else if c == ">" && i > clean.startIndex && clean[clean.index(before: i)] == "-" {
+                if depth_p == 0 && depth_a == 0 && depth_s == 0 {
+                    return true
+                }
+            }
+            if i == clean.startIndex { break }
+            i = clean.index(before: i)
+        }
+        return false
+    }
+
+    static func escapeClosures(in typeStr: String, isTopLevelParameter: Bool = false, isEscaping: Bool = true) -> String {
+        let trimmed = typeStr.trimmingCharacters(in: .whitespaces)
+        
+        if trimmed.hasSuffix("?") || trimmed.hasPrefix("Optional<") || trimmed.hasSuffix("!") {
+            if trimmed.hasSuffix("?") {
+                let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
+                return escapeClosures(in: inner, isEscaping: isEscaping) + "?"
+            }
+            if trimmed.hasSuffix("!") {
+                let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
+                return escapeClosures(in: inner, isEscaping: isEscaping) + "!"
+            }
+            if trimmed.hasPrefix("Optional<") && trimmed.hasSuffix(">") {
+                let inner = String(trimmed.dropFirst(9).dropLast()).trimmingCharacters(in: .whitespaces)
+                return "Optional<" + escapeClosures(in: inner, isEscaping: isEscaping) + ">"
+            }
+        }
+        
+        var depth_p = 0
+        var depth_a = 0
+        var depth_s = 0
+        var arrowIdx: String.Index? = nil
+        
+        var i = trimmed.index(before: trimmed.endIndex)
+        while i >= trimmed.startIndex {
+            let c = trimmed[i]
+            if c == ">" && i > trimmed.startIndex && trimmed[trimmed.index(before: i)] == "-" {
+                if depth_p == 0 && depth_a == 0 && depth_s == 0 {
+                    arrowIdx = trimmed.index(before: i)
+                    break
+                }
+                i = trimmed.index(before: i)
+            }
+            else if c == ")" { depth_p += 1 }
+            else if c == "(" { depth_p -= 1 }
+            else if c == ">" { depth_a += 1 }
+            else if c == "<" { depth_a -= 1 }
+            else if c == "]" { depth_s += 1 }
+            else if c == "[" { depth_s -= 1 }
+            if i == trimmed.startIndex { break }
+            i = trimmed.index(before: i)
+        }
+        
+        guard let arrow = arrowIdx else {
+            if let openAngle = trimmed.firstIndex(of: "<"), trimmed.hasSuffix(">") {
+                let prefix = trimmed[..<openAngle]
+                let inner = String(trimmed[trimmed.index(after: openAngle)..<trimmed.index(before: trimmed.endIndex)])
+                var args = [String]()
+                var current = ""
+                var pD = 0
+                var aD = 0
+                var sD = 0
+                for c in inner {
+                    if c == "(" { pD += 1 }
+                    else if c == ")" { pD -= 1 }
+                    else if c == "<" { aD += 1 }
+                    else if c == ">" { aD -= 1 }
+                    else if c == "[" { sD += 1 }
+                    else if c == "]" { sD -= 1 }
+                    if c == "," && pD == 0 && aD == 0 && sD == 0 {
+                        args.append(current)
+                        current = ""
+                    } else {
+                        current.append(c)
+                    }
+                }
+                args.append(current)
+                let escapedArgs = args.map { escapeClosures(in: $0) }
+                return "\(prefix)<\(escapedArgs.joined(separator: ", "))>"
+            }
+            return trimmed
+        }
+        
+        var leftPart = String(trimmed[..<arrow]).trimmingCharacters(in: .whitespaces)
+        let rightPart = String(trimmed[trimmed.index(arrow, offsetBy: 2)...]).trimmingCharacters(in: .whitespaces)
+        
+        var throwsModifier = ""
+        while true {
+            if leftPart.hasSuffix("throws") {
+                leftPart = String(leftPart.dropLast(6)).trimmingCharacters(in: .whitespaces)
+                throwsModifier = "throws " + throwsModifier
+            } else if leftPart.hasSuffix("async") {
+                leftPart = String(leftPart.dropLast(5)).trimmingCharacters(in: .whitespaces)
+                throwsModifier = "async " + throwsModifier
+            } else if leftPart.hasSuffix("rethrows") {
+                leftPart = String(leftPart.dropLast(8)).trimmingCharacters(in: .whitespaces)
+                throwsModifier = "rethrows " + throwsModifier
+            } else {
+                break
+            }
+        }
+        if !throwsModifier.isEmpty {
+            throwsModifier = throwsModifier.trimmingCharacters(in: .whitespaces) + " "
+        }
+        
+        var attrs = ""
+        var paramsString = leftPart
+        if leftPart.hasSuffix(")") {
+            var depth = 0
+            var paramStartIdx: String.Index? = nil
+            var i = leftPart.index(before: leftPart.endIndex)
+            while i >= leftPart.startIndex {
+                let c = leftPart[i]
+                if c == ")" {
+                    depth += 1
+                } else if c == "(" {
+                    depth -= 1
+                    if depth == 0 {
+                        paramStartIdx = i
+                        break
+                    }
+                }
+                if i == leftPart.startIndex { break }
+                i = leftPart.index(before: i)
+            }
+            if let startIdx = paramStartIdx {
+                attrs = String(leftPart[..<startIdx]).trimmingCharacters(in: .whitespaces)
+                if !attrs.isEmpty {
+                    attrs = attrs + " "
+                }
+                paramsString = String(leftPart[startIdx...]).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        
+        var enclosingParens = false
+        if paramsString.hasPrefix("(") && paramsString.hasSuffix(")") {
+            var depth = 0
+            var matchedLast = true
+            let paramsChars = Array(paramsString)
+            for (idx, char) in paramsChars.enumerated() {
+                if char == "(" {
+                    depth += 1
+                } else if char == ")" {
+                    depth -= 1
+                    if depth == 0 && idx < paramsChars.count - 1 {
+                        matchedLast = false
+                        break
+                    }
+                }
+            }
+            if depth == 0 && matchedLast {
+                enclosingParens = true
+            }
+        }
+        
+        if enclosingParens {
+            paramsString.removeFirst()
+            paramsString.removeLast()
+        } else {
+            let escaped = escapeClosures(in: paramsString)
+            let isFunc = escaped.contains("->")
+            let isOpt = escaped.hasSuffix("?") || escaped.hasPrefix("Optional<")
+            let hasEsc = escaped.contains("@escaping")
+            let escPrefix = (isFunc && !isOpt && !hasEsc && isEscaping) ? "@escaping " : ""
+            let finalType = attrs + escPrefix + escaped + " " + throwsModifier + "-> " + escapeClosures(in: rightPart)
+            return (isTopLevelParameter && isEscaping) ? "@escaping " + finalType : finalType
+        }
+        
+        var paramList = [String]()
+        var current = ""
+        var pD = 0
+        var aD = 0
+        var sD = 0
+        for c in paramsString {
+            if c == "(" { pD += 1 }
+            else if c == ")" { pD -= 1 }
+            else if c == "<" { aD += 1 }
+            else if c == ">" { aD -= 1 }
+            else if c == "[" { sD += 1 }
+            else if c == "]" { sD -= 1 }
+            if c == "," && pD == 0 && aD == 0 && sD == 0 {
+                paramList.append(current)
+                current = ""
+            } else {
+                current.append(c)
+            }
+        }
+        paramList.append(current)
+        
+        var escapedParams = [String]()
+        for p in paramList {
+            let trimmedP = p.trimmingCharacters(in: .whitespaces)
+            if trimmedP.isEmpty { continue }
+            
+            var label = ""
+            var type = trimmedP
+            var pD2 = 0
+            var aD2 = 0
+            var sD2 = 0
+            for (index, char) in trimmedP.enumerated() {
+                if char == "(" { pD2 += 1 }
+                else if char == ")" { pD2 -= 1 }
+                else if char == "<" { aD2 += 1 }
+                else if char == ">" { aD2 -= 1 }
+                else if char == "[" { sD2 += 1 }
+                else if char == "]" { sD2 -= 1 }
+                if char == ":" && pD2 == 0 && aD2 == 0 && sD2 == 0 {
+                    let cIdx = trimmedP.index(trimmedP.startIndex, offsetBy: index)
+                    label = String(trimmedP[..<cIdx]) + ": "
+                    type = String(trimmedP[trimmedP.index(after: cIdx)...]).trimmingCharacters(in: .whitespaces)
+                    break
+                }
+            }
+            
+            let escapedType = escapeClosures(in: type)
+            let cleanEscType = escapedType.trimmingCharacters(in: .whitespaces)
+            let isFunc = cleanEscType.contains("->")
+            let isOpt = cleanEscType.hasSuffix("?") || cleanEscType.hasPrefix("Optional<")
+            let hasEsc = cleanEscType.contains("@escaping")
+            
+            let finalType: String
+            if isFunc && !isOpt && !hasEsc {
+                finalType = "@escaping " + cleanEscType
+            } else {
+                finalType = cleanEscType
+            }
+            escapedParams.append(label + finalType)
+        }
+        
+        let finalType = attrs + "(" + escapedParams.joined(separator: ", ") + ") " + throwsModifier + "-> " + escapeClosures(in: rightPart)
+        return (isTopLevelParameter && isEscaping) ? "@escaping " + finalType : finalType
     }
 }

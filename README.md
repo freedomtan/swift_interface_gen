@@ -11,6 +11,7 @@ This tool is primarily used for reverse-engineering and reconstructing the publi
 - **Local Framework Bundling:** Generates a complete, self-contained `.framework` structure (including `.swiftmodule` and `.swiftinterface`) that can be seamlessly passed to the Swift compiler using standard `-F` flags.
 - **Mock Executability:** Generates safe mock implementations (e.g., empty initializers `{}`, safe default return values like `[]` or `nil`, and `fatalError()` for complex logic). This allows client code to successfully instantiate objects and verify type layouts at runtime without crashing immediately.
 - **Smart Dependency Resolution:** Automatically detects and resolves cross-module dependencies (e.g., pulling in `CoreAICommon` when parsing `CoreAICompiler`) by scanning system `PrivateFrameworks` and `SubFrameworks`.
+- **Exact Symbol Alignment (100% TBD Matching):** Compares generated binary exports against the original `.tbd` file, compiles raw assembly stubs for missing symbols, and uses linker flags (`-exported_symbols_list`) to ensure the compiled mock library exports exactly the same symbols as the original framework.
 
 ## Quick Start (Automation Script)
 
@@ -34,6 +35,14 @@ The easiest way to use the tool is via the included `automate.sh` script, which 
 
 This script will output the reconstructed framework into the `LocalFrameworks/` directory and execute your test binary.
 
+> [!NOTE]
+> **Cross-Framework Dependencies:**
+> If a framework depends on another private framework (e.g., `CoreAICompiler` requires `CoreAICommon`), the dependency framework must be generated first and reside in the `LocalFrameworks/` folder. For example, you must run:
+> ```bash
+> ./automate.sh CoreAICommon test_CoreAICommon.swift
+> ./automate.sh CoreAICompiler test_CoreAICompiler.swift
+> ```
+
 ## Manual Usage
 
 If you prefer to run the steps manually:
@@ -41,7 +50,7 @@ If you prefer to run the steps manually:
 ### 1. Build the Generator
 ```bash
 cd SwiftInterfaceGen/Sources/SwiftInterfaceGen
-swiftc -parse-as-library main.swift Parser.swift Model.swift Config.swift -o ../../../swift-interface-gen
+swiftc -parse-as-library main.swift Parser.swift Model.swift Config.swift String+RegexFree.swift -o ../../../swift-interface-gen
 cd ../../../
 ```
 
