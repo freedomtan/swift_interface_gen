@@ -23,6 +23,32 @@ class Parser {
     var frameworkInterfaceCache: [String: String] = [:]
     var namespaceFrameworkCache: [String: Bool] = [:]
     var frameworkDefinedTypesCache: [String: Set<String>] = [:]
+    
+    var defaultArguments = [String: Set<Int>]()
+    
+    func splitTopLevelCommas(_ s: String) -> [String] {
+        var result = [String]()
+        var current = ""
+        var depth = 0
+        for ch in s {
+            if ch == "(" || ch == "<" || ch == "[" {
+                depth += 1
+                current.append(ch)
+            } else if ch == ")" || ch == ">" || ch == "]" {
+                depth -= 1
+                current.append(ch)
+            } else if ch == "," && depth == 0 {
+                result.append(current)
+                current = ""
+            } else {
+                current.append(ch)
+            }
+        }
+        if !current.isEmpty {
+            result.append(current)
+        }
+        return result
+    }
     private var scannedLocalSwiftFiles = false
     var tbdSymbols = Set<String>()
     var referencedModules = Set<String>()
@@ -162,6 +188,51 @@ class Parser {
         }
         self.defaultModule = currentModule
         self.currentPrecomputeModule = currentModule
+        
+        // Parse default arguments from demangled string
+        if demangled.contains("default argument ") {
+            let parts = demangled.components(separatedBy: " of ")
+            if parts.count >= 2 {
+                let defArgPart = parts[0]
+                let funcPartFull = parts[1]
+                
+                let indexStr = defArgPart.replacingOccurrences(of: "default argument ", with: "").trimmingCharacters(in: .whitespaces)
+                if let index = Int(indexStr) {
+                    var funcPart = funcPartFull
+                    if funcPart.hasPrefix("static ") {
+                        funcPart = String(funcPart.dropFirst(7))
+                    }
+                    if let arrowRange = funcPart.range(of: " -> ", options: .backwards) {
+                        funcPart = String(funcPart[..<arrowRange.lowerBound])
+                    }
+                    
+                    if let openParen = funcPart.firstIndex(of: "("), let closeParen = funcPart.lastIndex(of: ")") {
+                        let funcName = String(funcPart[..<openParen]).trimmingCharacters(in: .whitespaces)
+                        let paramsStr = String(funcPart[funcPart.index(after: openParen)..<closeParen])
+                        
+                        let params = splitTopLevelCommas(paramsStr)
+                        var labels = [String]()
+                        for param in params {
+                            let trimmed = param.trimmingCharacters(in: .whitespaces)
+                            if let colonIdx = trimmed.firstIndex(of: ":") {
+                                let labelOrBoth = String(trimmed[..<colonIdx]).trimmingCharacters(in: .whitespaces)
+                                let labelParts = labelOrBoth.components(separatedBy: " ")
+                                let label = labelParts.first ?? "_"
+                                labels.append(label)
+                            } else {
+                                labels.append("_")
+                            }
+                        }
+                        
+                        let key = "\(funcName)(\(labels.joined(separator: ":"))\(labels.isEmpty ? "" : ":"))"
+                        if defaultArguments[key] == nil {
+                            defaultArguments[key] = Set<Int>()
+                        }
+                        defaultArguments[key]?.insert(index)
+                    }
+                }
+            }
+        }
         
         if !scannedLocalSwiftFiles {
             scannedLocalSwiftFiles = true
@@ -728,7 +799,7 @@ class Parser {
             if word == "__C" {
                 t = t.replaceWordDot(word, with: "")
             } else if word != "Swift" && word != defaultModule && isModuleAvailable(word) {
-                let workspaceFrameworks = ["CoreAICommon", "ODIE", "ModelCatalog", "CoreAICompiler"]
+                let workspaceFrameworks = ["CoreAICommon", "ODIE", "ModelCatalog", "CoreAICompiler", "UnifiedAssetFramework", "AppleIntelligenceReporting", "FeatureFlags"]
                 if workspaceFrameworks.contains(word) {
                     referencedModules.insert(word)
                 } else {

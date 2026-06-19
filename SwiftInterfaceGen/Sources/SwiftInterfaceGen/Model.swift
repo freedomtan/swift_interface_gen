@@ -51,6 +51,64 @@ class TypeNode {
         return path.joined(separator: ".")
     }
 
+    func injectDefaultArguments(signature: String, methodName: String, isStatic: Bool, parser: Parser?) -> String {
+        guard let parser = parser else { return signature }
+        
+        let defaultModule = parser.defaultModule
+        var pathComponents = [String]()
+        if !defaultModule.isEmpty {
+            pathComponents.append(defaultModule)
+        }
+        let enc = getEnclosingPath()
+        if !enc.isEmpty {
+            pathComponents.append(enc)
+        }
+        pathComponents.append(self.name)
+        let fullTypeName = pathComponents.joined(separator: ".")
+        
+        // Find paren block in signature
+        guard let openParen = signature.firstIndex(of: "("),
+              let closeParen = signature.lastIndex(of: ")") else {
+            return signature
+        }
+        
+        let paramsStr = String(signature[signature.index(after: openParen)..<closeParen])
+        // Split parameters by top-level commas
+        let params = parser.splitTopLevelCommas(paramsStr)
+        var labels = [String]()
+        for param in params {
+            let trimmed = param.trimmingCharacters(in: .whitespaces)
+            if let colonIdx = trimmed.firstIndex(of: ":") {
+                let labelOrBoth = String(trimmed[..<colonIdx]).trimmingCharacters(in: .whitespaces)
+                let labelParts = labelOrBoth.components(separatedBy: " ")
+                let label = labelParts.first ?? "_"
+                labels.append(label)
+            } else {
+                labels.append("_")
+            }
+        }
+        
+        let methodKey = "\(fullTypeName).\(methodName)(\(labels.joined(separator: ":"))\(labels.isEmpty ? "" : ":"))"
+        
+        guard let indices = parser.defaultArguments[methodKey] else {
+            return signature
+        }
+        
+        var newParams = [String]()
+        for (i, param) in params.enumerated() {
+            let trimmed = param.trimmingCharacters(in: .whitespaces)
+            if indices.contains(i) {
+                newParams.append("\(trimmed) = dummyDefaultValue()")
+            } else {
+                newParams.append(trimmed)
+            }
+        }
+        
+        let prefix = signature[...openParen]
+        let suffix = signature[closeParen...]
+        return String(prefix) + newParams.joined(separator: ", ") + String(suffix)
+    }
+
     private func escapeKeyword(_ name: String) -> String {
         let swiftKeywords: Set<String> = [
             "associatedtype", "class", "deinit", "enum", "extension", "fileprivate",
@@ -476,7 +534,7 @@ class TypeNode {
                     lines.append("\(nextIndent)case \(escapeKeyword(name))")
                 }
             case .initializer(let sig):
-                var cleanedSig = sig
+                var cleanedSig = injectDefaultArguments(signature: sig, methodName: "init", isStatic: false, parser: parser)
                 if isProtocol {
                     cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
                     cleanedSig = cleanedSig.replaceWord("A", with: "Self")
@@ -551,6 +609,7 @@ class TypeNode {
             case .method(let n, let sig, let isStatic):
                 var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
                 let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
+                cleanedSig = injectDefaultArguments(signature: cleanedSig, methodName: cleanN, isStatic: isStatic, parser: parser)
                 
                 var fixModifier = ""
                 if cleanedSig.contains(" prefix(") {
@@ -989,7 +1048,7 @@ class TypeNode {
             for member in sortedExt {
                 switch member {
                 case .initializer(let sig):
-                    var cleanedSig = sig
+                    var cleanedSig = injectDefaultArguments(signature: sig, methodName: "init", isStatic: false, parser: parser)
                     if isProtocol {
                         cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                     }
@@ -1013,8 +1072,9 @@ class TypeNode {
                     let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
                     let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set {} }"
                     extLines.append("\(extNextIndent)public \(staticMod)var \(n): \(cleanT) \(suffix)")
-                case .method(_, let sig, let isStatic):
+                case .method(let name, let sig, let isStatic):
                     var cleanedSig = sig
+                    cleanedSig = injectDefaultArguments(signature: cleanedSig, methodName: name, isStatic: isStatic, parser: parser)
                     if isProtocol {
                         cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                         cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()

@@ -531,6 +531,7 @@ struct SwiftInterfaceGen {
             newLines.append(line)
         }
         c = newLines.joined(separator: "\n")
+        c += "\n\n@usableFromInline\nfunc dummyDefaultValue<T>() -> T { fatalError() }\n"
         if parser.defaultModule == "ModelCatalog" {
             c += "\n\nextension GenericA: AssetMetadata, AssetContents {\n"
             c += "    public init(baseURL: URL) { fatalError() }\n"

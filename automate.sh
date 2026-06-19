@@ -59,7 +59,9 @@ public protocol AppleIntelligenceError: Error {
     var underlyingErrors: [any AppleIntelligenceError] { get }
     var category: AppleIntelligenceErrorCategory { get }
 }
-public struct AppleIntelligenceErrorCategory: Codable, Hashable, Sendable { public init() {} }
+public enum AppleIntelligenceErrorCategory: Int, Codable, Hashable, Sendable {
+    case unknown
+}
 SWIFTEOF
     swiftc -emit-library -o "LocalFrameworks/AppleIntelligenceReporting.framework/AppleIntelligenceReporting" \
         /tmp/_air_stub.swift -enable-library-evolution -module-name AppleIntelligenceReporting -sdk "$SDK_ROOT" -language-mode 5 \
@@ -75,7 +77,9 @@ import Foundation
 public class UAFAssetSetConsistencyToken: NSObject {}
 public class UAFAsset: NSObject {}
 public class UAFAssetSet: NSObject {}
-public class UAFSubscriptionDownloadStatus: NSObject {}
+public enum UAFSubscriptionDownloadStatus: Int, Codable, Hashable, Sendable {
+    case unknown
+}
 SWIFTEOF
     swiftc -emit-library -o "LocalFrameworks/UnifiedAssetFramework.framework/UnifiedAssetFramework" \
         /tmp/_uaf_stub.swift -enable-library-evolution -module-name UnifiedAssetFramework -sdk "$SDK_ROOT" -language-mode 5 \
