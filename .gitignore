@@ -41,3 +41,14 @@ aliases.txt
 *_diagram.md
 *_diagram.pdf
 scratch/
+
+# Export lists, logs, stubs, and test scripts
+*_exports.txt
+missing_symbols*.txt
+run_log*.txt
+stubs.s
+dummy_stubs.s
+build_debug*.txt
+reproduce_flattening.swift
+test_conformance.swift
+automate_no_stubs*.sh

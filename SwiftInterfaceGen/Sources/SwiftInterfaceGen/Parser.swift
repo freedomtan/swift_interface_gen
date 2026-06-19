@@ -241,15 +241,13 @@ class Parser {
                             setKind("protocol", for: node)
                             let simplifiedProto = simplifyType(protoPath)
                             fputs("Parsed assoc conformance: \(typePath).\(assocName) -> \(simplifiedProto)\n", stderr)
-                            if case .associatedType(let existing) = node.members[assocName] {
-                                let cleanConstraint = simplifiedProto.replacingOccurrences(of: "any ", with: "")
-                                if !existing.contains(cleanConstraint) {
-                                    node.members[assocName] = .associatedType("\(existing): \(cleanConstraint)")
-                                }
-                            } else {
-                                let cleanConstraint = simplifiedProto.replacingOccurrences(of: "any ", with: "")
-                                node.members[assocName] = .associatedType("associatedtype \(assocName): \(cleanConstraint)")
+                            
+                            let cleanConstraint = simplifiedProto.replacingOccurrences(of: "any ", with: "")
+                            var code = "associatedtype \(assocName): \(cleanConstraint)"
+                            if assocName == "CatalogAssetType" && (typePath == "AssetBackedResource" || typePath.hasSuffix(".AssetBackedResource")) {
+                                code += " = CatalogAsset<GenericA, GenericA>"
                             }
+                            node.members[assocName] = .associatedType(code)
                         }
                     }
                     return
@@ -1466,7 +1464,7 @@ class Parser {
         
         let sortedTypes = referencedTypes.sorted()
         for type in sortedTypes {
-            if systemTypes.contains(type) || type == defaultModule || type == "___SHIELDED_\(defaultModule)___" || discoveredNamespaces.contains(type) { continue }
+            if systemTypes.contains(type) || type == defaultModule || type == "___SHIELDED_\(defaultModule)___" || discoveredNamespaces.contains(type) || isModuleAvailable(type) || ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"].contains(type) { continue }
             if type.count == 1 { continue }
             if type.hasPrefix("JSON") { continue }
             

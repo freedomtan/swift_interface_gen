@@ -531,7 +531,11 @@ struct SwiftInterfaceGen {
             newLines.append(line)
         }
         c = newLines.joined(separator: "\n")
-        
+        c += "\n\nextension GenericA: AssetMetadata, AssetContents {\n"
+        c += "    public init(baseURL: URL) { fatalError() }\n"
+        c += "    public var baseURL: URL { get { fatalError() } }\n"
+        c += "    public var metadataURL: URL { get { fatalError() } }\n"
+        c += "}\n"
         return c
     }
 

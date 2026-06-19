@@ -317,12 +317,17 @@ class TypeNode {
         if typeName == "BidirectionalXPCServiceClientConnection" {
             displayTypeName += "<A: XPCService, B: XPCService>"
             isGeneric = false
+            inScope.insert("A")
+            inScope.insert("B")
         } else if typeName == "CatalogAsset" {
             displayTypeName += "<A: AssetMetadata, B: AssetContents>"
             isGeneric = false
+            inScope.insert("A")
+            inScope.insert("B")
         } else if typeName == "XPCServiceClientConnection" {
             displayTypeName += "<A: XPCService>"
             isGeneric = false
+            inScope.insert("A")
         } else if isGeneric && !isProtocol && !displayTypeName.contains("<") {
             var count = 1
             if let parser = parser {
@@ -477,7 +482,7 @@ class TypeNode {
                     cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                     cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
                 } else {
-                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
+                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: inScope)
                 }
                 cleanedSig = cleanScope(cleanedSig)
                 
@@ -526,7 +531,7 @@ class TypeNode {
                     cleanT = cleanT.replaceWord("A", with: "Self")
                     cleanT = cleanT.replaceMultiSegmentSelfPathsWithAny()
                 } else {
-                    cleanT = cleanT.replaceGenericPlaceholderPathsWithAny()
+                    cleanT = cleanT.replaceGenericPlaceholderPathsWithAny(inScope: inScope)
                 }
                 cleanT = cleanScope(cleanT)
 
@@ -585,7 +590,7 @@ class TypeNode {
                         }
                     }
                 } else {
-                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
+                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: inScope)
                 }
                 // Extract method-level generic params (e.g. <A> in withLock<A>) and add to local scope
                 // so cleanScope doesn't erase them to Any.
@@ -629,27 +634,25 @@ class TypeNode {
                 }
 
                 let genericPlaceholders = ["A", "B", "C", "D"]
-                var paramsToRemove = [String]()
+                var paramsToRemoveFromBrackets = [String]()
                 for p in genericPlaceholders {
-                    if cleanedSig.hasGenericPlaceholderInBrackets(p: p) {
-                        if cleanedSig.contains("\(p).") || cleanedSig.contains("\(p)1.") {
-                             paramsToRemove.append(p)
-                             paramsToRemove.append("\(p)1")
-                        } else {
-                             let variations = ["\(p)", "\(p)1", "\(p)2"]
-                             for v in variations {
-                                 cleanedSig = cleanedSig.replacingOccurrences(of: "<\(v)>", with: "<Generic\(p)>")
-                                 cleanedSig = cleanedSig.replacingOccurrences(of: "<\(v),", with: "<Generic\(p),")
-                                 cleanedSig = cleanedSig.replacingOccurrences(of: ", \(v)>", with: ", Generic\(p)>")
-                                 cleanedSig = cleanedSig.replacingOccurrences(of: ", \(v),", with: ", Generic\(p),")
-                                 cleanedSig = cleanedSig.replaceWord(v, with: "Generic\(p)")
-                             }
+                    let variations = [p, "\(p)1", "\(p)2"]
+                    for v in variations {
+                        if cleanedSig.hasGenericPlaceholderInBrackets(p: v) {
+                            if inScope.contains(v) {
+                                paramsToRemoveFromBrackets.append(v)
+                            } else {
+                                cleanedSig = cleanedSig.replacingOccurrences(of: "<\(v)>", with: "<Generic\(p)>")
+                                cleanedSig = cleanedSig.replacingOccurrences(of: "<\(v),", with: "<Generic\(p),")
+                                cleanedSig = cleanedSig.replacingOccurrences(of: ", \(v)>", with: ", Generic\(p)>")
+                                cleanedSig = cleanedSig.replacingOccurrences(of: ", \(v),", with: ", Generic\(p),")
+                                cleanedSig = cleanedSig.replaceWord(v, with: "Generic\(p)")
+                            }
                         }
                     }
                 }
                 
-                for p in paramsToRemove {
-                    cleanedSig = cleanedSig.replaceWord(p, with: "Any")
+                for p in paramsToRemoveFromBrackets {
                     if let openBracket = cleanedSig.firstIndex(of: "<"),
                        let closeBracket = cleanedSig.firstIndex(of: ">"),
                        openBracket < closeBracket {
@@ -674,26 +677,32 @@ class TypeNode {
                 cleanedSig = cleanedSig.replacingOccurrences(of: "Iterator<GenericA>", with: "Iterator")
                 cleanedSig = cleanedSig.replacingOccurrences(of: "Iterator<Any>", with: "Iterator")
 
-                if isProtocol {
-                    var methodGenericParams = [String]()
-                    let potentialParams = ["A1", "B1", "C1", "D1", "A2", "B2", "C2", "D2"]
-                    for p in potentialParams {
-                        if cleanedSig.replaceWord(p, with: "").count < cleanedSig.count {
-                            methodGenericParams.append(p)
-                        }
+                var methodGenericParams = [String]()
+                let potentialParams = ["A1", "B1", "C1", "D1", "A2", "B2", "C2", "D2"]
+                for p in potentialParams {
+                    if cleanedSig.replaceWord(p, with: "").count < cleanedSig.count {
+                        methodGenericParams.append(p)
                     }
-                    if !methodGenericParams.isEmpty {
-                        if let parenIdx = cleanedSig.firstIndex(of: "(") {
-                            let methodName = String(cleanedSig[..<parenIdx]).trimmingCharacters(in: .whitespaces)
-                            let methodArgs = String(cleanedSig[parenIdx...])
-                            if methodName.contains("<") {
-                                if let closeAngleIdx = methodName.firstIndex(of: ">") {
-                                    let baseName = String(methodName[..<closeAngleIdx])
-                                    cleanedSig = baseName + ", " + methodGenericParams.joined(separator: ", ") + ">" + methodArgs
+                }
+                if !methodGenericParams.isEmpty {
+                    if let parenIdx = cleanedSig.firstIndex(of: "(") {
+                        let methodName = String(cleanedSig[..<parenIdx]).trimmingCharacters(in: .whitespaces)
+                        let methodArgs = String(cleanedSig[parenIdx...])
+                        if methodName.contains("<") {
+                            if let closeAngleIdx = methodName.firstIndex(of: ">") {
+                                let baseName = String(methodName[..<closeAngleIdx])
+                                var newParams = [String]()
+                                for mp in methodGenericParams {
+                                    if !baseName.contains(mp) {
+                                        newParams.append(mp)
+                                    }
                                 }
-                            } else {
-                                cleanedSig = methodName + "<\(methodGenericParams.joined(separator: ", "))>" + methodArgs
+                                if !newParams.isEmpty {
+                                    cleanedSig = baseName + ", " + newParams.joined(separator: ", ") + ">" + methodArgs
+                                }
                             }
+                        } else {
+                            cleanedSig = methodName + "<\(methodGenericParams.joined(separator: ", "))>" + methodArgs
                         }
                     }
                 }
@@ -786,13 +795,45 @@ class TypeNode {
             if hasConformance("Hashable") && !hasHashInto {
                 lines.append("\(nextIndent)public func hash(into hasher: inout Hasher) { fatalError() }")
             }
+            let genericParamsList: String
+            if typeName == "BidirectionalXPCServiceClientConnection" {
+                genericParamsList = "<A, B>"
+            } else if typeName == "CatalogAsset" {
+                genericParamsList = "<A, B>"
+            } else if typeName == "XPCServiceClientConnection" {
+                genericParamsList = "<A>"
+            } else if isGeneric {
+                var count = 1
+                if let parser = parser {
+                    let fullPath1 = parser.defaultModule + "." + name
+                    let fullPath2 = name
+                    if let inferredCount = parser.discoveredGenerics[fullPath1] {
+                        count = inferredCount
+                    } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
+                        count = inferredCount
+                    }
+                }
+                let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                var params = [String]()
+                for i in 0..<count {
+                    params.append(i < placeholders.count ? placeholders[i] : "A\(i)")
+                }
+                genericParamsList = "<\(params.joined(separator: ", "))>"
+            } else {
+                genericParamsList = ""
+            }
+
             // For class types, don't auto-generate == — the TBD may not export it,
             // and adding it creates spurious extra symbols. For structs/enums it's always needed.
             if (hasConformance("Hashable") || hasConformance("Equatable")) && !hasEqualityOperator() && actualKind != "class" {
-                lines.append("\(nextIndent)public static func ==(_ lhs: \(escapeKeyword(n)), _ rhs: \(escapeKeyword(n))) -> Bool { fatalError() }")
+                let leftType = escapeKeyword(n) + genericParamsList
+                let rightType = escapeKeyword(n) + genericParamsList
+                lines.append("\(nextIndent)public static func ==(_ lhs: \(leftType), _ rhs: \(rightType)) -> Bool { fatalError() }")
             }
             if hasConformance("Comparable") && !hasLessThanOperator() {
-                lines.append("\(nextIndent)public static func <(_ lhs: \(escapeKeyword(n)), _ rhs: \(escapeKeyword(n))) -> Bool { fatalError() }")
+                let leftType = escapeKeyword(n) + genericParamsList
+                let rightType = escapeKeyword(n) + genericParamsList
+                lines.append("\(nextIndent)public static func <(_ lhs: \(leftType), _ rhs: \(rightType)) -> Bool { fatalError() }")
             }
             if hasConformance("CustomStringConvertible") && !hasDescriptionProperty() {
                 lines.append("\(nextIndent)public var description: String { get { return \"\" } }")
@@ -949,17 +990,21 @@ class TypeNode {
                 switch member {
                 case .initializer(let sig):
                     var cleanedSig = sig
-                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
+                    if isProtocol {
+                        cleanedSig = cleanedSig.replaceWord("A", with: "Self")
+                    }
+                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: extInScope)
                     cleanedSig = extCleanScope(cleanedSig)
-                    extLines.append("\(extNextIndent)public \(cleanedSig) {}")
+                    extLines.append("\(extNextIndent)public \(cleanedSig) { fatalError() }")
                 case .property(let n, let t, let isReadOnly, let isStatic):
                     var cleanT = t
                     cleanT = cleanT.stripParentPrefix(parentName: self.name)
                     if isProtocol {
+                        cleanT = cleanT.replaceWord("A", with: "Self")
                         cleanT = cleanT.replacePlaceholderDotsWithSelf()
                         cleanT = cleanT.replaceMultiSegmentSelfPathsWithAny()
                     } else {
-                        cleanT = cleanT.replaceGenericPlaceholderPathsWithAny()
+                        cleanT = cleanT.replaceGenericPlaceholderPathsWithAny(inScope: extInScope)
                     }
                     cleanT = extCleanScope(cleanT)
                     
@@ -971,10 +1016,11 @@ class TypeNode {
                 case .method(_, let sig, let isStatic):
                     var cleanedSig = sig
                     if isProtocol {
+                        cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                         cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
                         cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
                     } else {
-                        cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
+                        cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: extInScope)
                     }
                     cleanedSig = extCleanScope(cleanedSig)
                     

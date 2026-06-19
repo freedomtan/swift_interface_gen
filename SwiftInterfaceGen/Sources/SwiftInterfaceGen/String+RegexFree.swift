@@ -400,8 +400,25 @@ extension String {
             
             if componentsCount >= 2 {
                 let endPathIdx = inIdentifier ? scanIdx : result.index(before: scanIdx)
-                result.replaceSubrange(range.lowerBound..<endPathIdx, with: "Any")
-                startSearch = result.index(range.lowerBound, offsetBy: 3, limitedBy: result.endIndex) ?? result.endIndex
+                let matchedPath = String(result[range.lowerBound..<endPathIdx])
+                let components = matchedPath.components(separatedBy: ".")
+                let lastComponent = components.last ?? ""
+                if ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"].contains(lastComponent) {
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"]
+                    let suffixComponents = Array(components.dropFirst())
+                    let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
+                    if allAllowed {
+                        let sub = suffixComponents.joined(separator: ".")
+                        result.replaceSubrange(range.lowerBound..<endPathIdx, with: "Self.\(sub)")
+                        startSearch = result.index(range.lowerBound, offsetBy: 5 + sub.count, limitedBy: result.endIndex) ?? result.endIndex
+                    } else {
+                        result.replaceSubrange(range.lowerBound..<endPathIdx, with: "Self.\(lastComponent)")
+                        startSearch = result.index(range.lowerBound, offsetBy: 5 + lastComponent.count, limitedBy: result.endIndex) ?? result.endIndex
+                    }
+                } else {
+                    result.replaceSubrange(range.lowerBound..<endPathIdx, with: "Any")
+                    startSearch = result.index(range.lowerBound, offsetBy: 3, limitedBy: result.endIndex) ?? result.endIndex
+                }
             } else {
                 startSearch = range.upperBound
             }
@@ -410,7 +427,7 @@ extension String {
     }
 
     // 13. replaceGenericPlaceholderPathsWithAny: replaces `\b[A-Z][0-9]?\.[a-zA-Z0-9_$]+(?:\.[a-zA-Z0-9_$]+)*\b` with `"Any"`.
-    func replaceGenericPlaceholderPathsWithAny() -> String {
+    func replaceGenericPlaceholderPathsWithAny(inScope: Set<String> = []) -> String {
         var result = self
         var startSearch = result.startIndex
         while startSearch < result.endIndex {
@@ -487,8 +504,37 @@ extension String {
                 
                 if componentsCount >= 1 {
                     let endPathIdx = inIdentifier ? scanIdx : result.index(before: scanIdx)
-                    result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "Any")
-                    startSearch = result.index(prefixStartIdx, offsetBy: 3, limitedBy: result.endIndex) ?? result.endIndex
+                    let matchedPath = String(result[prefixStartIdx..<endPathIdx])
+                    let components = matchedPath.components(separatedBy: ".")
+                    let lastComponent = components.last ?? ""
+                    let prefix = String(result[prefixStartIdx..<dotIdx])
+                    
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"]
+                    let suffixComponents = Array(components.dropFirst())
+                    let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
+                    
+                    if inScope.contains(prefix) {
+                        if allAllowed {
+                            let sub = suffixComponents.joined(separator: ".")
+                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "\(prefix).\(sub)")
+                            startSearch = result.index(prefixStartIdx, offsetBy: prefix.count + 1 + sub.count, limitedBy: result.endIndex) ?? result.endIndex
+                        } else {
+                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "\(prefix).\(lastComponent)")
+                            startSearch = result.index(prefixStartIdx, offsetBy: prefix.count + 1 + lastComponent.count, limitedBy: result.endIndex) ?? result.endIndex
+                        }
+                    } else if ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"].contains(lastComponent) {
+                        if allAllowed {
+                            let sub = suffixComponents.joined(separator: ".")
+                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "Self.\(sub)")
+                            startSearch = result.index(prefixStartIdx, offsetBy: 5 + sub.count, limitedBy: result.endIndex) ?? result.endIndex
+                        } else {
+                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "Self.\(lastComponent)")
+                            startSearch = result.index(prefixStartIdx, offsetBy: 5 + lastComponent.count, limitedBy: result.endIndex) ?? result.endIndex
+                        }
+                    } else {
+                        result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "Any")
+                        startSearch = result.index(prefixStartIdx, offsetBy: 3, limitedBy: result.endIndex) ?? result.endIndex
+                    }
                 } else {
                     startSearch = result.index(after: dotIdx)
                 }
@@ -697,31 +743,28 @@ extension String {
         
         let inside = String(self[self.index(after: openIdx)..<closeIdx])
         
-        let variations = [p, "\(p)1", "\(p)2", "\(p)3", "\(p)4"]
-        for v in variations {
-            var startSearch = inside.startIndex
-            while let range = inside.range(of: v, range: startSearch..<inside.endIndex) {
-                let isWordCharBefore: Bool
-                if range.lowerBound > inside.startIndex {
-                    let prevChar = inside[inside.index(before: range.lowerBound)]
-                    isWordCharBefore = prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$"
-                } else {
-                    isWordCharBefore = false
-                }
-                
-                let isWordCharAfter: Bool
-                if range.upperBound < inside.endIndex {
-                    let nextChar = inside[range.upperBound]
-                    isWordCharAfter = nextChar.isLetter || nextChar.isNumber || nextChar == "_" || nextChar == "$"
-                } else {
-                    isWordCharAfter = false
-                }
-                
-                if !isWordCharBefore && !isWordCharAfter {
-                    return true
-                }
-                startSearch = range.upperBound
+        var startSearch = inside.startIndex
+        while let range = inside.range(of: p, range: startSearch..<inside.endIndex) {
+            let isWordCharBefore: Bool
+            if range.lowerBound > inside.startIndex {
+                let prevChar = inside[inside.index(before: range.lowerBound)]
+                isWordCharBefore = prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$"
+            } else {
+                isWordCharBefore = false
             }
+            
+            let isWordCharAfter: Bool
+            if range.upperBound < inside.endIndex {
+                let nextChar = inside[range.upperBound]
+                isWordCharAfter = nextChar.isLetter || nextChar.isNumber || nextChar == "_" || nextChar == "$"
+            } else {
+                isWordCharAfter = false
+            }
+            
+            if !isWordCharBefore && !isWordCharAfter {
+                return true
+            }
+            startSearch = range.upperBound
         }
         return false
     }

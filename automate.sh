@@ -92,7 +92,7 @@ mkdir -p "$MODULE_DIR"
 
 echo "--- Emitting Swift Module Interface ---"
 swiftc -emit-module -module-name "$FRAMEWORK" "${FRAMEWORK}Interface.swift" \
-    -enable-library-evolution -language-mode 6 -F LocalFrameworks \
+    -enable-library-evolution -language-mode 5 -F LocalFrameworks \
     -sdk "$SDK_ROOT" \
     -emit-module-interface-path "$MODULE_DIR/arm64-apple-macos.swiftinterface" \
     -o "$MODULE_DIR/arm64-apple-macos.swiftmodule" || echo "Warning: Module emission had issues, continuing to mock library generation..."
@@ -101,7 +101,7 @@ echo "--- Compiling Mock Dynamic Library (First Pass) ---"
 swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
     "${FRAMEWORK}Interface.swift" \
     -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
-    -sdk "$SDK_ROOT" -language-mode 6
+    -sdk "$SDK_ROOT" -language-mode 5
 
 # Generate stubs using the compare tool
 rm -f stubs.s stubs.o dummy_stubs.s
@@ -127,7 +127,7 @@ fi
 swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
     "${FRAMEWORK}Interface.swift" $EXTRA_OBJECTS \
     -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
-    -sdk "$SDK_ROOT" -language-mode 6 $LINKER_FLAGS
+    -sdk "$SDK_ROOT" -language-mode 5 $LINKER_FLAGS
 
 echo "--- Comparing Symbols (Final Pass / Post-Alignment) ---"
 ./swift-interface-gen --compare "${FRAMEWORK}_exports.txt" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" dummy_stubs.s
@@ -137,7 +137,7 @@ echo "--- Comparing Symbols (Final Pass / Post-Alignment) ---"
 
 echo "--- Compiling Test Program ---"
 swiftc -F LocalFrameworks "$TEST_FILE" \
-    -sdk "$SDK_ROOT" -language-mode 6 \
+    -sdk "$SDK_ROOT" -language-mode 5 \
     -o "${FRAMEWORK}_test_run"
 
 echo "--- Codesigning ---"
