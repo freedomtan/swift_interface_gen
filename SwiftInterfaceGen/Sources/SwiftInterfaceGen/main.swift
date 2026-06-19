@@ -52,6 +52,8 @@ struct SwiftInterfaceGen {
         let finalCode = postProcess(allCode, parser: parser)
         print("postProcess took: \(Date().timeIntervalSince(startPost))s", to: &Self.standardError)
         
+        let alignedCode = selfAlignInterface(code: finalCode, parser: parser, tbdPath: tbdPath)
+        
         let imports = resolveImports(from: allCode, currentModule: currentModule, parser: parser)
         for imp in imports {
             print("import \(imp)")
@@ -60,7 +62,7 @@ struct SwiftInterfaceGen {
         let exportsContent = parser.tbdSymbols.sorted().joined(separator: "\n") + "\n"
         try? exportsContent.write(toFile: "\(currentModule)_exports.txt", atomically: true, encoding: .utf8)
         
-        print(finalCode)
+        print(alignedCode)
     }
 
     static func resolveImports(from code: String, currentModule: String, parser: Parser) -> [String] {
@@ -656,6 +658,114 @@ struct SwiftInterfaceGen {
             print("Error running nm: \(error)")
         }
         return []
+    }
+
+    static func selfAlignInterface(code: String, parser: Parser, tbdPath: String) -> String {
+        let tempInterfacePath = "/tmp/_self_align_interface.swift"
+        let tempDylibPath = "/tmp/_self_align_dylib.dylib"
+        
+        var fullFile = ""
+        let imports = resolveImports(from: code, currentModule: parser.defaultModule, parser: parser)
+        for imp in imports {
+            fullFile += "import \(imp)\n"
+        }
+        fullFile += "\n" + code
+        
+        do {
+            try fullFile.write(toFile: tempInterfacePath, atomically: true, encoding: .utf8)
+        } catch {
+            fputs("Error writing temp interface file: \(error)\n", stderr)
+            return code
+        }
+        
+        // Find SDK root
+        let sdkRoot: String
+        if let envSdk = ProcessInfo.processInfo.environment["SDK_ROOT"] {
+            sdkRoot = envSdk
+        } else {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            process.arguments = ["--show-sdk-path"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                sdkRoot = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+            } catch {
+                sdkRoot = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+            }
+        }
+        
+        // Compile temp dylib
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/swiftc")
+        process.arguments = [
+            "-emit-library",
+            "-o", tempDylibPath,
+            tempInterfacePath,
+            "-enable-library-evolution",
+            "-module-name", parser.defaultModule,
+            "-F", "LocalFrameworks",
+            "-sdk", sdkRoot,
+            "-language-mode", "6"
+        ]
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus != 0 {
+                fputs("Warning: Self-alignment compilation failed, returning unaligned code.\n", stderr)
+                return code
+            }
+        } catch {
+            fputs("Error compiling temp dylib: \(error)\n", stderr)
+            return code
+        }
+        
+        // Extract symbols
+        let dylibSyms = extractDylibSymbols(dylibPath: tempDylibPath)
+        
+        func normalize(_ sym: String) -> String {
+            if sym.hasPrefix("_") {
+                return String(sym.dropFirst())
+            }
+            return sym
+        }
+        
+        var normalizedDylib = Set<String>()
+        for s in dylibSyms {
+            normalizedDylib.insert(normalize(s))
+        }
+        
+        var missing = [String]()
+        for s in parser.tbdSymbols {
+            if !normalizedDylib.contains(normalize(s)) {
+                missing.append(s)
+            }
+        }
+        missing.sort()
+        
+        fputs("Self-alignment: found \(missing.count) missing symbols to stub.\n", stderr)
+        
+        if missing.isEmpty {
+            return code
+        }
+        
+        var alignedCode = code
+        alignedCode += "\n\n// --- Automatically Generated Self-Alignment Stubs ---\n"
+        for (i, sym) in missing.enumerated() {
+            let cleanSym = sym.hasPrefix("_") ? String(sym.dropFirst()) : sym
+            alignedCode += "@_silgen_name(\"\(cleanSym)\")\n"
+            alignedCode += "public func _self_align_stub_\(i)() { fatalError() }\n"
+        }
+        
+        // Clean up temp files
+        try? FileManager.default.removeItem(atPath: tempInterfacePath)
+        try? FileManager.default.removeItem(atPath: tempDylibPath)
+        
+        return alignedCode
     }
 
     struct StandardError: TextOutputStream {

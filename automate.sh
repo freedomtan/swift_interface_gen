@@ -95,49 +95,39 @@ MODULE_DIR="LocalFrameworks/${FRAMEWORK}.framework/Modules/${FRAMEWORK}.swiftmod
 mkdir -p "$MODULE_DIR"
 
 echo "--- Emitting Swift Module Interface ---"
-swiftc -emit-module -module-name "$FRAMEWORK" "${FRAMEWORK}Interface.swift" \
+# Strip stubs to prevent duplicate/conflicting symbols during module compilation
+sed -n '/\/\/ --- Automatically Generated Self-Alignment Stubs ---/q;p' "${FRAMEWORK}Interface.swift" > "/tmp/${FRAMEWORK}Interface_module.swift"
+
+swiftc -emit-module -module-name "$FRAMEWORK" "/tmp/${FRAMEWORK}Interface_module.swift" \
     -enable-library-evolution -language-mode 6 -F LocalFrameworks \
     -sdk "$SDK_ROOT" \
     -emit-module-interface-path "$MODULE_DIR/arm64-apple-macos.swiftinterface" \
-    -o "$MODULE_DIR/arm64-apple-macos.swiftmodule" || echo "Warning: Module emission had issues, continuing to mock library generation..."
+    -o "$MODULE_DIR/arm64-apple-macos.swiftmodule"
 
-echo "--- Compiling Mock Dynamic Library (First Pass) ---"
-swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
-    "${FRAMEWORK}Interface.swift" \
-    -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
-    -sdk "$SDK_ROOT" -language-mode 6
+rm -f "/tmp/${FRAMEWORK}Interface_module.swift"
 
-# Generate stubs using the compare tool
-rm -f stubs.s stubs.o dummy_stubs.s
-echo "--- Comparing Symbols (First Pass / Pre-Alignment) ---"
-./swift-interface-gen --compare "${FRAMEWORK}_exports.txt" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" stubs.s
+echo "--- Compiling Mock Dynamic Library ---"
+# Strip default argument assignments to prevent compiler-generated local default arg getters that conflict with the stubs
+sed 's/ = dummyDefaultValue()//g' "${FRAMEWORK}Interface.swift" > "/tmp/${FRAMEWORK}Interface_dylib.swift"
 
-if [ -f stubs.s ] && [ -s stubs.s ]; then
-    echo "--- Compiling Assembly Stubs ---"
-    clang -c stubs.s -o stubs.o
-fi
-
-echo "--- Re-compiling Mock Dynamic Library with Exact Symbol Alignment ---"
 LINKER_FLAGS=""
 if [ -f "${FRAMEWORK}_exports.txt" ]; then
     LINKER_FLAGS="$LINKER_FLAGS -Xlinker -exported_symbols_list -Xlinker ${FRAMEWORK}_exports.txt"
 fi
 
-EXTRA_OBJECTS=""
-if [ -f stubs.o ]; then
-    EXTRA_OBJECTS="stubs.o"
-fi
-
 swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
-    "${FRAMEWORK}Interface.swift" $EXTRA_OBJECTS \
+    "/tmp/${FRAMEWORK}Interface_dylib.swift" \
     -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
     -sdk "$SDK_ROOT" -language-mode 6 $LINKER_FLAGS
 
-echo "--- Comparing Symbols (Final Pass / Post-Alignment) ---"
+rm -f "/tmp/${FRAMEWORK}Interface_dylib.swift"
+
+echo "--- Comparing Symbols (Verification) ---"
+rm -f dummy_stubs.s stubs.s stubs.o
 ./swift-interface-gen --compare "${FRAMEWORK}_exports.txt" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" dummy_stubs.s
 
 # Clean up temporary files
-# rm -f stubs.s stubs.o dummy_stubs.s "${FRAMEWORK}_exports.txt"
+rm -f dummy_stubs.s "${FRAMEWORK}_exports.txt"
 
 echo "--- Compiling Test Program ---"
 swiftc -F LocalFrameworks "$TEST_FILE" \
