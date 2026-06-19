@@ -1910,4 +1910,61 @@ extension String {
         }
         return result
     }
+    
+    // removingUnusedMethodGenericParams: removes method-level generic params (e.g. GenericA, GenericB)
+    // from the `<...>` bracket before `(` if they are not actually used in the function's
+    // arguments or return type. Prevents "generic parameter 'GenericX' is not used in function
+    // signature" compiler errors.
+    func removingUnusedMethodGenericParams() -> String {
+        // Find the method generic brackets: the `<...>` that appears before `(`
+        guard let openParen = self.firstIndex(of: "(") else { return self }
+        guard let openAngle = self.firstIndex(of: "<"), openAngle < openParen else { return self }
+        
+        // Make sure the `>` that closes the bracket is before `(`
+        var depth = 0
+        var closeAngle: String.Index? = nil
+        var i = openAngle
+        while i < openParen {
+            if self[i] == "<" { depth += 1 }
+            else if self[i] == ">" {
+                depth -= 1
+                if depth == 0 { closeAngle = i; break }
+            }
+            i = self.index(after: i)
+        }
+        guard let ca = closeAngle else { return self }
+        
+        // Extract the param list inside the bracket
+        let bracketContent = String(self[self.index(after: openAngle)..<ca])
+        // The function body is everything from `(` onward
+        let funcBody = String(self[openParen...])
+        
+        // Parse generic params (split on comma, handling nested brackets)
+        let rawParams = bracketContent.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        
+        var keptParams = [String]()
+        for param in rawParams {
+            if param.isEmpty { continue }
+            // Check if the param name (whole-word) appears in the function body
+            let used = funcBody.replaceWord(param, with: "").count < funcBody.count
+            if used {
+                keptParams.append(param)
+            }
+            // Also keep params that aren't GenericX — if it was declared without Generic prefix
+            // it is a real type constraint we should preserve.
+            else if !param.hasPrefix("Generic") {
+                keptParams.append(param)
+            }
+            // If it IS a GenericX param and NOT used, skip it (prune it).
+        }
+        
+        let prefix = String(self[..<openAngle])
+        let suffix = String(self[self.index(after: ca)...])
+        
+        if keptParams.isEmpty {
+            return prefix + suffix
+        } else {
+            return prefix + "<" + keptParams.joined(separator: ", ") + ">" + suffix
+        }
+    }
 }

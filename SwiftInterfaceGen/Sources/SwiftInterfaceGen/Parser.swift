@@ -504,18 +504,54 @@ class Parser {
                     }
                 }
                 
+                var methodGenericsPart = ""
+                var methodWhereClause = ""
+                if let openAngleIndex = fullMemberPath.firstIndex(of: "<") {
+                    let genericPart = String(fullMemberPath[openAngleIndex...])
+                    if genericPart.contains(">") {
+                        let typePath = String(fullMemberPath[..<openAngleIndex])
+                        
+                        var cleanGenericPart = genericPart
+                        let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                        for p in placeholders {
+                            cleanGenericPart = cleanGenericPart.replaceWord(p, with: "\(p)1", allowPrecededByDot: false)
+                        }
+                        cleanGenericPart = cleanGenericPart.replacingOccurrences(of: "Swift.Error", with: "Error")
+                        
+                        // Move any `where` clause from inside <...> to after function signature.
+                        // Swift 6 requires: func foo<A, B>(...) where B: Error  (NOT <A, B where B: Error>)
+                        if let whereRange = cleanGenericPart.range(of: " where ") {
+                            let beforeWhere = String(cleanGenericPart[..<whereRange.lowerBound])
+                            let afterWhere = String(cleanGenericPart[whereRange.upperBound...])
+                            // afterWhere may end with `>` — strip it for clause body
+                            let clauseBody = afterWhere.hasSuffix(">") ? String(afterWhere.dropLast()) : afterWhere
+                            methodWhereClause = " where " + clauseBody
+                            cleanGenericPart = beforeWhere + ">"
+                        }
+                        
+                        methodGenericsPart = cleanGenericPart
+                        fullMemberPath = typePath
+                    }
+                }
+                
                 var signatureRaw = String(cleanD[openParenIndex...])
+                if !methodGenericsPart.isEmpty {
+                    let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                    for p in placeholders {
+                        signatureRaw = signatureRaw.replaceWord(p, with: "\(p)1", allowPrecededByDot: false)
+                    }
+                }
                 let (typeName, memberNameRaw) = splitPath(fullMemberPath)
                 let memberName = memberNameRaw.replacingOccurrences(of: " :", with: "").trimmingCharacters(in: .whitespaces)
                 
                 if !typeName.isEmpty && !memberName.isEmpty {
                     if memberName.contains("getter") || memberName.contains("setter") { return }
-
+ 
                     let parentName = typeName.components(separatedBy: ".").last!
                     let node = findOrCreateType(name: cleanType(typeName))
                     if let k = forcedKind { setKind(k, for: node) }
                     
-                    let escapedMemberName = escapeKeyword(memberName)
+                    let escapedMemberName = escapeKeyword(memberName) + methodGenericsPart
                     
                     if memberName == "init" {
                         var depth = 0
@@ -554,7 +590,10 @@ class Parser {
                         }
                     } else {
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
-                        let fixedSignature = Parser.fixUnnamedParameters(escapedMemberName + signature, escapingMap: symbolEscapingMap[originalMangled] ?? symbolEscapingMap[mangled], defaultArgs: defaultArgMap[mangled])
+                        var fixedSignature = Parser.fixUnnamedParameters(escapedMemberName + signature, escapingMap: symbolEscapingMap[originalMangled] ?? symbolEscapingMap[mangled], defaultArgs: defaultArgMap[mangled])
+                        if !methodWhereClause.isEmpty {
+                            fixedSignature += methodWhereClause
+                        }
                         if mangled.contains("PAAE") {
                             node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                         } else if let constraints = constraints {

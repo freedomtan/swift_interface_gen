@@ -210,6 +210,7 @@ class TypeNode {
         }
         
         var inScope = Set<String>()
+        var genericParamsList = ""
         if isGeneric {
             let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
             var count = 1
@@ -222,10 +223,15 @@ class TypeNode {
                     count = inferredCount
                 }
             }
+            var params = [String]()
             for i in 0..<count {
-                inScope.insert(i < placeholders.count ? placeholders[i] : "A\(i)")
+                let p = i < placeholders.count ? placeholders[i] : "A\(i)"
+                inScope.insert(p)
+                params.append(p)
             }
+            genericParamsList = "<\(params.joined(separator: ", "))>"
         }
+        let selfReplaceWith = name + (isGeneric ? genericParamsList : "")
         for member in members.values {
             if case .associatedType(let code) = member {
                 let parts = code.components(separatedBy: " ")
@@ -368,6 +374,11 @@ class TypeNode {
             inheritsList = inheritsList.filter { !["Hashable", "Codable", "Sendable", "Equatable"].contains($0) }
         }
         
+        if let idx = inheritsList.firstIndex(of: "Sendable") {
+            if !isProtocol {
+                inheritsList[idx] = "@unchecked Sendable"
+            }
+        }
         let inheritance = inheritsList.isEmpty ? "" : ": " + inheritsList.joined(separator: ", ")
         
         let typeName = nameOverride ?? name
@@ -577,7 +588,8 @@ class TypeNode {
                 // Strip the parent's fully qualified prefix from any nested types
                 cleanT = cleanT.stripParentPrefix(parentName: self.name)
 
-                cleanT = cleanT.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: self.name)
+                cleanT = cleanT.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith)
+                cleanT = cleanT.replaceWordWithoutGeneric(self.name, with: selfReplaceWith)
 
                 if let brace = cleanT.firstIndex(of: "{") {
                     cleanT = String(cleanT[..<brace]).trimmingCharacters(in: .whitespaces)
@@ -603,7 +615,9 @@ class TypeNode {
                 } else {
                     let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
                     let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
-                    let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set {} }"
+                    let hasLifetime = isReadOnly && (cleanT.contains("Span") || cleanT.contains("RawSpan") || cleanT.contains("MutableSpan"))
+                    let getPrefix = hasLifetime ? "@_lifetime(borrow self) get" : "get"
+                    let suffix = isReadOnly ? "{ \(getPrefix) \(getter) }" : "{ \(getPrefix) \(getter) set {} }"
                     lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)var \(n): \(cleanT) \(suffix)")
                 }
             case .method(let n, let sig, let isStatic):
@@ -611,19 +625,27 @@ class TypeNode {
                 let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
                 cleanedSig = injectDefaultArguments(signature: cleanedSig, methodName: cleanN, isStatic: isStatic, parser: parser)
                 
-                var fixModifier = ""
+                var lifetimeAttr = ""
+                if let arrowRange = cleanedSig.range(of: "->", options: .backwards) {
+                    let retPart = cleanedSig[arrowRange.upperBound...]
+                    if retPart.contains("Span") {
+                        lifetimeAttr = "@_lifetime(borrow self) "
+                    }
+                }
+                var funcModifier = ""
                 if cleanedSig.contains(" prefix(") {
                     cleanedSig = cleanedSig.replacingOccurrences(of: " prefix(", with: "(")
-                    fixModifier = "prefix "
+                    funcModifier = "prefix "
                 } else if cleanedSig.contains(" postfix(") {
                     cleanedSig = cleanedSig.replacingOccurrences(of: " postfix(", with: "(")
-                    fixModifier = "postfix "
+                    funcModifier = "postfix "
                 }
                 
                 // Strip the parent's fully qualified prefix from any nested types
                 cleanedSig = cleanedSig.stripParentPrefix(parentName: self.name)
                 
-                cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: self.name)
+                cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith)
+                cleanedSig = cleanedSig.replaceWordWithoutGeneric(self.name, with: selfReplaceWith)
                 
                 if isProtocol {
                     cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
@@ -765,6 +787,12 @@ class TypeNode {
                         }
                     }
                 }
+                
+                // Prune GenericX params from the method's <...> bracket that are no longer
+                // referenced in the function body (args + return type). This happens when e.g.
+                // isCompatible<A>(with: A.Type) → GenericA gets renamed but A.Type → Any,
+                // leaving GenericA unused → compiler error "generic parameter not used in signature".
+                cleanedSig = cleanedSig.removingUnusedMethodGenericParams()
 
                 var normalizedSig = cleanedSig
                 if let parser = parser, !parser.defaultModule.isEmpty {
@@ -810,7 +838,7 @@ class TypeNode {
                 let staticMod = isStatic ? "static " : ""
                 let finalMod = (!isStatic && self.kind == "class" && self.finalMembers.contains(sig)) ? "final " : ""
                 if isProtocol { 
-                    lines.append("\(nextIndent)\(staticMod)\(fixModifier)func \(cleanedSig)") 
+                    lines.append("\(nextIndent)\(lifetimeAttr)\(staticMod)\(funcModifier)func \(cleanedSig)") 
                 } else { 
                     var returnType = "Void"
                     if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
@@ -819,7 +847,7 @@ class TypeNode {
                     let defaultVal = TypeNode.defaultReturnValue(for: returnType)
                     let body = defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }"
                     let finalBody = defaultVal == "fatalError()" ? "{ fatalError() }" : body
-                    lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)\(fixModifier)func \(cleanedSig) \(finalBody)") 
+                    lines.append("\(nextIndent)\(lifetimeAttr)public \(finalMod)\(overrideMod)\(staticMod)\(funcModifier)func \(cleanedSig) \(finalBody)") 
                 }
             case .associatedType(let code):
                 lines.append("\(nextIndent)\(code)")
@@ -1070,7 +1098,9 @@ class TypeNode {
                     let staticMod = isStatic ? "static " : ""
                     let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
                     let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
-                    let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set {} }"
+                    let hasLifetime = isReadOnly && (cleanT.contains("Span") || cleanT.contains("RawSpan") || cleanT.contains("MutableSpan"))
+                    let getPrefix = hasLifetime ? "@_lifetime(borrow self) get" : "get"
+                    let suffix = isReadOnly ? "{ \(getPrefix) \(getter) }" : "{ \(getPrefix) \(getter) set {} }"
                     extLines.append("\(extNextIndent)public \(staticMod)var \(n): \(cleanT) \(suffix)")
                 case .method(let name, let sig, let isStatic):
                     var cleanedSig = sig
@@ -1085,6 +1115,12 @@ class TypeNode {
                     cleanedSig = extCleanScope(cleanedSig)
                     
                     let staticMod = isStatic ? "static " : ""
+                    var extLifetimeAttr = ""
+                    if let arrowRange = cleanedSig.range(of: "->", options: .backwards) {
+                        if cleanedSig[arrowRange.upperBound...].contains("Span") {
+                            extLifetimeAttr = "@_lifetime(borrow self) "
+                        }
+                    }
                     var returnType = "Void"
                     if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
                         returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
@@ -1092,7 +1128,7 @@ class TypeNode {
                     let defaultVal = TypeNode.defaultReturnValue(for: returnType)
                     let body = defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }"
                     let finalBody = defaultVal == "fatalError()" ? "{ fatalError() }" : body
-                    extLines.append("\(extNextIndent)public \(staticMod)func \(cleanedSig) \(finalBody)")
+                    extLines.append("\(extNextIndent)\(extLifetimeAttr)public \(staticMod)func \(cleanedSig) \(finalBody)")
                 default:
                     break
                 }
@@ -1221,7 +1257,9 @@ class TypeNode {
         } else {
             let defaultVal = TypeNode.defaultReturnValue(for: retType)
             let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
-            let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set {} }"
+            let hasLifetime = isReadOnly && (retType.contains("Span") || retType.contains("RawSpan") || retType.contains("MutableSpan"))
+            let getPrefix = hasLifetime ? "@_lifetime(borrow self) get" : "get"
+            let suffix = isReadOnly ? "{ \(getPrefix) \(getter) }" : "{ \(getPrefix) \(getter) set {} }"
             return "\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)subscript\(genericPart)\(params) -> \(retType) \(suffix)"
         }
     }

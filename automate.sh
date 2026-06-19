@@ -99,6 +99,7 @@ echo "--- Emitting Swift Module Interface ---"
 sed -n '/\/\/ --- Automatically Generated Self-Alignment Stubs ---/q;p' "${FRAMEWORK}Interface.swift" > "/tmp/${FRAMEWORK}Interface_module.swift"
 
 swiftc -emit-module -module-name "$FRAMEWORK" "/tmp/${FRAMEWORK}Interface_module.swift" \
+    -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
     -enable-library-evolution -language-mode 6 -F LocalFrameworks \
     -sdk "$SDK_ROOT" \
     -emit-module-interface-path "$MODULE_DIR/arm64-apple-macos.swiftinterface" \
@@ -116,6 +117,7 @@ if [ -f "${FRAMEWORK}_exports.txt" ]; then
 fi
 
 swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
+    -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
     "/tmp/${FRAMEWORK}Interface_dylib.swift" \
     -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
     -sdk "$SDK_ROOT" -language-mode 6 $LINKER_FLAGS
@@ -131,6 +133,7 @@ rm -f dummy_stubs.s "${FRAMEWORK}_exports.txt"
 
 echo "--- Compiling Test Program ---"
 swiftc -F LocalFrameworks "$TEST_FILE" \
+    -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
     -sdk "$SDK_ROOT" -language-mode 6 \
     -o "${FRAMEWORK}_test_run"
 

@@ -709,7 +709,9 @@ struct SwiftInterfaceGen {
             "-module-name", parser.defaultModule,
             "-F", "LocalFrameworks",
             "-sdk", sdkRoot,
-            "-language-mode", "6"
+            "-language-mode", "6",
+            "-enable-experimental-feature", "NonescapableTypes",
+            "-enable-experimental-feature", "Lifetimes"
         ]
         
         do {
