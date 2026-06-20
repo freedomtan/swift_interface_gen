@@ -11,7 +11,7 @@ This tool is primarily used for reverse-engineering and reconstructing the publi
 - **Local Framework Bundling:** Generates a complete, self-contained `.framework` structure (including `.swiftmodule` and `.swiftinterface`) that can be seamlessly passed to the Swift compiler using standard `-F` flags.
 - **Mock Executability:** Generates safe mock implementations (e.g., empty initializers `{}`, safe default return values like `[]` or `nil`, and `fatalError()` for complex logic). This allows client code to successfully instantiate objects and verify type layouts at runtime without crashing immediately.
 - **Smart Dependency Resolution:** Automatically detects and resolves cross-module dependencies (e.g., pulling in `CoreAICommon` when parsing `CoreAICompiler`) by scanning system `PrivateFrameworks` and `SubFrameworks`.
-- **Exact Symbol Alignment (100% TBD Matching):** Compares generated binary exports against the original `.tbd` file, compiles raw assembly stubs for missing symbols, and uses linker flags (`-exported_symbols_list`) to ensure the compiled mock library exports exactly the same symbols as the original framework.
+- **Exact Symbol Alignment (100% TBD Matching):** Automatically compares generated binary exports against the original `.tbd` file, generates native Swift self-alignment `@_silgen_name` stubs in the interface file, and uses linker flags (`-exported_symbols_list`) to ensure the compiled mock library exports exactly the same symbols as the original framework.
 
 ## Quick Start (Automation Script)
 
@@ -65,13 +65,15 @@ mkdir -p LocalFrameworks/ModelCatalog.framework/Modules/ModelCatalog.swiftmodule
 
 # Emit Module Interface
 swiftc -emit-module -module-name ModelCatalog ModelCatalogInterface.swift \
-    -enable-library-evolution -language-mode 5 -F LocalFrameworks \
+    -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
+    -enable-library-evolution -language-mode 6 -F LocalFrameworks \
     -sdk /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk \
     -emit-module-interface-path LocalFrameworks/ModelCatalog.framework/Modules/ModelCatalog.swiftmodule/arm64-apple-macos.swiftinterface \
     -o LocalFrameworks/ModelCatalog.framework/Modules/ModelCatalog.swiftmodule/arm64-apple-macos.swiftmodule
 
 # Compile Mock Dynamic Library
 swiftc -emit-library -o LocalFrameworks/ModelCatalog.framework/ModelCatalog \
+    -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
     ModelCatalogInterface.swift -enable-library-evolution -module-name ModelCatalog \
     -F LocalFrameworks -sdk /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
 ```
@@ -79,7 +81,8 @@ swiftc -emit-library -o LocalFrameworks/ModelCatalog.framework/ModelCatalog \
 ### 4. Compile Your Client Code
 ```bash
 swiftc -F LocalFrameworks test_ModelCatalog.swift \
-    -sdk /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk \
+    -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
+    -sdk /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -language-mode 6 \
     -o test_run
 
 # Run against the local framework
