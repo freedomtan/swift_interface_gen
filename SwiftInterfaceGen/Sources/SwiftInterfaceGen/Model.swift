@@ -892,7 +892,6 @@ class TypeNode {
             let hasCoderInit = members.values.contains { if case .initializer(let s) = $0, s.contains("init(coder:") { return true }; return false }
             let hasEncodeWith = members.values.contains { if case .method(let n, let s, _) = $0, n == "encode" && s.contains("with:") { return true }; return false }
             let hasDebugDescription = members.values.contains { if case .property(let n, _, _, _) = $0, n == "debugDescription" { return true }; return false }
-            let hasDescription = members.values.contains { if case .property(let n, _, _, _) = $0, n == "description" { return true }; return false }
 
             if (hasConformance("Decodable") || hasConformance("Codable")) && !hasInitFrom {
                 let requiredMod = (kind == "class") ? "required " : ""
