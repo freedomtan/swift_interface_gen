@@ -9,39 +9,40 @@ This tool is primarily used for reverse-engineering and reconstructing the publi
 - **Automated Demangling:** Leverages the native Swift demangler (`_stdlib_demangle`) to accurately reconstruct types, methods, and properties from mangled symbols.
 - **Zero-Config Dynamic Inference:** Automatically infers complex multi-parameter generics, dotted protocol namespaces, and concrete types without relying on hardcoded lists.
 - **Local Framework Bundling:** Generates a complete, self-contained `.framework` structure (including `.swiftmodule` and `.swiftinterface`) that can be seamlessly passed to the Swift compiler using standard `-F` flags.
-- **Mock Executability:** Generates safe mock implementations (e.g., empty initializers `{}`, safe default return values like `[]` or `nil`, and `fatalError()` for complex logic). This allows client code to successfully instantiate objects and verify type layouts at runtime without crashing immediately.
-- **Smart Dependency Resolution:** Automatically detects and resolves cross-module dependencies (e.g., pulling in `CoreAICommon` when parsing `CoreAICompiler`) by scanning system `PrivateFrameworks` and `SubFrameworks`.
-- **Exact Symbol Alignment (100% TBD Matching):** Automatically compares generated binary exports against the original `.tbd` file, generates native Swift self-alignment `@_silgen_name` stubs in the interface file, and uses linker flags (`-exported_symbols_list`) to ensure the compiled mock library exports exactly the same symbols as the original framework.
+- **Mock Executability:** Generates safe mock implementations (e.g., empty initializers `{}`, safe default return values like `[]` or `nil`, and `fatalError()` for complex logic) so that client code can layout and instantiate types without runtime crash triggers.
+- **Recursive Dependency Resolution:** Automatically parses imports from target APIs, resolves target-level cross-module dependencies (e.g. `ModelCatalog` -> `FeatureFlags`), and recursively builds dependencies in correct pipeline order using `orchestrate.py`.
+- **Dynamic Stub Module Generation:** Dynamically detects external types not present in the SDK's Swift interface, generates dedicated mock source files for them (e.g. `FeatureFlags.swift`), and compiles them into local mock frameworks.
+- **Assembly-Based Symbol Alignment (100% Matching):** Resolves missing expected symbols (like re-exported or inlined compiler symbols) by assembling stub sources (`stubs_{name}.s`) to object code (`stubs_{name}.o`) using `clang` and linking via `-Xlinker` with `-exported_symbols_list`. This achieves 100% symbol alignment with 0 missing/extra symbols, preventing Swift compiler IR-gen collisions.
 
-## Quick Start (Automation Script)
+## Quick Start (Orchestration Pipeline)
 
-The easiest way to use the tool is via the included `automate.sh` script, which handles the entire pipeline: building the generator, parsing the `.tbd` file, bundling the local framework, and compiling your test program.
+The easiest way to use the tool is via the included `orchestrate.py` tool, which automates the entire compilation and verification process.
 
-1. **Create a Test File** (e.g., `test_ModelCatalog.swift`):
+1. **Create a Test File** (e.g., `test_TokenGenerationCore.swift`):
    ```swift
+   import TokenGenerationCore
    import Foundation
-   import ModelCatalog
 
-   print("Starting test...")
-   let client = CatalogClient()
-   print("Successfully instantiated CatalogClient!")
+   print("Starting TokenGenerationCore test")
+   // Reference layouts and APIs from TokenGenerationCore
+   print("Types verified")
    ```
 
-2. **Run the Automation Script**:
-   Pass the name of the system framework you want to reconstruct and your test file.
+2. **Run the Orchestration Tool**:
+   Pass the target framework name and your test file.
    ```bash
-   ./automate.sh ModelCatalog test_ModelCatalog.swift
+   ./orchestrate.py TokenGenerationCore test_TokenGenerationCore.swift
    ```
 
-This script will output the reconstructed framework into the `LocalFrameworks/` directory and execute your test binary.
+The script will automatically:
+- Parse `TokenGenerationCore.tbd` to extract its dependencies and stubs.
+- Recursively resolve and build all dependencies (like `ModelCatalog`) and stub modules (like `PromptKit`) under `LocalFrameworks/`.
+- Compile `TokenGenerationCore`'s `.swiftinterface` and its dynamic library with assembly stubs for 100% exact symbol matching.
+- Compile and execute your test binary using the built local frameworks.
 
 > [!NOTE]
-> **Cross-Framework Dependencies:**
-> If a framework depends on another private framework (e.g., `CoreAICompiler` requires `CoreAICommon`), the dependency framework must be generated first and reside in the `LocalFrameworks/` folder. For example, you must run:
-> ```bash
-> ./automate.sh CoreAICommon test_CoreAICommon.swift
-> ./automate.sh CoreAICompiler test_CoreAICompiler.swift
-> ```
+> **Automated Dependency Ordering:**
+> The `orchestrate.py` pipeline completely replaces `automate.sh`. It resolves the entire dependency graph (including nested targets like `CoreAICompiler` -> `CoreAICommon`) and builds them automatically in the correct topology. You do not need to build dependency frameworks manually.
 
 ## Manual Usage
 

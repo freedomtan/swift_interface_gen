@@ -26,7 +26,7 @@ extension String {
     }
 
     // 2. replaceWord: replaces whole word occurrences of `word` with `replacement`.
-    func replaceWord(_ word: String, with replacement: String, allowPrecededByDot: Bool = true) -> String {
+    func replaceWord(_ word: String, with replacement: String, allowPrecededByDot: Bool = true, allowFollowedByDot: Bool = true) -> String {
         var result = self
         var startSearch = result.startIndex
         while let range = result.range(of: word, range: startSearch..<result.endIndex) {
@@ -43,14 +43,18 @@ extension String {
             }
             
             let isWordCharAfter: Bool
+            var followedByDot = false
             if range.upperBound < result.endIndex {
                 let nextChar = result[range.upperBound]
                 isWordCharAfter = nextChar.isLetter || nextChar.isNumber || nextChar == "_" || nextChar == "$"
+                if nextChar == "." {
+                    followedByDot = true
+                }
             } else {
                 isWordCharAfter = false
             }
             
-            let shouldReplace = !isWordCharBefore && !isWordCharAfter && (allowPrecededByDot || !precededByDot)
+            let shouldReplace = !isWordCharBefore && !isWordCharAfter && (allowPrecededByDot || !precededByDot) && (allowFollowedByDot || !followedByDot)
             if shouldReplace {
                 result.replaceSubrange(range, with: replacement)
                 if replacement.isEmpty {
@@ -1973,5 +1977,47 @@ extension String {
         } else {
             return prefix + "<" + keptParams.joined(separator: ", ") + ">" + suffix
         }
+    }
+
+    func flattenTypePath(forPrefix prefix: String) -> String {
+        var result = self
+        var startIdx = result.startIndex
+        while let range = result.range(of: prefix + ".", range: startIdx..<result.endIndex) {
+            let nextStart = range.upperBound
+            var endIdx = nextStart
+            var scan = nextStart
+            var currentWordIsCapitalized = true
+            
+            while scan < result.endIndex {
+                let wordStart = scan
+                while scan < result.endIndex && (result[scan].isLetter || result[scan].isNumber || result[scan] == "_" || result[scan] == "$") {
+                    scan = result.index(after: scan)
+                }
+                let word = String(result[wordStart..<scan])
+                if let firstChar = word.first, firstChar.isUppercase {
+                    currentWordIsCapitalized = true
+                } else {
+                    currentWordIsCapitalized = false
+                }
+                
+                if !currentWordIsCapitalized {
+                    break
+                }
+                
+                endIdx = scan
+                
+                if scan < result.endIndex && result[scan] == "." {
+                    scan = result.index(after: scan)
+                } else {
+                    break
+                }
+            }
+            
+            let subPath = String(result[range.lowerBound..<endIdx])
+            let flatSubPath = subPath.replacingOccurrences(of: ".", with: "_")
+            result.replaceSubrange(range.lowerBound..<endIdx, with: flatSubPath)
+            startIdx = result.index(range.lowerBound, offsetBy: flatSubPath.count)
+        }
+        return result
     }
 }

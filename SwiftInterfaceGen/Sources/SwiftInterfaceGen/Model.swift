@@ -564,12 +564,18 @@ class TypeNode {
                 generatedInitializers.insert(normalizedSig)
                 
                 if isProtocol { lines.append("\(nextIndent)\(cleanedSig)") }
-                else if isEnum { /* skip */ }
+                else if isEnum {
+                    if cleanedSig.starts(with: "init(from:") {
+                        lines.append("\(nextIndent)public \(cleanedSig) { fatalError() }")
+                    }
+                }
                 else {
                     // For classes, ensure the init body is non-empty to force symbol emission.
                     // If it's NSObject, use super.init(), otherwise fatalError().
                     let initBody = isOverride && cleanedSig.starts(with: "init()") ? "{ super.init() }" : "{ fatalError() }"
-                    lines.append("\(nextIndent)public \(overrideMod)\(cleanedSig) \(initBody)")
+                    let isRequired = self.kind == "class" && (cleanedSig.contains("init(from:") || cleanedSig.contains("init?(coder:") || cleanedSig.contains("init(coder:"))
+                    let requiredMod = isRequired ? "required " : ""
+                    lines.append("\(nextIndent)\(requiredMod)public \(overrideMod)\(cleanedSig) \(initBody)")
                 }
             case .property(let n, let t, let isReadOnly, let isStatic):
                 let propKey = "\(isStatic ? "static" : "instance")-\(n)"
@@ -620,9 +626,13 @@ class TypeNode {
                     let suffix = isReadOnly ? "{ \(getPrefix) \(getter) }" : "{ \(getPrefix) \(getter) set {} }"
                     lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)var \(n): \(cleanT) \(suffix)")
                 }
-            case .method(let n, let sig, let isStatic):
+            case .method(let n, let sig, var isStatic):
                 var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
-                let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
+                let cleanN = n.replacingOccurrences(of: " infix", with: "").replacingOccurrences(of: " prefix", with: "").replacingOccurrences(of: " postfix", with: "").trimmingCharacters(in: .whitespaces)
+                let isOperator = !cleanN.isEmpty && cleanN.allSatisfy { "+-*/=<>&|^~%!?.".contains($0) }
+                if isOperator {
+                    isStatic = true
+                }
                 cleanedSig = injectDefaultArguments(signature: cleanedSig, methodName: cleanN, isStatic: isStatic, parser: parser)
                 
                 var lifetimeAttr = ""
@@ -830,7 +840,9 @@ class TypeNode {
                         if left.hasSuffix(".Type") && !left.contains("`Type`") { left = left.replacingOccurrences(of: ".Type", with: ".`Type`") }
                         if right.hasSuffix(".Type") && !right.contains("`Type`") { right = right.replacingOccurrences(of: ".Type", with: ".`Type`") }
 
-                        lines.append("\(nextIndent)public static func == (lhs: \(left), rhs: \(right)) -> \(returnType) { \(returnType == "Bool" ? "true" : "fatalError()") }")
+                        let leftType = (left == right && self.kind != "class") ? "Self" : left
+                        let rightType = (left == right && self.kind != "class") ? "Self" : right
+                        lines.append("\(nextIndent)public static func == (lhs: \(leftType), rhs: \(rightType)) -> \(returnType) { \(returnType == "Bool" ? "true" : "fatalError()") }")
                         continue
                     }
                 }
@@ -840,6 +852,13 @@ class TypeNode {
                 if isProtocol { 
                     lines.append("\(nextIndent)\(lifetimeAttr)\(staticMod)\(funcModifier)func \(cleanedSig)") 
                 } else { 
+                    if self.kind == "class" {
+                        if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
+                            let retPart = String(cleanedSig[arrowRange.upperBound...])
+                            let updatedRet = retPart.replaceWord(self.name, with: "Self", allowFollowedByDot: false)
+                            cleanedSig = String(cleanedSig[..<arrowRange.upperBound]) + updatedRet
+                        }
+                    }
                     var returnType = "Void"
                     if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
                         returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
@@ -872,15 +891,21 @@ class TypeNode {
             let hasHashInto = members.values.contains { if case .method(let n, _, _) = $0, n == "hash" { return true }; return false }
             let hasCoderInit = members.values.contains { if case .initializer(let s) = $0, s.contains("init(coder:") { return true }; return false }
             let hasEncodeWith = members.values.contains { if case .method(let n, let s, _) = $0, n == "encode" && s.contains("with:") { return true }; return false }
+            let hasDebugDescription = members.values.contains { if case .property(let n, _, _, _) = $0, n == "debugDescription" { return true }; return false }
+            let hasDescription = members.values.contains { if case .property(let n, _, _, _) = $0, n == "description" { return true }; return false }
 
             if (hasConformance("Decodable") || hasConformance("Codable")) && !hasInitFrom {
-                lines.append("\(nextIndent)public init(from decoder: any Decoder) throws { fatalError() }")
+                let requiredMod = (kind == "class") ? "required " : ""
+                lines.append("\(nextIndent)\(requiredMod)public init(from decoder: any Decoder) throws { fatalError() }")
             }
             if (hasConformance("Encodable") || hasConformance("Codable")) && !hasEncodeTo {
                 lines.append("\(nextIndent)public func encode(to encoder: Encoder) throws { fatalError() }")
             }
             if hasConformance("Hashable") && !hasHashInto {
                 lines.append("\(nextIndent)public func hash(into hasher: inout Hasher) { fatalError() }")
+            }
+            if hasConformance("CustomDebugStringConvertible") && !hasDebugDescription {
+                lines.append("\(nextIndent)public var debugDescription: String { get { fatalError() } }")
             }
             let genericParamsList: String
             if typeName == "BidirectionalXPCServiceClientConnection" {
@@ -976,7 +1001,7 @@ class TypeNode {
 
     func generateExtensions(defaultModule: String, parser: Parser? = nil, path: String = "") -> String {
         var output = ""
-        let separator = (path.isEmpty || path.hasSuffix("_")) ? "" : "."
+        let separator = (path.isEmpty || path.hasSuffix("_") || path.hasSuffix(".")) ? "" : "."
         let currentPath = path.isEmpty ? name : path + separator + name
         
         var inScope = Set<String>()
@@ -1059,7 +1084,16 @@ class TypeNode {
                 return res
             }
 
-            let constraintSuffix = constraint != nil ? " " + constraint! : ""
+            var constraintSuffix = constraint != nil ? " " + constraint! : ""
+            if name == "Array" && path == "Swift" {
+                constraintSuffix = constraintSuffix.replaceWord("A", with: "Element")
+            } else if name == "Dictionary" && path == "Swift" {
+                constraintSuffix = constraintSuffix.replaceWord("A", with: "Key").replaceWord("B", with: "Value")
+            } else if name == "Set" && path == "Swift" {
+                constraintSuffix = constraintSuffix.replaceWord("A", with: "Element")
+            } else if name == "Optional" && path == "Swift" {
+                constraintSuffix = constraintSuffix.replaceWord("A", with: "Wrapped")
+            }
             extLines.append("extension \(currentPath)\(constraintSuffix) {")
             let extNextIndent = "    "
             

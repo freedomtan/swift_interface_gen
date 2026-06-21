@@ -24,6 +24,55 @@ class Parser {
     var namespaceFrameworkCache: [String: Bool] = [:]
     var frameworkDefinedTypesCache: [String: Set<String>] = [:]
     
+    let systemTypes: Set<String> = [
+        "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
+        "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
+        "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
+        "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
+        "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
+        "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Identifiable",
+        "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
+        "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
+        "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
+        "AnySequence", "FloatingPointRoundingRule", "Task", "Mutex", "CustomStringConvertible", "CustomDebugStringConvertible", "CodingKey",
+        "ExpressibleByExtendedGraphemeClusterLiteral", "ExpressibleByStringLiteral", "ExpressibleByUnicodeScalarLiteral",
+        "ExpressibleByIntegerLiteral", "ExpressibleByFloatLiteral", "ExpressibleByBooleanLiteral",
+        "ExpressibleByNilLiteral", "ExpressibleByArrayLiteral", "ExpressibleByDictionaryLiteral",
+        "LocalizedError", "CustomNSError", "Logger", "NSXPCConnection", "NSXPCInterface", "Protocol", "NSCopying",
+        "Swift", "Foundation", "CoreFoundation", "Metal", "IOSurface", "CoreGraphics", "CoreVideo", "CoreMedia", "CoreImage", "CoreML", "Dispatch", "os", "ObjectiveC", "Synchronization",
+        "Strideable", "AdditiveArithmetic", "BinaryFloatingPoint", "FloatingPoint", "FloatingPointSign", "Numeric", "SignedNumeric",
+        "MTLDevice", "MTLBuffer", "MTLTexture", "IOSurfaceRef", "CVBufferRef", "CVBuffer",
+        "Span", "MutableSpan", "RawSpan", "MutableRawSpan",
+        // Additional System Types to prevent shadowing and matching issues:
+        "NSNumber", "NSCoder", "Date", "DispatchQueue", "URLComponents", "UUID", "NSZone", "AnyHashable", "UTType", "Decimal", "IndexSet", "URLRequest", "URLSessionTask", "OS_dispatch_queue",
+        "AsyncStream", "AsyncThrowingStream",
+        "NSCoding", "NSSecureCoding", "NSObjectProtocol",
+        "OptionSet", "SetAlgebra",
+        // Additional Standard Swift Library and Foundation Types/Protocols:
+        "Collection", "BidirectionalCollection", "RandomAccessCollection", "MutableCollection", "RangeReplaceableCollection",
+        "AsyncSequence", "AsyncIteratorProtocol",
+        "CVarArg",
+        "LosslessStringConvertible",
+        "TextOutputStream", "TextOutputStreamable",
+        "ExpressibleByStringInterpolation", "StringInterpolationProtocol",
+        "CommandLine",
+        "Mirror", "MirrorPath", "CustomReflectable",
+        "KeyPath", "WritableKeyPath", "ReferenceWritableKeyPath", "PartialKeyPath", "AnyKeyPath",
+        "Unicode", "UnicodeScalar", "UTF8", "UTF16", "UTF32",
+        "EmptyCollection", "Repeated", "Slice", "Zip2Sequence",
+        "ObjectIdentifier",
+        "NSMutableCopying",
+        "URLQueryItem",
+        "Measurement", "Unit", "Dimension",
+        "Operation", "OperationQueue",
+        "Thread", "Timer",
+        "CharacterSet",
+        "JSONEncoder", "JSONDecoder", "PropertyListEncoder", "PropertyListDecoder",
+        "AttributedString", "AttributedStringKey", "AttributedSubstring",
+        "FileHandle", "Pipe",
+        "NSPredicate", "NSSortDescriptor"
+    ]
+    
     var defaultArguments = [String: Set<Int>]()
     
     func splitTopLevelCommas(_ s: String) -> [String] {
@@ -381,6 +430,16 @@ class Parser {
         }
 
         var body = d
+        var prefixToRestore = ""
+        let descriptors = ["enum case for ", "dispatch thunk of ", "method descriptor for "]
+        for desc in descriptors {
+            if body.starts(with: desc) {
+                body = String(body.dropFirst(desc.count))
+                prefixToRestore = desc
+                break
+            }
+        }
+
         var isStaticExtension = false
         if body.starts(with: "static ") {
             body = String(body.dropFirst(7))
@@ -390,7 +449,7 @@ class Parser {
         if body.starts(with: "(extension in ") {
             if let colonIndex = body.firstIndex(of: ":") {
                 let actualBody = String(body[body.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
-                d = isStaticExtension ? "static " + actualBody : actualBody
+                body = isStaticExtension ? "static " + actualBody : actualBody
                 
                 // Parse constraints if actualBody contains "< where "
                 if let range = actualBody.range(of: "< where ") {
@@ -408,6 +467,41 @@ class Parser {
                         simplified = simplified.replacingOccurrences(of: ": any ", with: ": ")
                         simplified = simplified.replacingOccurrences(of: ":any ", with: ": ")
                         constraints = "where " + simplified
+                    }
+                }
+            }
+        } else if isStaticExtension {
+            body = "static " + body
+        }
+        d = prefixToRestore + body
+
+        // Handle extension constraints in type path (e.g., Type<A where A == Float>.init)
+        if let openAngle = d.firstIndex(of: "<") {
+            var depth = 0
+            var closeAngle: String.Index? = nil
+            var scan = openAngle
+            while scan < d.endIndex {
+                if d[scan] == "<" { depth += 1 }
+                else if d[scan] == ">" {
+                    depth -= 1
+                    if depth == 0 {
+                        closeAngle = scan
+                        break
+                    }
+                }
+                scan = d.index(after: scan)
+            }
+            if let closeIdx = closeAngle {
+                let inside = String(d[d.index(after: openAngle)..<closeIdx])
+                let afterClose = d[d.index(after: closeIdx)...]
+                if afterClose.hasPrefix(".") && inside.contains(" where ") {
+                    if let whereRange = inside.range(of: " where ") {
+                        let rawConstraints = String(inside[whereRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                        var simplified = simplifyType(rawConstraints)
+                        simplified = simplified.replacingOccurrences(of: ": any ", with: ": ")
+                        simplified = simplified.replacingOccurrences(of: ":any ", with: ": ")
+                        constraints = "where " + simplified
+                        d = String(d[..<openAngle]) + String(afterClose)
                     }
                 }
             }
@@ -473,8 +567,32 @@ class Parser {
         }
 
         var cleanD = d
-        if let inIndex = cleanD.range(of: " in ") {
-            cleanD = String(cleanD[..<inIndex.lowerBound])
+        if cleanD.contains(" in ") {
+            var depth_p = 0
+            var depth_a = 0
+            var depth_s = 0
+            var foundIndex: String.Index? = nil
+            var idx = cleanD.startIndex
+            while idx < cleanD.endIndex {
+                let c = cleanD[idx]
+                if c == "(" { depth_p += 1 }
+                else if c == ")" { depth_p -= 1 }
+                else if c == "<" { depth_a += 1 }
+                else if c == ">" { depth_a -= 1 }
+                else if c == "[" { depth_s += 1 }
+                else if c == "]" { depth_s -= 1 }
+                
+                if depth_p == 0 && depth_a == 0 && depth_s == 0 {
+                    if cleanD[idx...].hasPrefix(" in ") {
+                        foundIndex = idx
+                        break
+                    }
+                }
+                idx = cleanD.index(after: idx)
+            }
+            if let found = foundIndex {
+                cleanD = String(cleanD[..<found])
+            }
         }
         
         let isStatic = cleanD.starts(with: "static ")
@@ -695,7 +813,7 @@ class Parser {
         if name.contains("<") { fputs("findOrCreateType with <: \(name)\n", stderr) }
         var parts = name.components(separatedBy: ".")
 
-        let isTopLevel = isModuleAvailable(parts[0]) || parts[0] == "__C" || parts[0] == defaultModule
+        let isTopLevel = isModuleAvailable(parts[0]) || parts[0] == "__C" || parts[0] == defaultModule || modules[parts[0]] != nil
         if !isTopLevel {
             parts.insert(defaultModule, at: 0)
         }
@@ -746,6 +864,9 @@ class Parser {
             }
         }
         if !current.isEmpty { parts.append(current) }
+        if parts.isEmpty {
+            return (defaultModule, "")
+        }
         if parts.count == 1 {
             return (defaultModule, parts[0])
         }
@@ -757,23 +878,21 @@ class Parser {
     private func cleanType(_ name: String) -> String {
         var n = name.stripGenericAngles().stripLongNumbers()
         
-        if n.contains("(extension in ") {
-            for ext in discoveredNamespaces.union([defaultModule]) {
-                n = n.replacingOccurrences(of: "(extension in \(ext)):", with: "")
-            }
-        }
+        n = n.replacingOccurrences(of: "\\(extension in [^)]+\\):", with: "", options: .regularExpression)
         
         n = n.replacingOccurrences(of: "__C\\.UAF([a-zA-Z0-9_]+)", with: "UnifiedAssetFramework.UAF$1", options: .regularExpression)
-        if n.hasSuffix(".Array") { n = n.replacingOccurrences(of: ".Array", with: ".JSONArray") }
-        if n.hasSuffix(".Dictionary") { n = n.replacingOccurrences(of: ".Dictionary", with: ".JSONDictionary") }
-        if n.hasSuffix(".Object") { n = n.replacingOccurrences(of: ".Object", with: ".JSONObject") }
-        if n.hasSuffix(".String") && n.contains("JSONSchema") { n = n.replacingOccurrences(of: ".String", with: ".JSONString") }
+        if n.hasSuffix(".Array") && n != "Swift.Array" && !n.hasPrefix("Swift.") { n = n.replacingOccurrences(of: ".Array", with: ".JSONArray") }
+        if n.hasSuffix(".Dictionary") && n != "Swift.Dictionary" && !n.hasPrefix("Swift.") { n = n.replacingOccurrences(of: ".Dictionary", with: ".JSONDictionary") }
+        if n.hasSuffix(".Object") && n != "Swift.Object" && !n.hasPrefix("Swift.") { n = n.replacingOccurrences(of: ".Object", with: ".JSONObject") }
+        if n.hasSuffix(".String") && n.contains("JSONSchema") && n != "Swift.String" && !n.hasPrefix("Swift.") { n = n.replacingOccurrences(of: ".String", with: ".JSONString") }
 
         return n
     }
 
     func simplifyType(_ type: String, parentName: String? = nil, isMethodSignature: Bool = false) -> String {
         var t = type.replacingOccurrences(of: "CVBufferRef", with: "CVBuffer")
+        t = t.replacingOccurrences(of: "any (Swift\\.)?AsyncSequence<[^>]+>", with: "any AsyncSequence", options: .regularExpression)
+        t = t.replacingOccurrences(of: "\\(extension in [^)]+\\):", with: "", options: .regularExpression)
         t = t.replacingOccurrences(of: "__C\\.UAF([a-zA-Z0-9_]+)", with: "UnifiedAssetFramework.UAF$1", options: .regularExpression)
         t = t.replacingOccurrences(of: "__C.UAFSubscriptionDownloadStatus", with: "UnifiedAssetFramework.UAFSubscriptionDownloadStatus")
         t = t.replacingOccurrences(of: "__C\\.OS_xpc_object", with: "XPC.OS_xpc_object", options: .regularExpression)
@@ -827,7 +946,9 @@ class Parser {
                 let word = String(chars[start..<idx])
                 if idx < n && chars[idx] == "." {
                     if idx + 1 < n && chars[idx+1].isLetter {
-                        scannedWords.insert(word)
+                        if start == 0 || chars[start-1] != "." {
+                            scannedWords.insert(word)
+                        }
                     }
                 }
             } else {
@@ -838,8 +959,12 @@ class Parser {
             if word == "__C" {
                 t = t.replaceWordDot(word, with: "")
             } else if word != "Swift" && word != defaultModule && isModuleAvailable(word) {
-                let workspaceFrameworks = ["CoreAICommon", "ODIE", "ModelCatalog", "CoreAICompiler", "UnifiedAssetFramework", "AppleIntelligenceReporting", "FeatureFlags"]
-                if workspaceFrameworks.contains(word) {
+                let systemModules: Set<String> = [
+                    "Swift", "Foundation", "ObjectiveC", "os", "Dispatch", "Metal", "CoreGraphics",
+                    "CoreVideo", "CoreMedia", "IOSurface", "UniformTypeIdentifiers", "XPC", "Synchronization",
+                    "MetricKit", "Combine"
+                ]
+                if !systemModules.contains(word) {
                     referencedModules.insert(word)
                 } else {
                     t = t.replaceWordDot(word, with: "")
@@ -1098,7 +1223,13 @@ class Parser {
         ]
         for fwPath in frameworkPaths {
             let modulesPath = "\(fwPath)/Modules"
-            if FileManager.default.fileExists(atPath: modulesPath) {
+            let tbdPath = "\(fwPath)/\(name).tbd"
+            let tbdPathA = "\(fwPath)/Versions/A/\(name).tbd"
+            let tbdPathCurrent = "\(fwPath)/Versions/Current/\(name).tbd"
+            if FileManager.default.fileExists(atPath: modulesPath) ||
+               FileManager.default.fileExists(atPath: tbdPath) ||
+               FileManager.default.fileExists(atPath: tbdPathA) ||
+               FileManager.default.fileExists(atPath: tbdPathCurrent) {
                 return true
             }
         }
@@ -1173,6 +1304,9 @@ class Parser {
     }
 
     func isTypeDefinedInFramework(module: String, typeName: String) -> Bool {
+        if module == "Swift" {
+            return systemTypes.contains(typeName)
+        }
         let systemModules: Set<String> = [
             "Swift", "Foundation", "ObjectiveC", "__C", "Dispatch", 
             "Metal", "IOSurface", "CoreGraphics", "CoreVideo", 
@@ -1242,7 +1376,7 @@ class Parser {
         func markNSObjectSubclasses(node: TypeNode) {
             if node.kind == "class" && node.baseClass == nil {
                 let hasCoderInit = node.members.values.contains {
-                    if case .initializer(let s) = $0, s.contains("init(coder:") { return true }
+                    if case .initializer(let s) = $0, (s.contains("init(coder:") || s.contains("init?(coder:")) { return true }
                     return false
                 }
                 if hasCoderInit {
@@ -1251,7 +1385,7 @@ class Parser {
                     // Ensure the coder init uses the required init?(coder:) form
                     // Remove plain init(coder:) and let Model.swift emit the required form
                     let keysToRemove = node.members.keys.filter {
-                        if case .initializer(let s) = node.members[$0]!, s.contains("init(coder:") { return true }
+                        if case .initializer(let s) = node.members[$0]!, (s.contains("init(coder:") || s.contains("init?(coder:")) { return true }
                         return false
                     }
                     for k in keysToRemove { node.members.removeValue(forKey: k) }
@@ -1338,35 +1472,31 @@ class Parser {
                 inheritProtocolMembers(node: type)
             }
         }
+
+        // Automatically set OptionSet conforming types to struct
+        func fixOptionSets(node: TypeNode) {
+            let isOptionSet = node.conformances.contains { conf in
+                let clean = conf.trimmingCharacters(in: .whitespaces)
+                return clean == "OptionSet" || clean == "Swift.OptionSet"
+            }
+            if isOptionSet {
+                node.kind = "struct"
+            }
+            for nested in node.nestedTypes.values {
+                fixOptionSets(node: nested)
+            }
+        }
+        for module in modules.values {
+            for type in module.nestedTypes.values {
+                fixOptionSets(node: type)
+            }
+        }
     }
 
     func generateAll() -> String {
         applyTypeFixups()
 
-        let systemTypes: Set<String> = [
-            "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
-            "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
-            "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
-            "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
-            "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
-            "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Identifiable",
-            "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
-            "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
-            "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
-            "AnySequence", "FloatingPointRoundingRule", "Task", "Mutex", "CustomStringConvertible", "CustomDebugStringConvertible", "CodingKey",
-            "ExpressibleByExtendedGraphemeClusterLiteral", "ExpressibleByStringLiteral", "ExpressibleByUnicodeScalarLiteral",
-            "ExpressibleByIntegerLiteral", "ExpressibleByFloatLiteral", "ExpressibleByBooleanLiteral",
-            "ExpressibleByNilLiteral", "ExpressibleByArrayLiteral", "ExpressibleByDictionaryLiteral",
-            "LocalizedError", "CustomNSError", "Logger", "NSXPCConnection", "NSXPCInterface", "Protocol", "NSCopying",
-            "Swift", "Foundation", "CoreFoundation", "Metal", "IOSurface", "CoreGraphics", "CoreVideo", "CoreMedia", "CoreImage", "CoreML", "Dispatch", "os", "ObjectiveC", "Synchronization",
-            "Strideable", "AdditiveArithmetic", "BinaryFloatingPoint", "FloatingPoint", "FloatingPointSign", "Numeric", "SignedNumeric",
-            "MTLDevice", "MTLBuffer", "MTLTexture", "IOSurfaceRef", "CVBufferRef", "CVBuffer",
-            "Span", "MutableSpan", "RawSpan", "MutableRawSpan",
-            // Additional System Types to prevent shadowing and matching issues:
-            "NSNumber", "NSCoder", "Date", "DispatchQueue", "URLComponents", "UUID", "NSZone", "AnyHashable", "UTType", "Decimal", "IndexSet", "URLRequest", "URLSessionTask", "OS_dispatch_queue",
-            "AsyncStream", "AsyncThrowingStream",
-            "NSCoding", "NSSecureCoding", "NSObjectProtocol"
-        ]
+        // systemTypes is defined as class member
 
         fputs("discoveredProtocols: \(discoveredProtocols)\n", stderr)
         // Set all referenced but undefined types to struct
@@ -1488,7 +1618,14 @@ class Parser {
                 let flattenedName = "\(moduleName)_\(type.name)"
                 if !definedTypes.contains(flattenedName) && type.extensionMembers.isEmpty && type.constrainedExtensions.isEmpty { continue }
                 
-                let pathPrefix = (moduleName == defaultModule) ? "" : "\(moduleName)_"
+                let pathPrefix: String
+                if moduleName == "Swift" {
+                    pathPrefix = "Swift"
+                } else if moduleName == defaultModule {
+                    pathPrefix = ""
+                } else {
+                    pathPrefix = "\(moduleName)_"
+                }
                 output += type.generateExtensions(defaultModule: defaultModule, parser: self, path: pathPrefix)
             }
         }
