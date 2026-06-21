@@ -66,13 +66,15 @@ mkdir -p LocalFrameworks/ModelCatalog.framework/Modules/ModelCatalog.swiftmodule
 
 # Emit Module Interface
 swiftc -emit-module -module-name ModelCatalog ModelCatalogInterface.swift \
-    -enable-library-evolution -language-mode 5 -F LocalFrameworks \
+    -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
+    -enable-library-evolution -language-mode 6 -F LocalFrameworks \
     -sdk /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk \
     -emit-module-interface-path LocalFrameworks/ModelCatalog.framework/Modules/ModelCatalog.swiftmodule/arm64-apple-macos.swiftinterface \
     -o LocalFrameworks/ModelCatalog.framework/Modules/ModelCatalog.swiftmodule/arm64-apple-macos.swiftmodule
 
 # Compile Mock Dynamic Library
 swiftc -emit-library -o LocalFrameworks/ModelCatalog.framework/ModelCatalog \
+    -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
     ModelCatalogInterface.swift -enable-library-evolution -module-name ModelCatalog \
     -F LocalFrameworks -sdk /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
 ```
@@ -80,7 +82,8 @@ swiftc -emit-library -o LocalFrameworks/ModelCatalog.framework/ModelCatalog \
 ### 4. Compile Your Client Code
 ```bash
 swiftc -F LocalFrameworks test_ModelCatalog.swift \
-    -sdk /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk \
+    -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
+    -sdk /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -language-mode 6 \
     -o test_run
 
 # Run against the local framework
