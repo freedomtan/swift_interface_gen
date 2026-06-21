@@ -87,6 +87,80 @@ SWIFTEOF
         -emit-module-path "LocalFrameworks/UnifiedAssetFramework.framework/Modules/UnifiedAssetFramework.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
 fi
 
+# GenerativeFunctionsFoundation stub
+rm -rf "LocalFrameworks/GenerativeFunctionsFoundation.framework"
+mkdir -p "LocalFrameworks/GenerativeFunctionsFoundation.framework/Modules/GenerativeFunctionsFoundation.swiftmodule"
+cat > /tmp/_gff_stub.swift << 'SWIFTEOF'
+import Foundation
+public struct Schema: Codable, Hashable, Sendable {}
+public struct TemplateVariableBinding: Codable, Hashable, Sendable {}
+public struct Tool: Codable, Hashable, Sendable {
+    public struct Function: Codable, Hashable, Sendable {}
+}
+public struct ToolChoice: Codable, Hashable, Sendable {}
+public struct ToolDefinition: Codable, Hashable, Sendable {}
+public struct ToolType: Codable, Hashable, Sendable {}
+public struct FileToolParameters: Codable, Hashable, Sendable {}
+public struct ImageToolParameters: Codable, Hashable, Sendable {}
+public struct GenerationSchema: Codable, Hashable, Sendable {}
+public struct FileGenerationParameters: Codable, Hashable, Sendable {}
+public struct ImageGenerationParameters: Codable, Hashable, Sendable {}
+SWIFTEOF
+swiftc -emit-library -o "LocalFrameworks/GenerativeFunctionsFoundation.framework/GenerativeFunctionsFoundation" \
+    /tmp/_gff_stub.swift -enable-library-evolution -module-name GenerativeFunctionsFoundation -sdk "$SDK_ROOT" -language-mode 5 \
+    -emit-module-interface-path "LocalFrameworks/GenerativeFunctionsFoundation.framework/Modules/GenerativeFunctionsFoundation.swiftmodule/arm64-apple-macos.swiftinterface" \
+    -emit-module-path "LocalFrameworks/GenerativeFunctionsFoundation.framework/Modules/GenerativeFunctionsFoundation.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
+
+
+# PromptKit stub
+rm -rf "LocalFrameworks/PromptKit.framework"
+mkdir -p "LocalFrameworks/PromptKit.framework/Modules/PromptKit.swiftmodule"
+cat > /tmp/_promptkit_stub.swift << 'SWIFTEOF'
+import Foundation
+public protocol GenerativeConfigurationProtocol {
+    associatedtype PromptType
+}
+public struct CompletionPrompt {}
+public struct ChatMessagesPrompt {}
+public struct ChatMessagePrompt {}
+public struct RunnableConfigurationStorage {}
+public struct SpecialToken: Codable, Hashable, Sendable {}
+public struct Prompt {
+    public struct ToolCall: Codable, Hashable, Sendable {}
+    public struct MediaSegment: Codable, Hashable, Sendable {}
+    public struct AudioEmbeddingData: Codable, Hashable, Sendable {}
+    public struct ImageData: Codable, Hashable, Sendable {}
+    public struct ImageEmbeddingData: Codable, Hashable, Sendable {}
+    public struct PreprocessedImageData: Codable, Hashable, Sendable {}
+    public struct StreamBuffer: Codable, Hashable, Sendable {}
+    public struct ToolResult: Codable, Hashable, Sendable {}
+}
+public struct InferenceResponse: Codable, Hashable, Sendable {
+    public struct Annotation: Codable, Hashable, Sendable {}
+}
+public struct PromptRequest: Codable, Hashable, Sendable {
+    public struct PromptVariant {
+        public struct ChatPrompt: Codable, Hashable, Sendable {}
+    }
+}
+public struct ResponseFormat: Codable, Hashable, Sendable {}
+public struct ThoughtBudget: Codable, Hashable, Sendable {}
+public struct Promptkit_Wireformat_ToolCall: Codable, Hashable, Sendable {}
+public struct Promptkit_Wireformat_ToolResult: Codable, Hashable, Sendable {}
+public struct Promptkit_Wireformat_DocumentResourceIdentifier: Codable, Hashable, Sendable {}
+public struct Promptkit_Wireformat_ThoughtBudget: Codable, Hashable, Sendable {}
+public struct Promptkit_Wireformat_ToolDefinition: Codable, Hashable, Sendable {}
+public struct Promptkit_Wireformat_Thoughts: Codable, Hashable, Sendable {}
+public struct Thoughts: Codable, Hashable, Sendable {}
+public struct WebSearchParameters: Codable, Hashable, Sendable {}
+public struct Promptkit_Wireformat_AudioFormat: Codable, Hashable, Sendable {}
+public struct Promptkit_Wireformat_Schema: Codable, Hashable, Sendable {}
+SWIFTEOF
+swiftc -emit-library -o "LocalFrameworks/PromptKit.framework/PromptKit" \
+    /tmp/_promptkit_stub.swift -enable-library-evolution -module-name PromptKit -sdk "$SDK_ROOT" -language-mode 5 \
+    -emit-module-interface-path "LocalFrameworks/PromptKit.framework/Modules/PromptKit.swiftmodule/arm64-apple-macos.swiftinterface" \
+    -emit-module-path "LocalFrameworks/PromptKit.framework/Modules/PromptKit.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
+
 echo "--- Generating Interface for $FRAMEWORK ---"
 ./swift-interface-gen "$TBD_PATH" > "${FRAMEWORK}Interface.swift"
 

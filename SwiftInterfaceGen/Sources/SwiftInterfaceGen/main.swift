@@ -449,7 +449,7 @@ struct SwiftInterfaceGen {
         c = c.replacingOccurrences(of: "Optional<Foundation.", with: "Optional<___FOUNDATION___")
         c = c.replacingOccurrences(of: "= Foundation.", with: "= ___FOUNDATION___")
 
-        c = c.replacingOccurrences(of: "Foundation.", with: "")
+        c = c.replaceWordDot("Foundation", with: "")
         c = c.replacingOccurrences(of: "___FOUNDATION___", with: "Foundation.")
         
         // Strip Swift. from types unless there is a collision
@@ -458,7 +458,7 @@ struct SwiftInterfaceGen {
             c = c.replacingOccurrences(of: "Swift.\(type)", with: "___SWIFT_SHIELDED_\(type)___")
         }
         
-        c = c.replacingOccurrences(of: "Swift.", with: "")
+        c = c.replaceWordDot("Swift", with: "")
         
         for type in standardShadowedTypes {
             c = c.replacingOccurrences(of: "___SWIFT_SHIELDED_\(type)___", with: "Swift.\(type)")
