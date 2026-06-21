@@ -946,7 +946,9 @@ class Parser {
                 let word = String(chars[start..<idx])
                 if idx < n && chars[idx] == "." {
                     if idx + 1 < n && chars[idx+1].isLetter {
-                        scannedWords.insert(word)
+                        if start == 0 || chars[start-1] != "." {
+                            scannedWords.insert(word)
+                        }
                     }
                 }
             } else {
@@ -957,8 +959,12 @@ class Parser {
             if word == "__C" {
                 t = t.replaceWordDot(word, with: "")
             } else if word != "Swift" && word != defaultModule && isModuleAvailable(word) {
-                let workspaceFrameworks = ["CoreAICommon", "ODIE", "ModelCatalog", "CoreAICompiler", "UnifiedAssetFramework", "AppleIntelligenceReporting", "FeatureFlags", "PromptKit", "GenerativeFunctionsFoundation"]
-                if workspaceFrameworks.contains(word) {
+                let systemModules: Set<String> = [
+                    "Swift", "Foundation", "ObjectiveC", "os", "Dispatch", "Metal", "CoreGraphics",
+                    "CoreVideo", "CoreMedia", "IOSurface", "UniformTypeIdentifiers", "XPC", "Synchronization",
+                    "MetricKit", "Combine"
+                ]
+                if !systemModules.contains(word) {
                     referencedModules.insert(word)
                 } else {
                     t = t.replaceWordDot(word, with: "")
@@ -1217,7 +1223,13 @@ class Parser {
         ]
         for fwPath in frameworkPaths {
             let modulesPath = "\(fwPath)/Modules"
-            if FileManager.default.fileExists(atPath: modulesPath) {
+            let tbdPath = "\(fwPath)/\(name).tbd"
+            let tbdPathA = "\(fwPath)/Versions/A/\(name).tbd"
+            let tbdPathCurrent = "\(fwPath)/Versions/Current/\(name).tbd"
+            if FileManager.default.fileExists(atPath: modulesPath) ||
+               FileManager.default.fileExists(atPath: tbdPath) ||
+               FileManager.default.fileExists(atPath: tbdPathA) ||
+               FileManager.default.fileExists(atPath: tbdPathCurrent) {
                 return true
             }
         }

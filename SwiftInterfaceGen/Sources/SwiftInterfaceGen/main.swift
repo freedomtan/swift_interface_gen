@@ -52,7 +52,13 @@ struct SwiftInterfaceGen {
         let finalCode = postProcess(allCode, parser: parser)
         print("postProcess took: \(Date().timeIntervalSince(startPost))s", to: &Self.standardError)
         
-        let alignedCode = selfAlignInterface(code: finalCode, parser: parser, tbdPath: tbdPath)
+        if let stubsIndex = args.firstIndex(of: "--generate-stubs"), stubsIndex + 1 < args.count {
+            let outputDir = args[stubsIndex + 1]
+            generateStubs(outputCode: finalCode, currentModule: currentModule, outputDir: outputDir, parser: parser)
+            return
+        }
+        
+        let alignedCode = finalCode
         
         let imports = resolveImports(from: allCode, currentModule: currentModule, parser: parser)
         for imp in imports {
@@ -768,6 +774,222 @@ struct SwiftInterfaceGen {
         try? FileManager.default.removeItem(atPath: tempDylibPath)
         
         return alignedCode
+    }
+
+    class StubNode {
+        var name: String
+        var isProtocol: Bool = false
+        var genericCount: Int = 0
+        var nested: [String: StubNode] = [:]
+        
+        init(name: String) {
+            self.name = name
+        }
+        
+        func generateSwift(depth: Int) -> String {
+            let indent = String(repeating: "    ", count: depth)
+            var params = ""
+            if genericCount > 0 {
+                let placeholders = ["A", "B", "C", "D", "E", "F"]
+                let p = (0..<genericCount).map { $0 < placeholders.count ? placeholders[$0] : "A\($0)" }
+                params = "<\(p.joined(separator: ", "))>"
+            }
+            var s = "\(indent)public struct \(name)\(params): Codable, Hashable, Sendable {\n"
+            if nested.isEmpty {
+                s += "\(indent)    public init() {}\n"
+            } else {
+                for child in nested.values.sorted(by: { $0.name < $1.name }) {
+                    s += child.generateSwift(depth: depth + 1)
+                }
+            }
+            s += "\(indent)}\n"
+            return s
+        }
+    }
+
+    static func generateStubs(outputCode: String, currentModule: String, outputDir: String, parser: Parser) {
+        var externalTypes = [String: [(typeName: String, isProtocol: Bool, genericCount: Int)]]()
+        
+        let pathPattern = "\\b([A-Z][a-zA-Z0-9_$]*\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)\\b"
+        if let regex = try? NSRegularExpression(pattern: pathPattern, options: []) {
+            let nsRange = NSRange(outputCode.startIndex..<outputCode.endIndex, in: outputCode)
+            let matches = regex.matches(in: outputCode, options: [], range: nsRange)
+            for m in matches {
+                if let range = Range(m.range(at: 1), in: outputCode) {
+                    let typeName = String(outputCode[range])
+                    
+                    var isProtocol = false
+                    let startIdx = m.range(at: 1).location
+                    if startIdx >= 4 {
+                        let prevRange = NSRange(location: startIdx - 4, length: 4)
+                        if let r = Range(prevRange, in: outputCode) {
+                            let prevStr = String(outputCode[r])
+                            if prevStr == "any " || prevStr.hasSuffix("any\t") {
+                                isProtocol = true
+                            }
+                        }
+                    }
+                    
+                    var genericCount = 0
+                    let endIdx = m.range(at: 1).location + m.range(at: 1).length
+                    if endIdx < outputCode.count {
+                        var scan = endIdx
+                        let chars = Array(outputCode)
+                        while scan < chars.count && chars[scan].isWhitespace {
+                            scan += 1
+                        }
+                        if scan < chars.count && chars[scan] == "<" {
+                            var depth = 1
+                            var commas = 0
+                            scan += 1
+                            while scan < chars.count && depth > 0 {
+                                if chars[scan] == "<" { depth += 1 }
+                                else if chars[scan] == ">" { depth -= 1 }
+                                else if chars[scan] == "," && depth == 1 { commas += 1 }
+                                scan += 1
+                            }
+                            if depth == 0 {
+                                genericCount = commas + 1
+                            }
+                        }
+                    }
+                    
+                    let parts = typeName.components(separatedBy: ".")
+                    let mod = parts[0]
+                    let sdkRoot = ConfigManager.sdkRoot
+                    let isPrivateFw = FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/PrivateFrameworks/\(mod).framework") ||
+                                      FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(mod).framework")
+                    if isPrivateFw && mod != currentModule {
+                        externalTypes[mod, default: []].append((typeName: typeName, isProtocol: isProtocol, genericCount: genericCount))
+                    }
+                }
+            }
+        }
+        
+        var protocolAssociatedTypes = [String: Set<String>]()
+        
+        let declPattern = "(class|struct|enum|protocol)\\s+([a-zA-Z0-9_$]+)\\s*(?:<[^>]+>)?\\s*:\\s*([^{]+)"
+        if let regex = try? NSRegularExpression(pattern: declPattern, options: []) {
+            let nsRange = NSRange(outputCode.startIndex..<outputCode.endIndex, in: outputCode)
+            let matches = regex.matches(in: outputCode, options: [], range: nsRange)
+            for m in matches {
+                if let kindRange = Range(m.range(at: 1), in: outputCode),
+                   let listRange = Range(m.range(at: 3), in: outputCode) {
+                    let kind = String(outputCode[kindRange])
+                    let listStr = String(outputCode[listRange])
+                    let inherits = listStr.components(separatedBy: ",")
+                    for (idx, item) in inherits.enumerated() {
+                        let cleanItem = item.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if kind == "struct" || kind == "enum" || kind == "protocol" || idx > 0 {
+                            let cleanProto = cleanItem.replacingOccurrences(of: "any ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                            protocolAssociatedTypes[cleanProto] = protocolAssociatedTypes[cleanProto] ?? Set<String>()
+                        }
+                    }
+                }
+            }
+        }
+        let wherePattern = "where\\s+([^\\{]+)"
+        if let regex = try? NSRegularExpression(pattern: wherePattern, options: []) {
+            let nsRange = NSRange(outputCode.startIndex..<outputCode.endIndex, in: outputCode)
+            let matches = regex.matches(in: outputCode, options: [], range: nsRange)
+            for m in matches {
+                if let range = Range(m.range(at: 1), in: outputCode) {
+                    let constraintsStr = String(outputCode[range])
+                    let individual = constraintsStr.components(separatedBy: ",")
+                    var typeToProtocol = [String: String]()
+                    for c in individual {
+                        let trimmed = c.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.contains(":") {
+                            let subParts = trimmed.components(separatedBy: ":")
+                            if subParts.count == 2 {
+                                let lhs = subParts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                                let rhs = subParts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                                if lhs.count <= 3 {
+                                    let cleanProto = rhs.replacingOccurrences(of: "any ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                    typeToProtocol[lhs] = cleanProto
+                                }
+                            }
+                        }
+                    }
+                    for c in individual {
+                        let trimmed = c.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.contains(".") {
+                            var clean = trimmed.replacingOccurrences(of: ":", with: " ")
+                            clean = clean.replacingOccurrences(of: "==", with: " ")
+                            let firstWord = clean.components(separatedBy: " ").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            if firstWord.contains(".") {
+                                let subParts = firstWord.components(separatedBy: ".")
+                                if subParts.count == 2 {
+                                    let lhs = subParts[0]
+                                    let rhs = subParts[1]
+                                    if let proto = typeToProtocol[lhs] {
+                                        protocolAssociatedTypes[proto, default: []].insert(rhs)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: outputDir, withIntermediateDirectories: true, attributes: nil)
+        
+        for (mod, items) in externalTypes {
+            var fileContent = "import Foundation\n\n"
+            let root = StubNode(name: mod)
+            for item in items {
+                let parts = item.typeName.components(separatedBy: ".")
+                var current = root
+                for part in parts.dropFirst() {
+                    if current.nested[part] == nil {
+                        current.nested[part] = StubNode(name: part)
+                    }
+                    current = current.nested[part]!
+                }
+                if item.isProtocol {
+                    current.isProtocol = true
+                }
+                current.genericCount = max(current.genericCount, item.genericCount)
+            }
+            
+            var topLevelProtocols = [StubNode]()
+            var topLevelTypes = [StubNode]()
+            
+            for child in root.nested.values {
+                let fullPath = "\(mod).\(child.name)"
+                if child.isProtocol || protocolAssociatedTypes[fullPath] != nil {
+                    child.isProtocol = true
+                    topLevelProtocols.append(child)
+                } else {
+                    topLevelTypes.append(child)
+                }
+            }
+            
+            for proto in topLevelProtocols.sorted(by: { $0.name < $1.name }) {
+                let fullPath = "\(mod).\(proto.name)"
+                fileContent += "public protocol \(proto.name) {\n"
+                if let assocTypes = protocolAssociatedTypes[fullPath] {
+                    for assoc in assocTypes.sorted() {
+                        fileContent += "    associatedtype \(assoc)\n"
+                    }
+                }
+                fileContent += "}\n\n"
+            }
+            
+            for t in topLevelTypes.sorted(by: { $0.name < $1.name }) {
+                fileContent += t.generateSwift(depth: 0) + "\n"
+            }
+            
+            let filePath = "\(outputDir)/\(mod).swift"
+            do {
+                try fileContent.write(toFile: filePath, atomically: true, encoding: .utf8)
+                print("Generated stub source for \(mod) at \(filePath)", to: &Self.standardError)
+            } catch {
+                print("Error: Could not write stub file to \(filePath)", to: &Self.standardError)
+            }
+        }
     }
 
     struct StandardError: TextOutputStream {
