@@ -16,3 +16,19 @@
 - [ ] **Associated Type & Protocol Requirement Reconstructor:** Extract associated types and required members from external protocols to generate more complete stub definitions, reducing compilation layout errors.
 - [ ] **Cross-SDK Recompilation Support:** Extend the SDK search paths and target compilation commands to support compiling mock private frameworks for iOS, iPadOS, watchOS, and tvOS simulators.
 - [ ] **Optimized Swift ABI Nominal Type Classification:** Enhance the nominal type lookup logic to better classify enums, classes, and protocols, especially in obscure generic constraints.
+
+## Hardcoded Code Cleanup Candidates
+
+The following hardcoded code blocks should be removed and replaced with dynamic, generic solutions:
+
+1. **Target-Specific Fixups in `applyTypeFixups()` ([Parser.swift:1322-1369](file:///Users/freedom/work/swift_interface_gen/SwiftInterfaceGen/Sources/SwiftInterfaceGen/Parser.swift#L1322-L1369)):**
+   - *Issue:* Hardcodes AST layout fixups (like required properties `id`, `cost`, `inferenceProviders`, etc.) specifically for `ModelCatalog` classes like `VisionModelBase`, `VoicesOverridesBase`, and `XPCServiceClientConnection`.
+   - *Fix:* Replace this with a generic **Associated Type & Protocol Requirement Reconstructor** that dynamically resolves conformances, looks up the protocol's signature requirements, and synthesizes missing members.
+
+2. **Hardcoded postProcess Extension Append ([main.swift:543-549](file:///Users/freedom/work/swift_interface_gen/SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift#L543-L549)):**
+   - *Issue:* Statically appends a concrete protocol extension `extension GenericA: AssetMetadata, AssetContents` when `defaultModule == "ModelCatalog"`.
+   - *Fix:* Dynamically detect conformances on generic placeholders and automatically output their implementations based on the protocol requirements.
+
+3. **Condition-Based Import Resolution ([main.swift:74-106](file:///Users/freedom/work/swift_interface_gen/SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift#L74-L106)):**
+   - *Issue:* Hardcodes module name additions based on simple substring occurrences in the generated source (e.g. `if code.contains("MTL") { imports.insert("Metal") }`).
+   - *Fix:* Resolve namespace mappings by inspecting the type namespaces from symbols or matching types against known API catalogs.
