@@ -1338,6 +1338,25 @@ class Parser {
                 inheritProtocolMembers(node: type)
             }
         }
+
+        // Automatically set OptionSet conforming types to struct
+        func fixOptionSets(node: TypeNode) {
+            let isOptionSet = node.conformances.contains { conf in
+                let clean = conf.trimmingCharacters(in: .whitespaces)
+                return clean == "OptionSet" || clean == "Swift.OptionSet"
+            }
+            if isOptionSet {
+                node.kind = "struct"
+            }
+            for nested in node.nestedTypes.values {
+                fixOptionSets(node: nested)
+            }
+        }
+        for module in modules.values {
+            for type in module.nestedTypes.values {
+                fixOptionSets(node: type)
+            }
+        }
     }
 
     func generateAll() -> String {
@@ -1365,7 +1384,8 @@ class Parser {
             // Additional System Types to prevent shadowing and matching issues:
             "NSNumber", "NSCoder", "Date", "DispatchQueue", "URLComponents", "UUID", "NSZone", "AnyHashable", "UTType", "Decimal", "IndexSet", "URLRequest", "URLSessionTask", "OS_dispatch_queue",
             "AsyncStream", "AsyncThrowingStream",
-            "NSCoding", "NSSecureCoding", "NSObjectProtocol"
+            "NSCoding", "NSSecureCoding", "NSObjectProtocol",
+            "OptionSet", "SetAlgebra"
         ]
 
         fputs("discoveredProtocols: \(discoveredProtocols)\n", stderr)
