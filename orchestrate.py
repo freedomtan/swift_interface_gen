@@ -81,14 +81,30 @@ def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_
     
     # 2. Compile dynamic library
     if emit_library:
+        tbd_path = locate_tbd(name)
+        install_name = extract_install_name(tbd_path) if tbd_path else None
+        
+        lib_dest_path = f"{fw_dir}/{name}"
+        symlink_needed = False
+        subpath = None
+        
+        if install_name:
+            framework_marker = f"/{name}.framework/"
+            if framework_marker in install_name:
+                subpath = install_name.split(framework_marker)[1]
+                if subpath != name:
+                    lib_dest_path = f"{fw_dir}/{subpath}"
+                    symlink_needed = True
+                    
+        if symlink_needed and subpath:
+            os.makedirs(os.path.dirname(lib_dest_path), exist_ok=True)
+            
         cmd_lib = [
-            "swiftc", "-emit-library", "-o", f"{fw_dir}/{name}",
+            "swiftc", "-emit-library", "-o", lib_dest_path,
             swift_source, "-enable-library-evolution", "-module-name", name,
             "-F", "LocalFrameworks", "-sdk", SDK_ROOT,
             "-language-mode", "5" if is_stub else "6"
         ]
-        tbd_path = locate_tbd(name)
-        install_name = extract_install_name(tbd_path) if tbd_path else None
         if install_name:
             cmd_lib.extend(["-Xlinker", "-install_name", "-Xlinker", install_name])
             
@@ -110,6 +126,15 @@ def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_
                 
         print("Running:", " ".join(cmd_lib))
         subprocess.check_call(cmd_lib)
+        
+        if symlink_needed and subpath:
+            symlink_path = f"{fw_dir}/{name}"
+            if os.path.exists(symlink_path) or os.path.islink(symlink_path):
+                if os.path.isdir(symlink_path) and not os.path.islink(symlink_path):
+                    shutil.rmtree(symlink_path)
+                else:
+                    os.remove(symlink_path)
+            os.symlink(subpath, symlink_path)
 
 built = set()
 building = set()
