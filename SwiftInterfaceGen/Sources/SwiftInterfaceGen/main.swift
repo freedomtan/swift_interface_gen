@@ -459,7 +459,8 @@ struct SwiftInterfaceGen {
         c = c.replacingOccurrences(of: "___FOUNDATION___", with: "Foundation.")
         
         // Strip Swift. from types unless there is a collision
-        let standardShadowedTypes = ["Float", "Double", "Int", "String", "Bool"].filter { parser.discoveredConcreteTypes.contains($0) }
+        var standardShadowedTypes = ["Float", "Double", "Int", "String", "Bool"].filter { parser.discoveredConcreteTypes.contains($0) }
+        standardShadowedTypes.append(contentsOf: ["Decoder", "Encoder"])
         for type in standardShadowedTypes {
             c = c.replacingOccurrences(of: "Swift.\(type)", with: "___SWIFT_SHIELDED_\(type)___")
         }
@@ -959,7 +960,9 @@ struct SwiftInterfaceGen {
             
             for child in root.nested.values {
                 let fullPath = "\(mod).\(child.name)"
-                if child.isProtocol || protocolAssociatedTypes[fullPath] != nil {
+                if child.isProtocol || protocolAssociatedTypes[fullPath] != nil ||
+                   child.name == "Visitor" || child.name == "Decoder" || child.name == "Encoder" ||
+                   child.name == "Message" || child.name == "Enum" {
                     child.isProtocol = true
                     topLevelProtocols.append(child)
                 } else {

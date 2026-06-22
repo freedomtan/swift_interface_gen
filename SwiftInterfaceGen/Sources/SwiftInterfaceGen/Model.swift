@@ -259,12 +259,6 @@ class TypeNode {
         var hasCases = false
         for member in members.values {
             if case .enumCase(_, _, _) = member { hasCases = true; break }
-            if case .property(_, let t, _, let isStatic) = member {
-                if isEnum && isStatic && (t == self.name || t.hasSuffix("." + self.name)) {
-                    hasCases = true
-                    break
-                }
-            }
         }
 
         if isEnum && hasCases, let raw = rawType {
@@ -565,9 +559,7 @@ class TypeNode {
                 
                 if isProtocol { lines.append("\(nextIndent)\(cleanedSig)") }
                 else if isEnum {
-                    if cleanedSig.starts(with: "init(from:") {
-                        lines.append("\(nextIndent)public \(cleanedSig) { fatalError() }")
-                    }
+                    lines.append("\(nextIndent)public \(cleanedSig) { fatalError() }")
                 }
                 else {
                     // For classes, ensure the init body is non-empty to force symbol emission.
@@ -584,11 +576,6 @@ class TypeNode {
                 
                 if n == "allCases" && isEnum { continue }
                 if n == "rawValue" && isEnum { continue }
-                
-                if isEnum && isStatic && (t == self.name || t.hasSuffix("." + self.name)) {
-                    lines.append("\(nextIndent)case \(escapeKeyword(n))")
-                    continue
-                }
                 
                 var cleanT = t
                 // Strip the parent's fully qualified prefix from any nested types
@@ -614,7 +601,7 @@ class TypeNode {
                 let staticMod = isStatic ? "static " : ""
                 let finalMod = (!isStatic && self.kind == "class" && self.finalMembers.contains(n)) ? "final " : ""
                 if n == "subscript" || n == "`subscript`" {
-                    lines.append(renderSubscript(cleanT: cleanT, isProtocol: isProtocol, isReadOnly: isReadOnly, staticMod: staticMod, finalMod: finalMod, overrideMod: overrideMod, nextIndent: nextIndent))
+                    lines.append(renderSubscript(cleanT: cleanT, isProtocol: isProtocol, isReadOnly: isReadOnly, staticMod: staticMod, finalMod: finalMod, overrideMod: overrideMod, nextIndent: nextIndent, inScope: inScope))
                 } else if isProtocol {
                     let suffix = isReadOnly ? "{ get }" : "{ get set }"
                     lines.append("\(nextIndent)\(staticMod)var \(n): \(cleanT) \(suffix)")
@@ -657,9 +644,15 @@ class TypeNode {
                 cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith)
                 cleanedSig = cleanedSig.replaceWordWithoutGeneric(self.name, with: selfReplaceWith)
                 
+                var shouldReplaceA = true
+                if cleanedSig.hasGenericPlaceholderInBrackets(p: "A") || cleanedSig.hasGenericPlaceholderInBrackets(p: "A1") {
+                    shouldReplaceA = false
+                }
                 if isProtocol {
                     cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
-                    cleanedSig = cleanedSig.replaceWord("A", with: "Self")
+                    if shouldReplaceA {
+                        cleanedSig = cleanedSig.replaceWord("A", with: "Self")
+                    }
                     cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
                     
                     // Remove "A" and "Self" from the method generic parameter list (it represents Self)
@@ -671,7 +664,11 @@ class TypeNode {
                             if let closeIdx = cleanedSig.firstIndex(of: ">"), openIdx < closeIdx {
                                 let inside = String(cleanedSig[cleanedSig.index(after: openIdx)..<closeIdx])
                                 let parts = inside.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-                                let filtered = parts.filter { $0 != "A" && $0 != "Self" }
+                                let filtered = parts.filter { 
+                                    if $0 == "Self" { return false }
+                                    if $0 == "A" && shouldReplaceA { return false }
+                                    return true
+                                }
                                 if filtered.isEmpty {
                                     cleanedSig = String(cleanedSig[..<openIdx]) + String(cleanedSig[cleanedSig.index(after: closeIdx)...])
                                 } else {
@@ -680,8 +677,6 @@ class TypeNode {
                             }
                         }
                     }
-                } else {
-                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: inScope)
                 }
                 // Extract method-level generic params (e.g. <A> in withLock<A>) and add to local scope
                 // so cleanScope doesn't erase them to Any.
@@ -709,6 +704,9 @@ class TypeNode {
                     }
                 }
                 let effectiveScope = inScope.union(methodGenericInScope)
+                if !isProtocol {
+                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: effectiveScope)
+                }
                 cleanedSig = {
                     var res = cleanedSig
                     let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
@@ -727,7 +725,7 @@ class TypeNode {
                 let genericPlaceholders = ["A", "B", "C", "D"]
                 var paramsToRemoveFromBrackets = [String]()
                 for p in genericPlaceholders {
-                    let variations = [p, "\(p)1", "\(p)2"]
+                    let variations = [p, "\(p)1", "\(p)2", "\(p)11", "\(p)21", "\(p)31"]
                     for v in variations {
                         if cleanedSig.hasGenericPlaceholderInBrackets(p: v) {
                             if inScope.contains(v) {
@@ -852,13 +850,6 @@ class TypeNode {
                 if isProtocol { 
                     lines.append("\(nextIndent)\(lifetimeAttr)\(staticMod)\(funcModifier)func \(cleanedSig)") 
                 } else { 
-                    if self.kind == "class" {
-                        if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
-                            let retPart = String(cleanedSig[arrowRange.upperBound...])
-                            let updatedRet = retPart.replaceWord(self.name, with: "Self", allowFollowedByDot: false)
-                            cleanedSig = String(cleanedSig[..<arrowRange.upperBound]) + updatedRet
-                        }
-                    }
                     var returnType = "Void"
                     if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
                         returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
@@ -895,10 +886,10 @@ class TypeNode {
 
             if (hasConformance("Decodable") || hasConformance("Codable")) && !hasInitFrom {
                 let requiredMod = (kind == "class") ? "required " : ""
-                lines.append("\(nextIndent)\(requiredMod)public init(from decoder: any Decoder) throws { fatalError() }")
+                lines.append("\(nextIndent)\(requiredMod)public init(from decoder: any Swift.Decoder) throws { fatalError() }")
             }
             if (hasConformance("Encodable") || hasConformance("Codable")) && !hasEncodeTo {
-                lines.append("\(nextIndent)public func encode(to encoder: Encoder) throws { fatalError() }")
+                lines.append("\(nextIndent)public func encode(to encoder: Swift.Encoder) throws { fatalError() }")
             }
             if hasConformance("Hashable") && !hasHashInto {
                 lines.append("\(nextIndent)public func hash(into hasher: inout Hasher) { fatalError() }")
@@ -1129,23 +1120,94 @@ class TypeNode {
                     cleanT = extCleanScope(cleanT)
                     
                     let staticMod = isStatic ? "static " : ""
-                    let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
-                    let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
-                    let hasLifetime = isReadOnly && (cleanT.contains("Span") || cleanT.contains("RawSpan") || cleanT.contains("MutableSpan"))
-                    let getPrefix = hasLifetime ? "@_lifetime(borrow self) get" : "get"
-                    let suffix = isReadOnly ? "{ \(getPrefix) \(getter) }" : "{ \(getPrefix) \(getter) set {} }"
-                    extLines.append("\(extNextIndent)public \(staticMod)var \(n): \(cleanT) \(suffix)")
+                    if n == "subscript" || n == "`subscript`" {
+                        extLines.append(renderSubscript(cleanT: cleanT, isProtocol: isProtocol, isReadOnly: isReadOnly, staticMod: staticMod, finalMod: "", overrideMod: "", nextIndent: extNextIndent, inScope: extInScope))
+                    } else {
+                        let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
+                        let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
+                        let hasLifetime = isReadOnly && (cleanT.contains("Span") || cleanT.contains("RawSpan") || cleanT.contains("MutableSpan"))
+                        let getPrefix = hasLifetime ? "@_lifetime(borrow self) get" : "get"
+                        let suffix = isReadOnly ? "{ \(getPrefix) \(getter) }" : "{ \(getPrefix) \(getter) set {} }"
+                        extLines.append("\(extNextIndent)public \(staticMod)var \(n): \(cleanT) \(suffix)")
+                    }
                 case .method(let name, let sig, let isStatic):
                     var cleanedSig = sig
                     cleanedSig = injectDefaultArguments(signature: cleanedSig, methodName: name, isStatic: isStatic, parser: parser)
-                    if isProtocol {
-                        cleanedSig = cleanedSig.replaceWord("A", with: "Self")
-                        cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
-                        cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
-                    } else {
-                        cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: extInScope)
+                    var shouldReplaceA = true
+                    if cleanedSig.hasGenericPlaceholderInBrackets(p: "A") || cleanedSig.hasGenericPlaceholderInBrackets(p: "A1") {
+                        shouldReplaceA = false
                     }
-                    cleanedSig = extCleanScope(cleanedSig)
+                    if isProtocol {
+                        cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
+                        if shouldReplaceA {
+                            cleanedSig = cleanedSig.replaceWord("A", with: "Self")
+                        }
+                        cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
+                        
+                        // Remove "A" and "Self" from the method generic parameter list (it represents Self)
+                        if let openIdx = cleanedSig.firstIndex(of: "<"),
+                           let parenIdx = cleanedSig.firstIndex(of: "("),
+                           openIdx < parenIdx {
+                            let methodName = String(cleanedSig[..<parenIdx]).trimmingCharacters(in: .whitespaces)
+                            if methodName.contains("<") {
+                                if let closeIdx = cleanedSig.firstIndex(of: ">"), openIdx < closeIdx {
+                                    let inside = String(cleanedSig[cleanedSig.index(after: openIdx)..<closeIdx])
+                                    let parts = inside.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                                    let filtered = parts.filter { 
+                                        if $0 == "Self" { return false }
+                                        if $0 == "A" && shouldReplaceA { return false }
+                                        return true
+                                    }
+                                    if filtered.isEmpty {
+                                        cleanedSig = String(cleanedSig[..<openIdx]) + String(cleanedSig[cleanedSig.index(after: closeIdx)...])
+                                    } else {
+                                        cleanedSig = String(cleanedSig[..<openIdx]) + "<\(filtered.joined(separator: ", "))>" + String(cleanedSig[cleanedSig.index(after: closeIdx)...])
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    var methodGenericInScope = Set<String>()
+                    if let openAngle = cleanedSig.firstIndex(of: "<"),
+                       let openParen = cleanedSig.firstIndex(of: "("),
+                       openAngle < openParen {
+                        var depth = 0
+                        var closeAngle: String.Index? = nil
+                        var i = openAngle
+                        while i < openParen {
+                            if cleanedSig[i] == "<" { depth += 1 }
+                            else if cleanedSig[i] == ">" {
+                                depth -= 1
+                                if depth == 0 { closeAngle = i; break }
+                            }
+                            i = cleanedSig.index(after: i)
+                        }
+                        if let ca = closeAngle {
+                            let inside = String(cleanedSig[cleanedSig.index(after: openAngle)..<ca])
+                            for param in inside.components(separatedBy: ",") {
+                                let p = param.trimmingCharacters(in: .whitespaces)
+                                if !p.isEmpty { methodGenericInScope.insert(p) }
+                            }
+                        }
+                    }
+                    let effectiveScope = extInScope.union(methodGenericInScope)
+                    
+                    if !isProtocol {
+                        cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: effectiveScope)
+                    }
+                    
+                    let methodCleanScope = { (s: String) -> String in
+                        var res = s
+                        let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                        for p in placeholders {
+                            if !effectiveScope.contains(p) {
+                                res = res.replaceWord(p, with: "Any")
+                            }
+                        }
+                        return res
+                    }
+                    cleanedSig = methodCleanScope(cleanedSig)
                     
                     let staticMod = isStatic ? "static " : ""
                     var extLifetimeAttr = ""
@@ -1265,7 +1327,7 @@ class TypeNode {
         return (left, right)
     }
 
-    private func renderSubscript(cleanT: String, isProtocol: Bool, isReadOnly: Bool, staticMod: String, finalMod: String, overrideMod: String, nextIndent: String) -> String {
+    private func renderSubscript(cleanT: String, isProtocol: Bool, isReadOnly: Bool, staticMod: String, finalMod: String, overrideMod: String, nextIndent: String, inScope: Set<String>) -> String {
         var params = cleanT
         var retType = "Any"
         var genericPart = ""
@@ -1282,6 +1344,68 @@ class TypeNode {
             }
             
             params = Parser.fixUnnamedParameters(paramsPart, isSubscript: true)
+        }
+        
+        if !genericPart.isEmpty {
+            var cleanedSig = genericPart + params + " -> " + retType
+            
+            let genericPlaceholders = ["A", "B", "C", "D"]
+            var paramsToRemoveFromBrackets = [String]()
+            for p in genericPlaceholders {
+                let variations = [p, "\(p)1", "\(p)2", "\(p)11", "\(p)21", "\(p)31"]
+                for v in variations {
+                    if cleanedSig.hasGenericPlaceholderInBrackets(p: v) {
+                        if inScope.contains(v) {
+                            paramsToRemoveFromBrackets.append(v)
+                        } else {
+                            cleanedSig = cleanedSig.replacingOccurrences(of: "<\(v)>", with: "<Generic\(p)>")
+                            cleanedSig = cleanedSig.replacingOccurrences(of: "<\(v),", with: "<Generic\(p),")
+                            cleanedSig = cleanedSig.replacingOccurrences(of: ", \(v)>", with: ", Generic\(p)>")
+                            cleanedSig = cleanedSig.replacingOccurrences(of: ", \(v),", with: ", Generic\(p),")
+                            cleanedSig = cleanedSig.replaceWord(v, with: "Generic\(p)")
+                        }
+                    }
+                }
+            }
+            
+            for p in paramsToRemoveFromBrackets {
+                if let openBracket = cleanedSig.firstIndex(of: "<"),
+                   let closeBracket = cleanedSig.firstIndex(of: ">"),
+                   openBracket < closeBracket {
+                    let prefix = cleanedSig[..<openBracket]
+                    var list = String(cleanedSig[cleanedSig.index(after: openBracket)..<closeBracket])
+                    let suffix = cleanedSig[closeBracket...]
+                    
+                    list = list.replaceWord(p, with: "")
+                    list = list.replacingOccurrences(of: ",,", with: ",")
+                    list = list.trimmingCharacters(in: CharacterSet(charactersIn: ", "))
+                    
+                    if list.isEmpty {
+                        cleanedSig = String(prefix) + String(suffix.dropFirst())
+                    } else {
+                        cleanedSig = String(prefix) + "<\(list)>" + String(suffix.dropFirst())
+                    }
+                }
+            }
+            cleanedSig = cleanedSig.replacingOccurrences(of: "<>", with: "")
+            
+            params = cleanedSig
+            genericPart = ""
+            retType = "Any"
+            if let split = splitFunctionType(cleanedSig) {
+                var paramsPart = split.params
+                retType = split.ret
+                if paramsPart.hasPrefix("<") {
+                    if let closeAngleIdx = paramsPart.firstIndex(of: ">") {
+                        genericPart = String(paramsPart[..<paramsPart.index(after: closeAngleIdx)]).trimmingCharacters(in: .whitespaces)
+                        params = String(paramsPart[paramsPart.index(after: closeAngleIdx)...]).trimmingCharacters(in: .whitespaces)
+                    } else {
+                        params = paramsPart
+                    }
+                } else {
+                    params = paramsPart
+                }
+            }
         }
         
         if isProtocol {

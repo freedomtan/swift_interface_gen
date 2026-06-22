@@ -30,7 +30,7 @@ class Parser {
         "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
         "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
         "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
-        "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Identifiable",
+        "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Identifiable", "BitwiseCopyable", "Copyable", "Escapable",
         "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
         "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
         "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
@@ -225,6 +225,14 @@ class Parser {
             }
         }
         return result
+    }
+
+    func parentGenericCount(typeName: String) -> Int {
+        let clean = cleanType(typeName)
+        let fullPath1 = defaultModule + "." + clean
+        if let count = discoveredGenerics[fullPath1] { return count }
+        if let count = discoveredGenerics[clean] { return count }
+        return 0
     }
 
     func parse(mangled: String, demangled: String, currentModule: String) {
@@ -423,7 +431,6 @@ class Parser {
         }
         
         if d_orig.contains("deinit") || 
-           (d_orig.contains(" where ") && !d_orig.contains("(extension in ")) ||
            d_orig.contains("initializeBufferWithCopy") ||
            d_orig.contains("async function pointer") {
             return
@@ -514,7 +521,7 @@ class Parser {
         } else if d.contains("enum case for ") {
             d = d.replacingOccurrences(of: "enum case for ", with: "")
             if let openParen = d.firstIndex(of: "(") {
-                let fullPath = String(d[..<openParen]).trimmingCharacters(in: .whitespaces)
+                let fullPath = String(d[..<openParen]).trimmingCharacters(in: .whitespaces).stripGenericAngles()
                 let (typeName, caseName) = splitPath(fullPath)
                 if !typeName.isEmpty && !caseName.isEmpty {
                     let node = findOrCreateType(name: cleanType(typeName))
@@ -624,39 +631,109 @@ class Parser {
                 
                 var methodGenericsPart = ""
                 var methodWhereClause = ""
+                var signatureRaw = String(cleanD[openParenIndex...])
                 if let openAngleIndex = fullMemberPath.firstIndex(of: "<") {
                     let genericPart = String(fullMemberPath[openAngleIndex...])
                     if genericPart.contains(">") {
                         let typePath = String(fullMemberPath[..<openAngleIndex])
                         
-                        var cleanGenericPart = genericPart
-                        let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
-                        for p in placeholders {
-                            cleanGenericPart = cleanGenericPart.replaceWord(p, with: "\(p)1", allowPrecededByDot: false)
-                        }
-                        cleanGenericPart = cleanGenericPart.replacingOccurrences(of: "Swift.Error", with: "Error")
+                        let tempTypePath = typePath
+                        let (tempTypeName, _) = splitPath(tempTypePath)
+                        let pCount = parentGenericCount(typeName: tempTypeName)
                         
-                        // Move any `where` clause from inside <...> to after function signature.
-                        // Swift 6 requires: func foo<A, B>(...) where B: Error  (NOT <A, B where B: Error>)
+                        var cleanGenericPart = genericPart.replacingOccurrences(of: "Swift.Error", with: "Error")
+                        
                         if let whereRange = cleanGenericPart.range(of: " where ") {
                             let beforeWhere = String(cleanGenericPart[..<whereRange.lowerBound])
                             let afterWhere = String(cleanGenericPart[whereRange.upperBound...])
-                            // afterWhere may end with `>` — strip it for clause body
                             let clauseBody = afterWhere.hasSuffix(">") ? String(afterWhere.dropLast()) : afterWhere
                             methodWhereClause = " where " + clauseBody
                             cleanGenericPart = beforeWhere + ">"
                         }
                         
+                        let trimmedBefore = cleanGenericPart.trimmingCharacters(in: CharacterSet(charactersIn: "<> "))
+                        var existingParams = trimmedBefore.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                        
+                        let extractPlaceholders: (String) -> Set<String> = { s in
+                            var words = Set<String>()
+                            var current = ""
+                            for char in s {
+                                if char.isLetter || char.isNumber {
+                                    current.append(char)
+                                } else {
+                                    if !current.isEmpty {
+                                        words.insert(current)
+                                        current = ""
+                                    }
+                                }
+                            }
+                            if !current.isEmpty {
+                                words.insert(current)
+                            }
+                            
+                            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                            var result = Set<String>()
+                            for word in words {
+                                if let firstChar = word.first, placeholders.contains(String(firstChar)) {
+                                    let suffix = word.dropFirst()
+                                    if suffix.allSatisfy({ $0.isNumber }) {
+                                        result.insert(word)
+                                    }
+                                }
+                            }
+                            return result
+                        }
+                        
+                        let getDepth: (String) -> Int = { placeholder in
+                            let suffix = placeholder.dropFirst()
+                            if suffix.isEmpty { return 0 }
+                            if let depth = Int(suffix) { return depth }
+                            return 0
+                        }
+                        
+                        if pCount == 0 {
+                            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                            for p in placeholders {
+                                let target = "\(p)1"
+                                signatureRaw = signatureRaw.replaceWord(target, with: p, allowPrecededByDot: false)
+                                methodWhereClause = methodWhereClause.replaceWord(target, with: p, allowPrecededByDot: false)
+                                for idx in 0..<existingParams.count {
+                                    if existingParams[idx] == target {
+                                        existingParams[idx] = p
+                                    }
+                                }
+                            }
+                            var uniqueParams = [String]()
+                            for p in existingParams {
+                                if !uniqueParams.contains(p) {
+                                    uniqueParams.append(p)
+                                }
+                            }
+                            existingParams = uniqueParams
+                        } else {
+                            var allPlaceholders = extractPlaceholders(methodWhereClause)
+                            allPlaceholders.formUnion(extractPlaceholders(signatureRaw))
+                            for p in existingParams {
+                                allPlaceholders.insert(p)
+                            }
+                            
+                            var methodOnlyParams = [String]()
+                            for p in allPlaceholders.sorted() {
+                                if getDepth(p) >= pCount {
+                                    methodOnlyParams.append(p)
+                                }
+                            }
+                            existingParams = methodOnlyParams
+                        }
+                        
+                        if !existingParams.isEmpty {
+                            cleanGenericPart = "<" + existingParams.joined(separator: ", ") + ">"
+                        } else {
+                            cleanGenericPart = ""
+                        }
+                        
                         methodGenericsPart = cleanGenericPart
                         fullMemberPath = typePath
-                    }
-                }
-                
-                var signatureRaw = String(cleanD[openParenIndex...])
-                if !methodGenericsPart.isEmpty {
-                    let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
-                    for p in placeholders {
-                        signatureRaw = signatureRaw.replaceWord(p, with: "\(p)1", allowPrecededByDot: false)
                     }
                 }
                 let (typeName, memberNameRaw) = splitPath(fullMemberPath)
@@ -752,7 +829,109 @@ class Parser {
             let (typeName, memberName) = splitPath(fullMemberPath)
             let parentName = typeName.components(separatedBy: ".").last!
             let isSubscript = memberName == "subscript" || memberName == "`subscript`"
-            let type = simplifyType(parts[1], parentName: parentName, isMethodSignature: isSubscript)
+            var typeVal = parts[1]
+            if isSubscript {
+                if typeVal.hasPrefix("<") {
+                    let pCount = parentGenericCount(typeName: typeName)
+                    if let closeAngleIndex = typeVal.firstIndex(of: ">") {
+                        var genericPart = String(typeVal[..<typeVal.index(after: closeAngleIndex)])
+                        var signatureRaw = String(typeVal[typeVal.index(after: closeAngleIndex)...])
+                        
+                        var methodWhereClause = ""
+                        if let whereRange = genericPart.range(of: " where ") {
+                            let beforeWhere = String(genericPart[..<whereRange.lowerBound])
+                            let afterWhere = String(genericPart[whereRange.upperBound...])
+                            let clauseBody = afterWhere.hasSuffix(">") ? String(afterWhere.dropLast()) : afterWhere
+                            methodWhereClause = " where " + clauseBody
+                            genericPart = beforeWhere + ">"
+                        }
+                        
+                        let trimmedBefore = genericPart.trimmingCharacters(in: CharacterSet(charactersIn: "<> "))
+                        var existingParams = trimmedBefore.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                        
+                        let extractPlaceholders: (String) -> Set<String> = { s in
+                            var words = Set<String>()
+                            var current = ""
+                            for char in s {
+                                if char.isLetter || char.isNumber {
+                                    current.append(char)
+                                } else {
+                                    if !current.isEmpty {
+                                        words.insert(current)
+                                        current = ""
+                                    }
+                                }
+                            }
+                            if !current.isEmpty {
+                                words.insert(current)
+                            }
+                            
+                            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                            var result = Set<String>()
+                            for word in words {
+                                if let firstChar = word.first, placeholders.contains(String(firstChar)) {
+                                    let suffix = word.dropFirst()
+                                    if suffix.allSatisfy({ $0.isNumber }) {
+                                        result.insert(word)
+                                    }
+                                }
+                            }
+                            return result
+                        }
+                        
+                        let getDepth: (String) -> Int = { placeholder in
+                            let suffix = placeholder.dropFirst()
+                            if suffix.isEmpty { return 0 }
+                            if let depth = Int(suffix) { return depth }
+                            return 0
+                        }
+                        
+                        if pCount == 0 {
+                            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                            for p in placeholders {
+                                let target = "\(p)1"
+                                signatureRaw = signatureRaw.replaceWord(target, with: p, allowPrecededByDot: false)
+                                methodWhereClause = methodWhereClause.replaceWord(target, with: p, allowPrecededByDot: false)
+                                for idx in 0..<existingParams.count {
+                                    if existingParams[idx] == target {
+                                        existingParams[idx] = p
+                                    }
+                                }
+                            }
+                            var uniqueParams = [String]()
+                            for p in existingParams {
+                                if !uniqueParams.contains(p) {
+                                    uniqueParams.append(p)
+                                }
+                            }
+                            existingParams = uniqueParams
+                        } else {
+                            var allPlaceholders = extractPlaceholders(methodWhereClause)
+                            allPlaceholders.formUnion(extractPlaceholders(signatureRaw))
+                            for p in existingParams {
+                                allPlaceholders.insert(p)
+                            }
+                            
+                            var methodOnlyParams = [String]()
+                            for p in allPlaceholders.sorted() {
+                                if getDepth(p) >= pCount {
+                                    methodOnlyParams.append(p)
+                                }
+                            }
+                            existingParams = methodOnlyParams
+                        }
+                        
+                        if !existingParams.isEmpty {
+                            genericPart = "<" + existingParams.joined(separator: ", ") + ">"
+                        } else {
+                            genericPart = ""
+                        }
+                        
+                        typeVal = genericPart + signatureRaw + methodWhereClause
+                    }
+                }
+            }
+            let type = simplifyType(typeVal, parentName: parentName, isMethodSignature: isSubscript)
             
             if !typeName.isEmpty && !memberName.isEmpty {
                 let node = findOrCreateType(name: cleanType(typeName))
@@ -891,6 +1070,8 @@ class Parser {
 
     func simplifyType(_ type: String, parentName: String? = nil, isMethodSignature: Bool = false) -> String {
         var t = type.replacingOccurrences(of: "CVBufferRef", with: "CVBuffer")
+        t = t.replaceWord("Decoder", with: "Swift.Decoder", allowPrecededByDot: false)
+        t = t.replaceWord("Encoder", with: "Swift.Encoder", allowPrecededByDot: false)
         t = t.replacingOccurrences(of: "any (Swift\\.)?AsyncSequence<[^>]+>", with: "any AsyncSequence", options: .regularExpression)
         t = t.replacingOccurrences(of: "\\(extension in [^)]+\\):", with: "", options: .regularExpression)
         t = t.replacingOccurrences(of: "__C\\.UAF([a-zA-Z0-9_]+)", with: "UnifiedAssetFramework.UAF$1", options: .regularExpression)
@@ -1520,8 +1701,10 @@ class Parser {
         var definedTypes = Set<String>()
         
         func markGenericRecursive(node: TypeNode) {
-            let fullPath1 = defaultModule + "." + node.name
-            let fullPath2 = node.name
+            let enclosing = node.getEnclosingPath()
+            let relativeName = enclosing.isEmpty ? node.name : enclosing + "." + node.name
+            let fullPath1 = defaultModule + "." + relativeName
+            let fullPath2 = relativeName
             if discoveredGenerics[fullPath1] != nil || discoveredGenerics[fullPath2] != nil {
                  if !node.name.hasPrefix("JSON") {
                       node.isGeneric = true
@@ -1825,7 +2008,7 @@ class Parser {
             } else if demangled.contains("enum case for ") {
                 let d = demangled.replacingOccurrences(of: "enum case for ", with: "")
                 if let openParen = d.firstIndex(of: "(") {
-                    let fullPath = String(d[..<openParen]).trimmingCharacters(in: .whitespaces)
+                    let fullPath = String(d[..<openParen]).trimmingCharacters(in: .whitespaces).stripGenericAngles()
                     let parts = fullPath.components(separatedBy: ".")
                     if parts.count >= 2 {
                         path = parts.dropLast().joined(separator: ".")
