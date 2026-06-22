@@ -257,4 +257,4 @@ echo "--- Codesigning ---"
 codesign --force -s - "${FRAMEWORK}_test_run"
 
 echo "--- Running Test ---"
-DYLD_FRAMEWORK_PATH=LocalFrameworks ./"${FRAMEWORK}_test_run"
+./"${FRAMEWORK}_test_run"
