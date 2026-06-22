@@ -90,6 +90,7 @@ def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_
 
 built = set()
 building = set()
+clean_after = False
 
 def build_framework(name):
     if name in built:
@@ -252,6 +253,12 @@ def build_framework(name):
     if os.path.exists(exports_file):
         os.remove(exports_file)
         
+    if clean_after:
+        tmp_stubs_dir = f"tmp_stubs_{name}"
+        if os.path.exists(tmp_stubs_dir):
+            shutil.rmtree(tmp_stubs_dir)
+            print(f"--- Cleaned up temporary stubs directory for {name} ---")
+            
     built.add(name)
     building.remove(name)
 
@@ -279,8 +286,12 @@ def compile_test(target_name, test_file):
     subprocess.check_call([f"./{test_run}"], env=env)
 
 if __name__ == "__main__":
+    if "--clean" in sys.argv:
+        clean_after = True
+        sys.argv.remove("--clean")
+        
     if len(sys.argv) < 3:
-        print("Usage: ./orchestrate.py <FrameworkName> <TestFile.swift>")
+        print("Usage: ./orchestrate.py <FrameworkName> <TestFile.swift> [--clean]")
         sys.exit(1)
         
     target = sys.argv[1]

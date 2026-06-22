@@ -540,6 +540,9 @@ extension String {
                             result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "Self.\(lastComponent)")
                             startSearch = result.index(prefixStartIdx, offsetBy: 5 + lastComponent.count, limitedBy: result.endIndex) ?? result.endIndex
                         }
+                    } else if lastComponent == "Type" {
+                        result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "\(prefix).Type")
+                        startSearch = result.index(prefixStartIdx, offsetBy: prefix.count + 5, limitedBy: result.endIndex) ?? result.endIndex
                     } else {
                         result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "Any")
                         startSearch = result.index(prefixStartIdx, offsetBy: 3, limitedBy: result.endIndex) ?? result.endIndex
@@ -1372,13 +1375,25 @@ extension String {
         var result = self
         var startSearch = result.startIndex
         while let range = result.range(of: ".View<", range: startSearch..<result.endIndex) {
+            let isTensorView: Bool
+            if range.lowerBound >= result.index(result.startIndex, offsetBy: 6) {
+                let checkRange = result.index(range.lowerBound, offsetBy: -6)..<range.lowerBound
+                isTensorView = result[checkRange] == "Tensor"
+            } else {
+                isTensorView = false
+            }
+            
             var scanIdx = range.upperBound
             while scanIdx < result.endIndex && result[scanIdx] != ">" {
                 scanIdx = result.index(after: scanIdx)
             }
             if scanIdx < result.endIndex && result[scanIdx] == ">" {
-                result.replaceSubrange(range.lowerBound...scanIdx, with: ".View")
-                startSearch = result.index(range.lowerBound, offsetBy: 5)
+                if !isTensorView {
+                    result.replaceSubrange(range.lowerBound...scanIdx, with: ".View")
+                    startSearch = result.index(range.lowerBound, offsetBy: 5)
+                } else {
+                    startSearch = result.index(after: scanIdx)
+                }
             } else {
                 break
             }
@@ -1463,6 +1478,13 @@ extension String {
         var i = 0
         while i < n {
             if chars[i] == "<" {
+                if i + 1 < n {
+                    let nextC = chars[i + 1]
+                    if nextC == " " || nextC == "=" || nextC == "<" {
+                        i += 1
+                        continue
+                    }
+                }
                 let nameEnd = i
                 var nameStart = i
                 while nameStart > 0 {
