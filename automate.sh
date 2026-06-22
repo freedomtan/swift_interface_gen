@@ -18,6 +18,24 @@ if [ -z "$FRAMEWORK" ] || [ -z "$TEST_FILE" ]; then
     exit 1
 fi
 
+get_install_name() {
+    local name=$1
+    local tbd=""
+    for dir in "/System/Library/Frameworks" "/System/Library/PrivateFrameworks" "/System/Library/SubFrameworks"; do
+        for path in "${SDK_ROOT}${dir}/${name}.framework/${name}.tbd" \
+                    "${SDK_ROOT}${dir}/${name}.framework/Versions/A/${name}.tbd" \
+                    "${SDK_ROOT}${dir}/${name}.framework/Versions/Current/${name}.tbd"; do
+            if [ -f "$path" ]; then
+                tbd="$path"
+                break 2
+            fi
+        done
+    done
+    if [ -n "$tbd" ]; then
+        grep "install-name:" "$tbd" | head -n 1 | sed -E "s/.*install-name:[[:space:]]*['\"]?([^'\"]+)['\"]?/\1/"
+    fi
+}
+
 TBD_PATH="${SDK_ROOT}${PRIVATE_FRAMEWORKS}/${FRAMEWORK}.framework/${FRAMEWORK}.tbd"
 
 if [ ! -f "$TBD_PATH" ]; then
@@ -63,10 +81,15 @@ public enum AppleIntelligenceErrorCategory: Int, Codable, Hashable, Sendable {
     case unknown
 }
 SWIFTEOF
+    INSTALL_NAME=$(get_install_name "AppleIntelligenceReporting")
+    LINK_OPTS=""
+    if [ -n "$INSTALL_NAME" ]; then
+        LINK_OPTS="-Xlinker -install_name -Xlinker $INSTALL_NAME"
+    fi
     swiftc -emit-library -o "LocalFrameworks/AppleIntelligenceReporting.framework/AppleIntelligenceReporting" \
         /tmp/_air_stub.swift -enable-library-evolution -module-name AppleIntelligenceReporting -sdk "$SDK_ROOT" -language-mode 5 \
         -emit-module-interface-path "LocalFrameworks/AppleIntelligenceReporting.framework/Modules/AppleIntelligenceReporting.swiftmodule/arm64-apple-macos.swiftinterface" \
-        -emit-module-path "LocalFrameworks/AppleIntelligenceReporting.framework/Modules/AppleIntelligenceReporting.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
+        -emit-module-path "LocalFrameworks/AppleIntelligenceReporting.framework/Modules/AppleIntelligenceReporting.swiftmodule/arm64-apple-macos.swiftmodule" $LINK_OPTS 2>/dev/null || true
 fi
 
 # UnifiedAssetFramework stub
@@ -81,10 +104,15 @@ public enum UAFSubscriptionDownloadStatus: Int, Codable, Hashable, Sendable {
     case unknown
 }
 SWIFTEOF
+    INSTALL_NAME=$(get_install_name "UnifiedAssetFramework")
+    LINK_OPTS=""
+    if [ -n "$INSTALL_NAME" ]; then
+        LINK_OPTS="-Xlinker -install_name -Xlinker $INSTALL_NAME"
+    fi
     swiftc -emit-library -o "LocalFrameworks/UnifiedAssetFramework.framework/UnifiedAssetFramework" \
         /tmp/_uaf_stub.swift -enable-library-evolution -module-name UnifiedAssetFramework -sdk "$SDK_ROOT" -language-mode 5 \
         -emit-module-interface-path "LocalFrameworks/UnifiedAssetFramework.framework/Modules/UnifiedAssetFramework.swiftmodule/arm64-apple-macos.swiftinterface" \
-        -emit-module-path "LocalFrameworks/UnifiedAssetFramework.framework/Modules/UnifiedAssetFramework.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
+        -emit-module-path "LocalFrameworks/UnifiedAssetFramework.framework/Modules/UnifiedAssetFramework.swiftmodule/arm64-apple-macos.swiftmodule" $LINK_OPTS 2>/dev/null || true
 fi
 
 # GenerativeFunctionsFoundation stub
@@ -106,10 +134,15 @@ public struct GenerationSchema: Codable, Hashable, Sendable {}
 public struct FileGenerationParameters: Codable, Hashable, Sendable {}
 public struct ImageGenerationParameters: Codable, Hashable, Sendable {}
 SWIFTEOF
+INSTALL_NAME=$(get_install_name "GenerativeFunctionsFoundation")
+LINK_OPTS=""
+if [ -n "$INSTALL_NAME" ]; then
+    LINK_OPTS="-Xlinker -install_name -Xlinker $INSTALL_NAME"
+fi
 swiftc -emit-library -o "LocalFrameworks/GenerativeFunctionsFoundation.framework/GenerativeFunctionsFoundation" \
     /tmp/_gff_stub.swift -enable-library-evolution -module-name GenerativeFunctionsFoundation -sdk "$SDK_ROOT" -language-mode 5 \
     -emit-module-interface-path "LocalFrameworks/GenerativeFunctionsFoundation.framework/Modules/GenerativeFunctionsFoundation.swiftmodule/arm64-apple-macos.swiftinterface" \
-    -emit-module-path "LocalFrameworks/GenerativeFunctionsFoundation.framework/Modules/GenerativeFunctionsFoundation.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
+    -emit-module-path "LocalFrameworks/GenerativeFunctionsFoundation.framework/Modules/GenerativeFunctionsFoundation.swiftmodule/arm64-apple-macos.swiftmodule" $LINK_OPTS 2>/dev/null || true
 
 
 # PromptKit stub
@@ -156,10 +189,15 @@ public struct WebSearchParameters: Codable, Hashable, Sendable {}
 public struct Promptkit_Wireformat_AudioFormat: Codable, Hashable, Sendable {}
 public struct Promptkit_Wireformat_Schema: Codable, Hashable, Sendable {}
 SWIFTEOF
+INSTALL_NAME=$(get_install_name "PromptKit")
+LINK_OPTS=""
+if [ -n "$INSTALL_NAME" ]; then
+    LINK_OPTS="-Xlinker -install_name -Xlinker $INSTALL_NAME"
+fi
 swiftc -emit-library -o "LocalFrameworks/PromptKit.framework/PromptKit" \
     /tmp/_promptkit_stub.swift -enable-library-evolution -module-name PromptKit -sdk "$SDK_ROOT" -language-mode 5 \
     -emit-module-interface-path "LocalFrameworks/PromptKit.framework/Modules/PromptKit.swiftmodule/arm64-apple-macos.swiftinterface" \
-    -emit-module-path "LocalFrameworks/PromptKit.framework/Modules/PromptKit.swiftmodule/arm64-apple-macos.swiftmodule" 2>/dev/null || true
+    -emit-module-path "LocalFrameworks/PromptKit.framework/Modules/PromptKit.swiftmodule/arm64-apple-macos.swiftmodule" $LINK_OPTS 2>/dev/null || true
 
 echo "--- Generating Interface for $FRAMEWORK ---"
 ./swift-interface-gen "$TBD_PATH" > "${FRAMEWORK}Interface.swift"
@@ -188,6 +226,10 @@ sed 's/ = dummyDefaultValue()//g' "${FRAMEWORK}Interface.swift" > "/tmp/${FRAMEW
 LINKER_FLAGS=""
 if [ -f "${FRAMEWORK}_exports.txt" ]; then
     LINKER_FLAGS="$LINKER_FLAGS -Xlinker -exported_symbols_list -Xlinker ${FRAMEWORK}_exports.txt"
+fi
+INSTALL_NAME=$(get_install_name "$FRAMEWORK")
+if [ -n "$INSTALL_NAME" ]; then
+    LINKER_FLAGS="$LINKER_FLAGS -Xlinker -install_name -Xlinker $INSTALL_NAME"
 fi
 
 swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \

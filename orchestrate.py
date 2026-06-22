@@ -24,8 +24,11 @@ SYSTEM_MODULES = {
 SDK_ROOT = subprocess.check_output(["xcrun", "--show-sdk-path"]).decode("utf-8").strip()
 
 def locate_tbd(name):
-    # Search in SDK PrivateFrameworks and SubFrameworks
+    # Search in SDK Frameworks, PrivateFrameworks and SubFrameworks
     paths = [
+        f"{SDK_ROOT}/System/Library/Frameworks/{name}.framework/{name}.tbd",
+        f"{SDK_ROOT}/System/Library/Frameworks/{name}.framework/Versions/A/{name}.tbd",
+        f"{SDK_ROOT}/System/Library/Frameworks/{name}.framework/Versions/Current/{name}.tbd",
         f"{SDK_ROOT}/System/Library/PrivateFrameworks/{name}.framework/{name}.tbd",
         f"{SDK_ROOT}/System/Library/PrivateFrameworks/{name}.framework/Versions/A/{name}.tbd",
         f"{SDK_ROOT}/System/Library/PrivateFrameworks/{name}.framework/Versions/Current/{name}.tbd",
@@ -36,6 +39,20 @@ def locate_tbd(name):
     for p in paths:
         if os.path.exists(p):
             return p
+    return None
+
+def extract_install_name(tbd_path):
+    if not tbd_path or not os.path.exists(tbd_path):
+        return None
+    with open(tbd_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if "install-name:" in line:
+                parts = line.split("install-name:")
+                if len(parts) > 1:
+                    val = parts[1].strip()
+                    if (val.startswith("'") and val.endswith("'")) or (val.startswith('"') and val.endswith('"')):
+                        val = val[1:-1]
+                    return val
     return None
 
 def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_library=True, use_exports=True, extra_objects=None):
@@ -70,6 +87,11 @@ def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_
             "-F", "LocalFrameworks", "-sdk", SDK_ROOT,
             "-language-mode", "5" if is_stub else "6"
         ]
+        tbd_path = locate_tbd(name)
+        install_name = extract_install_name(tbd_path) if tbd_path else None
+        if install_name:
+            cmd_lib.extend(["-Xlinker", "-install_name", "-Xlinker", install_name])
+            
         if extra_objects:
             for obj in extra_objects:
                 cmd_lib.extend(["-Xlinker", obj])
