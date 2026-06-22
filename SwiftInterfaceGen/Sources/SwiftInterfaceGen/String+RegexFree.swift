@@ -1257,26 +1257,25 @@ extension String {
                         followedByGeneric = true
                     }
                     
-                    var precededByExtension = false
+                    var precededByDefinition = false
                     var prevIdx = start - 1
                     while prevIdx >= 0 && chars[prevIdx].isWhitespace {
                         prevIdx -= 1
                     }
-                    if prevIdx >= 8 {
-                        let sub = String(chars[(prevIdx - 8)...prevIdx])
-                        if sub == "extension" {
-                            if prevIdx - 9 < 0 {
-                                precededByExtension = true
-                            } else {
-                                let beforeC = chars[prevIdx - 9]
-                                if !beforeC.isLetter && !beforeC.isNumber && beforeC != "_" && beforeC != "$" {
-                                    precededByExtension = true
-                                }
+                    if prevIdx >= 0 {
+                        var kwStart = prevIdx
+                        while kwStart >= 0 && (chars[kwStart].isLetter || chars[kwStart] == "_" || chars[kwStart] == "$") {
+                            kwStart -= 1
+                        }
+                        if kwStart < prevIdx {
+                            let kw = String(chars[(kwStart + 1)...prevIdx])
+                            if ["struct", "class", "enum", "protocol", "typealias", "extension"].contains(kw) {
+                                precededByDefinition = true
                             }
                         }
                     }
                     
-                    if !followedByGeneric && !precededByExtension {
+                    if !followedByGeneric && !precededByDefinition {
                         var count = 0
                         if let cVal = flatGenerics[word] {
                             count = cVal
