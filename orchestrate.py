@@ -10,7 +10,8 @@ TARGET_FRAMEWORKS = {
     "CoreAICompiler",
     "ModelCatalog",
     "ODIE",
-    "TokenGenerationCore"
+    "TokenGenerationCore",
+    "CoreAIDelegates"
 }
 
 # Pre-defined system modules that are part of standard SDK

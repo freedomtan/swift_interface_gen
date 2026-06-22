@@ -1381,6 +1381,7 @@ class Parser {
     }
     
     func isModuleAvailable(_ name: String) -> Bool {
+        if name == "OS" { return false }
         if ["Swift", "Foundation", "ObjectiveC"].contains(name) { return true }
         let sdkRoot = ConfigManager.sdkRoot
         
@@ -1500,6 +1501,7 @@ class Parser {
     }
 
     func applyTypeFixups() {
+
         if defaultModule == "ModelCatalog" {
             // Fix VisionModelBase
             if let node = modules["ModelCatalog"]?.nestedTypes["VisionModelBase"] {
@@ -1656,11 +1658,7 @@ class Parser {
 
         // Automatically set OptionSet conforming types to struct
         func fixOptionSets(node: TypeNode) {
-            let isOptionSet = node.conformances.contains { conf in
-                let clean = conf.trimmingCharacters(in: .whitespaces)
-                return clean == "OptionSet" || clean == "Swift.OptionSet"
-            }
-            if isOptionSet {
+            if node.hasConformance("OptionSet") || node.hasConformance("SetAlgebra") {
                 node.kind = "struct"
             }
             for nested in node.nestedTypes.values {

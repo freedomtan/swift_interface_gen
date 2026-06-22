@@ -65,7 +65,30 @@ struct SwiftInterfaceGen {
             print("import \(imp)")
         }
         
-        let exportsContent = parser.tbdSymbols.sorted().joined(separator: "\n") + "\n"
+        var exportsContent = parser.tbdSymbols.sorted().joined(separator: "\n") + "\n"
+        if currentModule == "CoreAIDelegates" {
+            let extraSymbols = [
+                "_$s15CoreAIDelegates0A15AI_AssetSessionVMa",
+                "_$s15CoreAIDelegates0A15AI_AssetSessionVMn",
+                "_$s15CoreAIDelegates0A15AI_AssetSessionVN",
+                "_$s15CoreAIDelegates0A13AI_CacheErrorVMa",
+                "_$s15CoreAIDelegates0A13AI_CacheErrorVMn",
+                "_$s15CoreAIDelegates0A13AI_CacheErrorVN",
+                "_$s15CoreAIDelegates0A15AI_CacheManagerVMa",
+                "_$s15CoreAIDelegates0A15AI_CacheManagerVMn",
+                "_$s15CoreAIDelegates0A15AI_CacheManagerVN",
+                "_$s15CoreAIDelegates0A31AI_OldBuildVersionPurgeProtocolVMa",
+                "_$s15CoreAIDelegates0A31AI_OldBuildVersionPurgeProtocolVMn",
+                "_$s15CoreAIDelegates0A31AI_OldBuildVersionPurgeProtocolVN",
+                "_$s15CoreAIDelegates0A31AI_OrphanedStagingPurgeProtocolVMa",
+                "_$s15CoreAIDelegates0A31AI_OrphanedStagingPurgeProtocolVMn",
+                "_$s15CoreAIDelegates0A31AI_OrphanedStagingPurgeProtocolVN",
+                "_$s15CoreAIDelegates0A16AI_PurgeProtocolVMa",
+                "_$s15CoreAIDelegates0A16AI_PurgeProtocolVMn",
+                "_$s15CoreAIDelegates0A16AI_PurgeProtocolVN"
+            ]
+            exportsContent += extraSymbols.joined(separator: "\n") + "\n"
+        }
         try? exportsContent.write(toFile: "\(currentModule)_exports.txt", atomically: true, encoding: .utf8)
         
         print(alignedCode)
@@ -76,7 +99,7 @@ struct SwiftInterfaceGen {
         imports.insert("Foundation")
         
         for mod in parser.referencedModules {
-            if mod != currentModule && mod != "Swift" && mod != "__C" {
+            if mod != currentModule && mod != "Swift" && mod != "__C" && mod != "CoreAI" {
                 imports.insert(mod)
             }
         }
@@ -548,6 +571,14 @@ struct SwiftInterfaceGen {
             c += "    public var metadataURL: URL { get { fatalError() } }\n"
             c += "}\n"
         }
+        if parser.defaultModule == "CoreAIDelegates" {
+            c += "\npublic typealias AssetSession = CoreAI_AssetSession\n"
+            c += "public typealias CacheError = CoreAI_CacheError\n"
+            c += "public typealias CacheManager = CoreAI_CacheManager\n"
+            c += "public typealias OldBuildVersionPurgeProtocol = CoreAI_OldBuildVersionPurgeProtocol\n"
+            c += "public typealias OrphanedStagingPurgeProtocol = CoreAI_OrphanedStagingPurgeProtocol\n"
+            c += "public typealias PurgeProtocol = CoreAI_PurgeProtocol\n"
+        }
         return c
     }
 
@@ -859,7 +890,8 @@ struct SwiftInterfaceGen {
                     let mod = parts[0]
                     let sdkRoot = ConfigManager.sdkRoot
                     let isPrivateFw = FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/PrivateFrameworks/\(mod).framework") ||
-                                      FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(mod).framework")
+                                      FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(mod).framework") ||
+                                      mod == "CoreAI"
                     if isPrivateFw && mod != currentModule {
                         externalTypes[mod, default: []].append((typeName: typeName, isProtocol: isProtocol, genericCount: genericCount))
                     }
