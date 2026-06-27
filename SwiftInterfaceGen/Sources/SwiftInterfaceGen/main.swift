@@ -36,12 +36,16 @@ struct SwiftInterfaceGen {
             let libPath = resolveLibraryPath(lib)
             if let libContent = try? String(contentsOfFile: libPath, encoding: .utf8) {
                 print("Discovered dependency: \(lib) -> \(libPath)", to: &Self.standardError)
-                let libSymbols = extractSymbols(from: libContent)
                 let libModule = (lib as NSString).lastPathComponent.replacingOccurrences(of: ".framework", with: "")
+                // ObjC classes from dependency frameworks appear as __C.ClassName in Swift.
+                // Register them under "__C" so stub generation knows not to create local stubs for them.
+                registerObjcClasses(from: libContent, parser: parser, module: "__C")
+                let libSymbols = extractSymbols(from: libContent)
                 processSymbols(libSymbols, parser: parser, module: libModule, depth: 1)
             }
         }
         
+        registerObjcClasses(from: content, parser: parser, module: currentModule)
         processSymbols(symbols, parser: parser, module: currentModule, depth: 0)
 
         let startGen = Date()
@@ -61,37 +65,61 @@ struct SwiftInterfaceGen {
         let alignedCode = finalCode
         
         let imports = resolveImports(from: allCode, currentModule: currentModule, parser: parser)
+        let reexportedModules = Set(reexportedLibraries.map { ($0 as NSString).lastPathComponent })
         for imp in imports {
-            print("import \(imp)")
+            if reexportedModules.contains(imp) {
+                print("@_exported import \(imp)")
+            } else {
+                print("import \(imp)")
+            }
         }
         
-        var exportsContent = parser.tbdSymbols.sorted().joined(separator: "\n") + "\n"
-        if currentModule == "CoreAIDelegates" {
-            let extraSymbols = [
-                "_$s15CoreAIDelegates0A15AI_AssetSessionVMa",
-                "_$s15CoreAIDelegates0A15AI_AssetSessionVMn",
-                "_$s15CoreAIDelegates0A15AI_AssetSessionVN",
-                "_$s15CoreAIDelegates0A13AI_CacheErrorVMa",
-                "_$s15CoreAIDelegates0A13AI_CacheErrorVMn",
-                "_$s15CoreAIDelegates0A13AI_CacheErrorVN",
-                "_$s15CoreAIDelegates0A15AI_CacheManagerVMa",
-                "_$s15CoreAIDelegates0A15AI_CacheManagerVMn",
-                "_$s15CoreAIDelegates0A15AI_CacheManagerVN",
-                "_$s15CoreAIDelegates0A31AI_OldBuildVersionPurgeProtocolVMa",
-                "_$s15CoreAIDelegates0A31AI_OldBuildVersionPurgeProtocolVMn",
-                "_$s15CoreAIDelegates0A31AI_OldBuildVersionPurgeProtocolVN",
-                "_$s15CoreAIDelegates0A31AI_OrphanedStagingPurgeProtocolVMa",
-                "_$s15CoreAIDelegates0A31AI_OrphanedStagingPurgeProtocolVMn",
-                "_$s15CoreAIDelegates0A31AI_OrphanedStagingPurgeProtocolVN",
-                "_$s15CoreAIDelegates0A16AI_PurgeProtocolVMa",
-                "_$s15CoreAIDelegates0A16AI_PurgeProtocolVMn",
-                "_$s15CoreAIDelegates0A16AI_PurgeProtocolVN"
-            ]
-            exportsContent += extraSymbols.joined(separator: "\n") + "\n"
+        // Filter out symbols that our mock library cannot provide:
+        // Extensions on Swift stdlib types (e.g. RawSpan, Float, Double, Int, etc.)
+        // defined in this module use mangled names starting with _$ss, _$sSf, etc.
+        // We can't define extensions on ~Escapable stdlib types or system primitive types.
+        let stdlibExtPrefixes = ["_$ss", "_$sSf", "_$sSd", "_$sSi", "_$sSu", "_$sSb",
+                                 "_$sSS", "_$sSs",  // Float/Double/Int/UInt/Bool/String/Substring
+                                 "_$sSo"]           // ObjC class extensions (So = Swift ObjC bridge)
+        let filteredExports = parser.tbdSymbols.sorted().filter { sym in
+            !stdlibExtPrefixes.contains(where: { sym.hasPrefix($0) })
         }
+
+        let exportsContent = filteredExports.joined(separator: "\n") + "\n"
         try? exportsContent.write(toFile: "\(currentModule)_exports.txt", atomically: true, encoding: .utf8)
         
         print(alignedCode)
+        
+        // Generate ObjC bridge files for any ObjC-bridged types (So-prefix extension symbols).
+        // These files allow the orchestrator to compile the ObjC runtime symbols and pass
+        // -import-objc-header so Swift can generate the correct So-mangled extension symbols.
+        if let moduleNode = parser.modules[currentModule] {
+            let bridgedTypes = moduleNode.nestedTypes.values
+                .filter { $0.isObjcBridged }
+                .sorted { $0.name < $1.name }
+            if !bridgedTypes.isEmpty {
+                var headerLines = ["#import <Foundation/Foundation.h>"]
+                var implLines = ["#import \"\(currentModule)Interface_bridge.h\""]
+                for t in bridgedTypes {
+                    let actualKind = t.kind == "unknown" ? "struct" : t.kind
+                    if actualKind == "class" {
+                        headerLines.append("@interface \(t.name) : NSObject")
+                        headerLines.append("@end")
+                        implLines.append("@implementation \(t.name)")
+                        implLines.append("@end")
+                    } else if actualKind == "enum" {
+                        headerLines.append("typedef NS_ENUM(NSInteger, \(t.name)) {")
+                        headerLines.append("    \(t.name)Unknown = 0")
+                        headerLines.append("};")
+                    }
+                }
+                let bridgeHeader = headerLines.joined(separator: "\n") + "\n"
+                let bridgeImpl   = implLines.joined(separator: "\n")   + "\n"
+                try? bridgeHeader.write(toFile: "\(currentModule)Interface_bridge.h", atomically: true, encoding: .utf8)
+                try? bridgeImpl.write(toFile:   "\(currentModule)Interface_bridge.m", atomically: true, encoding: .utf8)
+                print("Wrote ObjC bridge for \(bridgedTypes.map { $0.name })", to: &Self.standardError)
+            }
+        }
     }
 
     static func resolveImports(from code: String, currentModule: String, parser: Parser) -> [String] {
@@ -113,10 +141,19 @@ struct SwiftInterfaceGen {
         if code.contains("MLModel") { imports.insert("CoreML") }
         if code.contains("DispatchQueue") { imports.insert("Dispatch") }
         if code.contains("OS_xpc_object") { imports.insert("XPC") }
-        if code.contains("UAF") { imports.insert("UnifiedAssetFramework") }
+        if code.contains("UAF") && currentModule != "UnifiedAssetFramework" { imports.insert("UnifiedAssetFramework") }
         
         for mod in parser.discoveredNamespaces {
-            if code.contains("\(mod).") && mod != currentModule {
+            let pattern = "(?:^|[^.])\\b\(NSRegularExpression.escapedPattern(for: mod))\\."
+            let hasMatch: Bool
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                let nsRange = NSRange(code.startIndex..<code.endIndex, in: code)
+                hasMatch = regex.firstMatch(in: code, options: [], range: nsRange) != nil
+            } else {
+                hasMatch = code.contains("\(mod).")
+            }
+            
+            if hasMatch && mod != currentModule {
                 if mod == "__C" { continue }
                 let path1 = "\(ConfigManager.sdkRoot)/System/Library/PrivateFrameworks/\(mod).framework"
                 let path2 = "\(ConfigManager.sdkRoot)/System/Library/SubFrameworks/\(mod).framework"
@@ -126,6 +163,30 @@ struct SwiftInterfaceGen {
             }
         }
         
+        // Also detect pseudo-module references like `IntelligencePlatformLibrary_AppleInternal.Something`
+        // that appear as type prefixes in the code but are not real .framework bundles.
+        // These are private submodules compiled as stub frameworks by orchestrate.py.
+        let pseudoModulePattern = "\\b([A-Z][A-Za-z0-9_]+_[A-Za-z][A-Za-z0-9_]*)\\."
+        if let regex = try? NSRegularExpression(pattern: pseudoModulePattern, options: []) {
+            let nsRange = NSRange(code.startIndex..<code.endIndex, in: code)
+            let matches = regex.matches(in: code, options: [], range: nsRange)
+            for m in matches {
+                if let gr = Range(m.range(at: 1), in: code) {
+                    let modName = String(code[gr])
+                    if modName == currentModule { continue }
+                    // Check if the base (before first _) is a real private framework
+                    if let underIdx = modName.firstIndex(of: "_") {
+                        let baseMod = String(modName[modName.startIndex..<underIdx])
+                        let path1 = "\(ConfigManager.sdkRoot)/System/Library/PrivateFrameworks/\(baseMod).framework"
+                        let path2 = "\(ConfigManager.sdkRoot)/System/Library/SubFrameworks/\(baseMod).framework"
+                        if FileManager.default.fileExists(atPath: path1) || FileManager.default.fileExists(atPath: path2) {
+                            imports.insert(modName)
+                        }
+                    }
+                }
+            }
+        }
+
         return Array(imports).sorted()
     }
 
@@ -159,7 +220,7 @@ struct SwiftInterfaceGen {
         let symbolsWithClosures = demangledMap.filter { $0.demangled.contains("->") }.map { $0.mangled }
         if !symbolsWithClosures.isEmpty {
             let startExpand = Date()
-            let escapingResults = runDemangleExpand(symbols: symbolsWithClosures)
+            let escapingResults = runDemangleExpand(symbols: symbolsWithClosures, parser: parser)
             parser.symbolEscapingMap.merge(escapingResults) { (_, new) in new }
             print("Demangle --expand for \(symbolsWithClosures.count) symbols took: \(Date().timeIntervalSince(startExpand))s", to: &Self.standardError)
         }
@@ -223,6 +284,134 @@ struct SwiftInterfaceGen {
         return Array(symbols).sorted()
     }
 
+    static func extractObjcClasses(from tbd: String) -> [String] {
+        var classes = Set<String>()
+        var scanIdx = tbd.startIndex
+        while let range = tbd.range(of: "objc-classes:", range: scanIdx..<tbd.endIndex) {
+            scanIdx = range.upperBound
+            
+            // Determine if flow sequence (has '[' before next keyword or newline)
+            var tempIdx = scanIdx
+            var hasBrackets = false
+            while tempIdx < tbd.endIndex {
+                let c = tbd[tempIdx]
+                if c == "[" {
+                    hasBrackets = true
+                    break
+                }
+                if c == "\n" {
+                    // Check next non-whitespace character after newline
+                    var nextIdx = tbd.index(after: tempIdx)
+                    while nextIdx < tbd.endIndex && (tbd[nextIdx] == " " || tbd[nextIdx] == "\t") {
+                        nextIdx = tbd.index(after: nextIdx)
+                    }
+                    if nextIdx < tbd.endIndex && tbd[nextIdx] == "-" {
+                        // This is a block sequence, definitely no brackets
+                        break
+                    }
+                }
+                if c == ":" && tempIdx != scanIdx {
+                    // Hitting another colon before '['
+                    break
+                }
+                tempIdx = tbd.index(after: tempIdx)
+            }
+            
+            if hasBrackets {
+                // Flow sequence with [ ... ]
+                scanIdx = tbd.index(after: tempIdx)
+                let startOfClasses = scanIdx
+                while scanIdx < tbd.endIndex && tbd[scanIdx] != "]" {
+                    scanIdx = tbd.index(after: scanIdx)
+                }
+                if scanIdx >= tbd.endIndex { break }
+                let endOfClasses = scanIdx
+                let classListStr = String(tbd[startOfClasses..<endOfClasses])
+                let parts = classListStr.components(separatedBy: CharacterSet(charactersIn: ",\n\r\t "))
+                for part in parts {
+                    let name = part.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !name.isEmpty {
+                        classes.insert(name)
+                    }
+                }
+                scanIdx = tbd.index(after: scanIdx)
+            } else {
+                // Block sequence: read line by line until next non-indented line or line without '-'
+                var currentLineStart = scanIdx
+                while currentLineStart < tbd.endIndex {
+                    var lineEnd = currentLineStart
+                    while lineEnd < tbd.endIndex && tbd[lineEnd] != "\n" && tbd[lineEnd] != "\r" {
+                        lineEnd = tbd.index(after: lineEnd)
+                    }
+                    let line = String(tbd[currentLineStart..<lineEnd]).trimmingCharacters(in: .whitespaces)
+                    if line.isEmpty {
+                        // skip
+                    } else if line.hasPrefix("-") {
+                        let name = line.dropFirst().trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !name.isEmpty {
+                            classes.insert(name)
+                        }
+                    } else if line.contains(":") {
+                        break
+                    } else {
+                        let parts = line.components(separatedBy: CharacterSet(charactersIn: ",\t "))
+                        var foundAny = false
+                        for part in parts {
+                            let name = part.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !name.isEmpty && (name.starts(with: "UAF") || name.starts(with: "OBJC") || name.rangeOfCharacter(from: CharacterSet.letters) != nil) {
+                                classes.insert(name)
+                                foundAny = true
+                            }
+                        }
+                        if !foundAny {
+                            break
+                        }
+                    }
+                    if lineEnd >= tbd.endIndex { break }
+                    currentLineStart = tbd.index(after: lineEnd)
+                }
+                scanIdx = currentLineStart
+            }
+        }
+        return Array(classes).sorted()
+    }
+
+    static func registerObjcClasses(from content: String, parser: Parser, module: String) {
+        let objcClasses = extractObjcClasses(from: content)
+        
+        for objcClass in objcClasses {
+            if objcClass.hasPrefix("_Tt") {
+                continue
+            }
+            let node = parser.findOrCreateDiscoveredTypePath(module: module, path: [objcClass])
+            if node.kind == "unknown" {
+                parser.setKind("class", for: node)
+                node.baseClass = "NSObject"
+            }
+            node.isObjcBridged = true
+        }
+        
+        // Special case: UAFSubscriptionDownloadStatus is an ObjC enum in UnifiedAssetFramework.
+        // When UAF is the primary module, register it in the UAF module itself.
+        // When processing UAF as a dependency (module == "__C"), register it in __C so ModelCatalog
+        // won't generate a stub struct for it.
+        let uafEnumTargetModule = (module == "__C") ? "__C" : module
+        if module == "UnifiedAssetFramework" || module == "__C" {
+            let enumNode = parser.findOrCreateDiscoveredTypePath(module: uafEnumTargetModule, path: ["UAFSubscriptionDownloadStatus"])
+            if enumNode.kind == "unknown" {
+                parser.setKind("enum", for: enumNode)
+                enumNode.rawType = "Int"
+                enumNode.conformances.insert("Codable")
+                enumNode.conformances.insert("Hashable")
+                enumNode.conformances.insert("Sendable")
+                enumNode.conformances.insert("RawRepresentable")
+                enumNode.members["unknown"] = .enumCase(name: "unknown", payload: nil, hasLabel: false)
+            }
+            enumNode.isObjcBridged = true
+        }
+    }
+
+
     static func extractReexportedLibraries(from tbd: String) -> [String] {
         guard let range = tbd.range(of: "reexported-libraries:") else { return [] }
         var scanIdx = range.upperBound
@@ -266,19 +455,29 @@ struct SwiftInterfaceGen {
         let indent: Int
     }
 
-    static func runDemangleExpand(symbols: [String]) -> [String: [Int: Bool]] {
+    class TreeNodeObj {
+        let kind: String
+        let text: String?
+        var children = [TreeNodeObj]()
+        init(kind: String, text: String?) {
+            self.kind = kind
+            self.text = text
+        }
+    }
+
+    static func runDemangleExpand(symbols: [String], parser: Parser) -> [String: [Int: Bool]] {
         var allResults: [String: [Int: Bool]] = [:]
         let chunkSize = 100
         for i in stride(from: 0, to: symbols.count, by: chunkSize) {
             let end = min(i + chunkSize, symbols.count)
             let chunk = Array(symbols[i..<end])
-            let chunkResult = runDemangleExpandChunk(symbols: chunk)
+            let chunkResult = runDemangleExpandChunk(symbols: chunk, parser: parser)
             allResults.merge(chunkResult) { (_, new) in new }
         }
         return allResults
     }
 
-    static func runDemangleExpandChunk(symbols: [String]) -> [String: [Int: Bool]] {
+    static func runDemangleExpandChunk(symbols: [String], parser: Parser) -> [String: [Int: Bool]] {
         let result: [String: [Int: Bool]] = [:]
         if symbols.isEmpty { return result }
         
@@ -308,29 +507,132 @@ struct SwiftInterfaceGen {
         
         guard let output = String(data: data, encoding: .utf8) else { return result }
         
-        return parseExpandTree(output: output)
+        return parseExpandTree(output: output, parser: parser)
     }
 
-    static func parseExpandTree(output: String) -> [String: [Int: Bool]] {
+    static func buildTree(from lines: [String]) -> TreeNodeObj? {
+        var stack: [(node: TreeNodeObj, indent: Int)] = []
+        var root: TreeNodeObj? = nil
+        
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("kind=") else { continue }
+            
+            var spaces = 0
+            for char in line {
+                if char == " " { spaces += 1 } else { break }
+            }
+            
+            let parts = trimmed.components(separatedBy: ", ")
+            let kindPart = parts[0]
+            let kind = kindPart.replacingOccurrences(of: "kind=", with: "")
+            
+            var text: String? = nil
+            if parts.count > 1 {
+                let textPart = parts[1]
+                if textPart.hasPrefix("text=\"") && textPart.hasSuffix("\"") {
+                    text = String(textPart.dropFirst(6).dropLast())
+                }
+            }
+            
+            let newNode = TreeNodeObj(kind: kind, text: text)
+            if root == nil {
+                root = newNode
+            }
+            
+            while let last = stack.last, last.indent >= spaces {
+                stack.removeLast()
+            }
+            
+            if let parent = stack.last?.node {
+                parent.children.append(newNode)
+            }
+            
+            stack.append((newNode, spaces))
+        }
+        return root
+    }
+
+    static func traverseAndRegisterTypes(node: TreeNodeObj, parser: Parser) {
+        _ = resolveType(node, parser: parser)
+        for child in node.children {
+            traverseAndRegisterTypes(node: child, parser: parser)
+        }
+    }
+
+    static func resolveType(_ node: TreeNodeObj, parser: Parser) -> (module: String, path: [String], kind: String)? {
+        if node.kind == "Module" {
+            return (node.text ?? "", [], "")
+        }
+        
+        if node.kind == "Type" {
+            if let first = node.children.first {
+                return resolveType(first, parser: parser)
+            }
+            return nil
+        }
+        if node.kind == "BoundGenericEnum" || node.kind == "BoundGenericStructure" || node.kind == "BoundGenericClass" {
+            if let typeChild = node.children.first(where: { $0.kind == "Type" }) {
+                return resolveType(typeChild, parser: parser)
+            }
+            return nil
+        }
+        
+        let expectedKind: String
+        switch node.kind {
+        case "Enum": expectedKind = "enum"
+        case "Structure": expectedKind = "struct"
+        case "Class": expectedKind = "class"
+        case "Protocol": expectedKind = "protocol"
+        default: return nil
+        }
+        
+        let containerKinds = ["Module", "Enum", "Structure", "Class", "Type", "BoundGenericEnum", "BoundGenericStructure", "BoundGenericClass"]
+        guard let containerNode = node.children.first(where: { containerKinds.contains($0.kind) }),
+              let identifierNode = node.children.first(where: { $0.kind == "Identifier" }),
+              let typeName = identifierNode.text else {
+            return nil
+        }
+        
+        if let (module, parentPath, _) = resolveType(containerNode, parser: parser) {
+            let fullPath = parentPath + [typeName]
+            if !module.isEmpty {
+                let pNode = parser.findOrCreateDiscoveredTypePath(module: module, path: fullPath)
+                if pNode.kind == "unknown" {
+                    parser.setKind(expectedKind, for: pNode)
+                }
+            }
+            return (module, fullPath, expectedKind)
+        }
+        return nil
+    }
+
+    static func parseExpandTree(output: String, parser: Parser) -> [String: [Int: Bool]] {
         var result: [String: [Int: Bool]] = [:]
         
         let lines = output.components(separatedBy: .newlines)
         var currentSymbol: String? = nil
         var symbolLines: [String] = []
         
+        func handleSymbol(_ sym: String, lines: [String]) {
+            result[sym] = parseParameters(from: lines)
+            if let root = buildTree(from: lines) {
+                traverseAndRegisterTypes(node: root, parser: parser)
+            }
+        }
+        
         for line in lines {
             if line.isEmpty { continue }
             if line.hasPrefix("Demangling for ") {
                 if let sym = currentSymbol {
-                    result[sym] = parseParameters(from: symbolLines)
+                    handleSymbol(sym, lines: symbolLines)
                 }
                 currentSymbol = line.replacingOccurrences(of: "Demangling for ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
                 symbolLines = []
             } else if currentSymbol != nil {
                 if !line.hasPrefix(" ") && !line.contains("kind=") {
-                    // This is the demangled name line, end of tree for this symbol
                     if let sym = currentSymbol {
-                        result[sym] = parseParameters(from: symbolLines)
+                        handleSymbol(sym, lines: symbolLines)
                     }
                     currentSymbol = nil
                     symbolLines = []
@@ -340,7 +642,7 @@ struct SwiftInterfaceGen {
             }
         }
         if let sym = currentSymbol {
-            result[sym] = parseParameters(from: symbolLines)
+            handleSymbol(sym, lines: symbolLines)
         }
         return result
     }
@@ -467,6 +769,7 @@ struct SwiftInterfaceGen {
 
     static func postProcess(_ code: String, parser: Parser) -> String {
         var c = code
+        c = c.replacingOccurrences(of: "OS_dispatch_queue", with: "DispatchQueue")
         // Remove redundant current module prefix to avoid self-referencing, and ObjectiveC.
         c = c.replacingOccurrences(of: "\(parser.defaultModule).", with: "")
         c = c.replacingOccurrences(of: "ObjectiveC.", with: "")
@@ -554,7 +857,47 @@ struct SwiftInterfaceGen {
         if !parser.defaultModule.isEmpty {
             c = c.replacingOccurrences(of: "___SHIELDED_\(parser.defaultModule)___", with: parser.defaultModule)
         }
-        
+
+        // De-genericise types whose real binary exports use non-generic ABI mangling.
+        // For Tensor/TensorRequirements: strip ALL <Any>/<A>/<T> since these types are
+        // fully non-generic in the real binary ABI.
+        // For UnsafeArrayPointer family: strip declaration <A> and own-type <A>/<Any>/<T>
+        // references, but also strip <GenericA>/<GenericB> which are method-level params
+        // that appear in closures passed to `withUnsafeArrayPointer(of:_:)`.
+        // De-genericise Tensor/TensorRequirements — fully non-generic in real ABI.
+        for (typeName, placeholders) in [
+            ("Tensor",           ["A", "Any", "T"]),
+            ("TensorRequirements", ["A", "Any", "T"]),
+        ] as [(String, [String])] {
+            for p in ["A", "T"] {
+                c = c.replacingOccurrences(of: "struct \(typeName)<\(p)>", with: "struct \(typeName)")
+                c = c.replacingOccurrences(of: "class \(typeName)<\(p)>",  with: "class \(typeName)")
+            }
+            for placeholder in placeholders {
+                c = c.replacingOccurrences(of: "\(typeName)<\(placeholder)>", with: typeName)
+            }
+        }
+
+        // Note: UnsafeArrayPointer/UnsafeMutableArrayPointer family are kept generic —
+        // their ABI exports use <A> throughout (properties, subscripts, inits).
+        // The pMV property descriptor stubs are handled by the assembly stub mechanism.
+
+        // Fix constrained existential simplification artifacts: `any Mod.Source<Self.Stream>`
+        // originates from `any Source<Self.Stream == A>` (a constrained existential where the
+        // protocol's associated type `Stream` equals the generic param `A`).  Outside a protocol
+        // body, `Self.Stream` is not meaningful – replace with `Any` so the class compiles.
+        if let regex = try? NSRegularExpression(
+            pattern: #"(any\s+\S+Source)<Self\.Stream>"#, options: []) {
+            let matches = regex.matches(in: c, range: NSRange(c.startIndex..., in: c))
+            for m in matches.reversed() {
+                if let r = Range(m.range, in: c),
+                   let gr = Range(m.range(at: 1), in: c) {
+                    let prefix = String(c[gr])
+                    c.replaceSubrange(r, with: "\(prefix)<Any>")
+                }
+            }
+        }
+
         // Final cleanup of redundant newlines
         let lines = c.components(separatedBy: "\n")
         var newLines = [String]()
@@ -563,21 +906,22 @@ struct SwiftInterfaceGen {
             newLines.append(line)
         }
         c = newLines.joined(separator: "\n")
-        c += "\n\n@usableFromInline\nfunc dummyDefaultValue<T>() -> T { fatalError() }\n"
+        c += "\n\npublic func dummyDefaultValue<T>() -> T { fatalError() }\n"
+        c += "\n"
+        c += "public struct GenericA: Hashable, Codable, Sendable {}\n"
+        c += "public struct GenericB: Hashable, Codable, Sendable {}\n"
+        c += "public struct GenericC: Hashable, Codable, Sendable {}\n"
+        c += "public struct GenericD: Hashable, Codable, Sendable {}\n"
+        c += "public struct A1: Hashable, Codable, Sendable {}\n"
+        c += "public struct B1: Hashable, Codable, Sendable {}\n"
+        c += "public struct C1: Hashable, Codable, Sendable {}\n"
+        c += "public struct D1: Hashable, Codable, Sendable {}\n"
         if parser.defaultModule == "ModelCatalog" {
             c += "\n\nextension GenericA: AssetMetadata, AssetContents {\n"
             c += "    public init(baseURL: URL) { fatalError() }\n"
             c += "    public var baseURL: URL { get { fatalError() } }\n"
             c += "    public var metadataURL: URL { get { fatalError() } }\n"
             c += "}\n"
-        }
-        if parser.defaultModule == "CoreAIDelegates" {
-            c += "\npublic typealias AssetSession = CoreAI_AssetSession\n"
-            c += "public typealias CacheError = CoreAI_CacheError\n"
-            c += "public typealias CacheManager = CoreAI_CacheManager\n"
-            c += "public typealias OldBuildVersionPurgeProtocol = CoreAI_OldBuildVersionPurgeProtocol\n"
-            c += "public typealias OrphanedStagingPurgeProtocol = CoreAI_OrphanedStagingPurgeProtocol\n"
-            c += "public typealias PurgeProtocol = CoreAI_PurgeProtocol\n"
         }
         return c
     }
@@ -702,10 +1046,21 @@ struct SwiftInterfaceGen {
         let tempInterfacePath = "/tmp/_self_align_interface.swift"
         let tempDylibPath = "/tmp/_self_align_dylib.dylib"
         
+        let reexportedLibraries: [String]
+        if let content = try? String(contentsOfFile: tbdPath, encoding: .utf8) {
+            reexportedLibraries = extractReexportedLibraries(from: content)
+        } else {
+            reexportedLibraries = []
+        }
+        let reexportedModules = Set(reexportedLibraries.map { ($0 as NSString).lastPathComponent })
         var fullFile = ""
         let imports = resolveImports(from: code, currentModule: parser.defaultModule, parser: parser)
         for imp in imports {
-            fullFile += "import \(imp)\n"
+            if reexportedModules.contains(imp) {
+                fullFile += "@_exported import \(imp)\n"
+            } else {
+                fullFile += "import \(imp)\n"
+            }
         }
         fullFile += "\n" + code
         
@@ -811,6 +1166,7 @@ struct SwiftInterfaceGen {
     class StubNode {
         var name: String
         var isProtocol: Bool = false
+        var kind: String = "struct"
         var genericCount: Int = 0
         var nested: [String: StubNode] = [:]
         
@@ -826,13 +1182,33 @@ struct SwiftInterfaceGen {
                 let p = (0..<genericCount).map { $0 < placeholders.count ? placeholders[$0] : "A\($0)" }
                 params = "<\(p.joined(separator: ", "))>"
             }
-            var s = "\(indent)public struct \(name)\(params): Codable, Hashable, Sendable {\n"
-            if nested.isEmpty {
+            
+            var kindKeyword = "struct"
+            if isProtocol {
+                kindKeyword = "protocol"
+            } else if kind == "enum" {
+                kindKeyword = "enum"
+            } else if kind == "class" {
+                kindKeyword = "class"
+            }
+            
+            var s = "\(indent)public \(kindKeyword) \(name)\(params)"
+            if kindKeyword == "struct" {
+                s += ": Codable, Hashable, Sendable {\n"
                 s += "\(indent)    public init() {}\n"
+            } else if kindKeyword == "class" {
+                // Classes cannot auto-synthesize Codable/Hashable — use @unchecked Sendable only
+                s += ": @unchecked Sendable {\n"
+                s += "\(indent)    public init() {}\n"
+            } else if kindKeyword == "enum" {
+                s += ": Codable, Hashable, Sendable {\n"
+                s += "\(indent)    case case0\n"
             } else {
-                for child in nested.values.sorted(by: { $0.name < $1.name }) {
-                    s += child.generateSwift(depth: depth + 1)
-                }
+                s += " {\n"
+            }
+            
+            for child in nested.values.sorted(by: { $0.name < $1.name }) {
+                s += child.generateSwift(depth: depth + 1)
             }
             s += "\(indent)}\n"
             return s
@@ -841,6 +1217,52 @@ struct SwiftInterfaceGen {
 
     static func generateStubs(outputCode: String, currentModule: String, outputDir: String, parser: Parser) {
         var externalTypes = [String: [(typeName: String, isProtocol: Bool, genericCount: Int)]]()
+        
+        var constraintTypes = Set<String>()
+        // 1. Parse 'where' constraints
+        let localWherePattern = "where\\s+([^\\{]+)"
+        if let regex = try? NSRegularExpression(pattern: localWherePattern, options: []) {
+            let nsRange = NSRange(outputCode.startIndex..<outputCode.endIndex, in: outputCode)
+            let matches = regex.matches(in: outputCode, options: [], range: nsRange)
+            for m in matches {
+                if let range = Range(m.range(at: 1), in: outputCode) {
+                    let constraintsStr = String(outputCode[range])
+                    let individual = constraintsStr.components(separatedBy: ",")
+                    for c in individual {
+                        let trimmed = c.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.contains(":") {
+                            let parts = trimmed.components(separatedBy: ":")
+                            if parts.count == 2 {
+                                let constraint = parts[1].replacingOccurrences(of: "any ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                constraintTypes.insert(constraint)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 2. Parse generic parameter lists `<...>`
+        let localGenericListPattern = "<([^>]+)>"
+        if let regex = try? NSRegularExpression(pattern: localGenericListPattern, options: []) {
+            let nsRange = NSRange(outputCode.startIndex..<outputCode.endIndex, in: outputCode)
+            let matches = regex.matches(in: outputCode, options: [], range: nsRange)
+            for m in matches {
+                if let range = Range(m.range(at: 1), in: outputCode) {
+                    let listStr = String(outputCode[range])
+                    let individual = listStr.components(separatedBy: ",")
+                    for c in individual {
+                        let trimmed = c.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.contains(":") {
+                            let parts = trimmed.components(separatedBy: ":")
+                            if parts.count == 2 {
+                                let constraint = parts[1].replacingOccurrences(of: "any ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                constraintTypes.insert(constraint)
+                            }
+                        }
+                    }
+                }
+            }
+        }
         
         let pathPattern = "\\b([A-Z][a-zA-Z0-9_$]*\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)\\b"
         if let regex = try? NSRegularExpression(pattern: pathPattern, options: []) {
@@ -889,11 +1311,24 @@ struct SwiftInterfaceGen {
                     let parts = typeName.components(separatedBy: ".")
                     let mod = parts[0]
                     let sdkRoot = ConfigManager.sdkRoot
-                    let isPrivateFw = FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/PrivateFrameworks/\(mod).framework") ||
-                                      FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(mod).framework") ||
-                                      mod == "CoreAI"
+                    var isPrivateFw = FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/PrivateFrameworks/\(mod).framework") ||
+                                      FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(mod).framework")
+                    // Also recognize pseudo-module names like `KnownFw_Suffix` (e.g.
+                    // `IntelligencePlatformLibrary_AppleInternal`), which are private submodules
+                    // not present as standalone .framework bundles.
+                    if !isPrivateFw, let underIdx = mod.firstIndex(of: "_") {
+                        let baseMod = String(mod[mod.startIndex..<underIdx])
+                        if FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/PrivateFrameworks/\(baseMod).framework") ||
+                           FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(baseMod).framework") {
+                            isPrivateFw = true
+                        }
+                    }
                     if isPrivateFw && mod != currentModule {
-                        externalTypes[mod, default: []].append((typeName: typeName, isProtocol: isProtocol, genericCount: genericCount))
+                        var isProto = isProtocol
+                        if constraintTypes.contains(typeName) || constraintTypes.contains(parts.dropFirst().joined(separator: ".")) {
+                            isProto = true
+                        }
+                        externalTypes[mod, default: []].append((typeName: typeName, isProtocol: isProto, genericCount: genericCount))
                     }
                 }
             }
@@ -975,9 +1410,15 @@ struct SwiftInterfaceGen {
             for item in items {
                 let parts = item.typeName.components(separatedBy: ".")
                 var current = root
+                var pathSoFar = [String]()
                 for part in parts.dropFirst() {
+                    pathSoFar.append(part)
                     if current.nested[part] == nil {
-                        current.nested[part] = StubNode(name: part)
+                        let node = StubNode(name: part)
+                        if let typeNode = parser.findTypeNode(module: mod, path: pathSoFar) {
+                            node.kind = typeNode.kind
+                        }
+                        current.nested[part] = node
                     }
                     current = current.nested[part]!
                 }
@@ -1004,10 +1445,26 @@ struct SwiftInterfaceGen {
             
             for proto in topLevelProtocols.sorted(by: { $0.name < $1.name }) {
                 let fullPath = "\(mod).\(proto.name)"
-                fileContent += "public protocol \(proto.name) {\n"
+                var genericDecl = ""
+                var assocDecl = ""
+                var placeholderNames = Set<String>()
+                if proto.genericCount > 0 {
+                    let placeholders = ["A", "B", "C", "D", "E"]
+                    let count = min(proto.genericCount, placeholders.count)
+                    let names = Array(placeholders[..<count])
+                    genericDecl = "<" + names.joined(separator: ", ") + ">"
+                    placeholderNames = Set(names)
+                    for name in names {
+                        assocDecl += "    associatedtype \(name)\n"
+                    }
+                }
+                fileContent += "public protocol \(proto.name)\(genericDecl) {\n"
+                fileContent += assocDecl
                 if let assocTypes = protocolAssociatedTypes[fullPath] {
                     for assoc in assocTypes.sorted() {
-                        fileContent += "    associatedtype \(assoc)\n"
+                        if !placeholderNames.contains(assoc) {
+                            fileContent += "    associatedtype \(assoc)\n"
+                        }
                     }
                 }
                 fileContent += "}\n\n"

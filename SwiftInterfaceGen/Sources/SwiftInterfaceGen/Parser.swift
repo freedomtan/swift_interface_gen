@@ -24,11 +24,30 @@ class Parser {
     var namespaceFrameworkCache: [String: Bool] = [:]
     var frameworkDefinedTypesCache: [String: Set<String>] = [:]
     
-    let systemTypes: Set<String> = [
+    struct SystemTypesSet {
+        let base: Set<String>
+        func contains(_ member: String) -> Bool {
+            if base.contains(member) { return true }
+            if member == "InlineArray" { return true }
+            if member.hasPrefix("MTL") { return true }
+            if member.hasPrefix("CV") { return true }
+            if member.hasPrefix("CG") { return true }
+            if member.hasPrefix("CM") { return true }
+            return false
+        }
+    }
+    
+    let systemTypes = SystemTypesSet(base: [
         "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
         "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
-        "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "UnsafeRawBufferPointer",
-        "UnsafeMutableRawPointer", "UnsafePointer", "UnsafeMutablePointer", "URLResponse",
+        "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder",
+        // Range types require Comparable constraints — never alias with <Any>
+        "Range", "ClosedRange", "PartialRangeFrom", "PartialRangeThrough", "PartialRangeUpTo",
+        "UnsafeRawBufferPointer", "UnsafeMutableRawBufferPointer",
+        "UnsafeMutableRawPointer", "UnsafeRawPointer",
+        "UnsafePointer", "UnsafeMutablePointer",
+        "UnsafeBufferPointer", "UnsafeMutableBufferPointer",
+        "URLResponse",
         "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
         "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Identifiable", "BitwiseCopyable", "Copyable", "Escapable",
         "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
@@ -40,7 +59,7 @@ class Parser {
         "ExpressibleByNilLiteral", "ExpressibleByArrayLiteral", "ExpressibleByDictionaryLiteral",
         "LocalizedError", "CustomNSError", "Logger", "NSXPCConnection", "NSXPCInterface", "Protocol", "NSCopying",
         "Swift", "Foundation", "CoreFoundation", "Metal", "IOSurface", "CoreGraphics", "CoreVideo", "CoreMedia", "CoreImage", "CoreML", "Dispatch", "os", "ObjectiveC", "Synchronization",
-        "Strideable", "AdditiveArithmetic", "BinaryFloatingPoint", "FloatingPoint", "FloatingPointSign", "Numeric", "SignedNumeric",
+        "Strideable", "AdditiveArithmetic", "BinaryFloatingPoint", "FloatingPoint", "FloatingPointSign", "Numeric", "SignedNumeric", "BinaryInteger", "FixedWidthInteger", "SignedInteger", "UnsignedInteger",
         "MTLDevice", "MTLBuffer", "MTLTexture", "IOSurfaceRef", "CVBufferRef", "CVBuffer",
         "Span", "MutableSpan", "RawSpan", "MutableRawSpan",
         // Additional System Types to prevent shadowing and matching issues:
@@ -70,8 +89,12 @@ class Parser {
         "JSONEncoder", "JSONDecoder", "PropertyListEncoder", "PropertyListDecoder",
         "AttributedString", "AttributedStringKey", "AttributedSubstring",
         "FileHandle", "Pipe",
-        "NSPredicate", "NSSortDescriptor"
-    ]
+        "NSPredicate", "NSSortDescriptor",
+        // Swift error types that must resolve to stdlib, not local stubs
+        "CancellationError", "DecodingError", "EncodingError",
+        // Foundation ObjC-bridged types that must use __C.NSError, not a local stub
+        "NSError", "NSException"
+    ])
     
     var defaultArguments = [String: Set<Int>]()
     
@@ -79,12 +102,19 @@ class Parser {
         var result = [String]()
         var current = ""
         var depth = 0
-        for ch in s {
+        let chars = Array(s)
+        var idx = 0
+        while idx < chars.count {
+            let ch = chars[idx]
             if ch == "(" || ch == "<" || ch == "[" {
                 depth += 1
                 current.append(ch)
             } else if ch == ")" || ch == ">" || ch == "]" {
-                depth -= 1
+                if ch == ">" && idx > 0 && chars[idx - 1] == "-" {
+                    // Ignore ->
+                } else {
+                    depth -= 1
+                }
                 current.append(ch)
             } else if ch == "," && depth == 0 {
                 result.append(current)
@@ -92,6 +122,7 @@ class Parser {
             } else {
                 current.append(ch)
             }
+            idx += 1
         }
         if !current.isEmpty {
             result.append(current)
@@ -100,6 +131,7 @@ class Parser {
     }
     private var scannedLocalSwiftFiles = false
     var tbdSymbols = Set<String>()
+    var nonFinalClasses = Set<String>()
     var referencedModules = Set<String>()
     var symbolEscapingMap: [String: [Int: Bool]] = [:]
     // Maps base function mangled symbol → set of parameter indices that have default values
@@ -131,7 +163,9 @@ class Parser {
         for (name, params) in genericTypes {
             let shortName = name.components(separatedBy: ".").last!
             // Skip standard library types and single-letter generic parameter placeholders
-            if shortName.count == 1 || ["Optional", "Array", "Dictionary", "Set", "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer"].contains(shortName) {
+            if shortName.count == 1 || ["Optional", "Array", "Dictionary", "Set",
+                "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer",
+                "UnsafeBufferPointer", "UnsafeMutableBufferPointer", "UnsafeRawBufferPointer", "UnsafeMutableRawBufferPointer"].contains(shortName) {
                 continue
             }
             
@@ -188,6 +222,58 @@ class Parser {
         return SwiftInterfaceGen.demangle(symbol: symbol)
     }
 
+    private func stripGenerics(_ s: String) -> String {
+        var result = ""
+        var depth = 0
+        for char in s {
+            if char == "<" {
+                depth += 1
+            } else if char == ">" {
+                depth = max(0, depth - 1)
+            } else if depth == 0 {
+                result.append(char)
+            }
+        }
+        return result
+    }
+
+    private func extractClassPath(fromTjTq demangled: String) -> String? {
+        var path = demangled
+        if path.hasPrefix("dispatch thunk of ") {
+            path = String(path.dropFirst("dispatch thunk of ".count))
+        } else if path.hasPrefix("method descriptor for ") {
+            path = String(path.dropFirst("method descriptor for ".count))
+        } else {
+            return nil
+        }
+        
+        if let colonIndex = path.range(of: " : ") {
+            path = String(path[..<colonIndex.lowerBound])
+        }
+        
+        if let parenIndex = path.firstIndex(of: "(") {
+            path = String(path[..<parenIndex])
+        }
+        
+        path = stripGenerics(path)
+        
+        var parts = path.components(separatedBy: ".")
+        if parts.isEmpty { return nil }
+        
+        // Remove trailing accessor markers if present
+        if let last = parts.last, ["getter", "setter", "modify", "read"].contains(last) {
+            parts.removeLast()
+        }
+        
+        // Remove the member name (method name, property name, subscript, or init)
+        if !parts.isEmpty {
+            parts.removeLast()
+        }
+        
+        return parts.joined(separator: ".")
+    }
+
+
     private func escapeKeyword(_ name: String) -> String {
         if swiftKeywords.contains(name) {
             return "`\(name)`"
@@ -195,7 +281,7 @@ class Parser {
         return name
     }
 
-    private func setKind(_ kind: String, for node: TypeNode) {
+    func setKind(_ kind: String, for node: TypeNode) {
         if node.kind == "unknown" || node.kind == "struct" {
              if kind == "class" || kind == "enum" || kind == "protocol" {
                  fputs("TypeKindSet: \(node.name) -> \(kind)\n", stderr)
@@ -237,6 +323,11 @@ class Parser {
 
     func parse(mangled: String, demangled: String, currentModule: String) {
         let originalMangled = mangled
+        if originalMangled.hasSuffix("Tj") || originalMangled.hasSuffix("Tq") {
+            if let classPath = extractClassPath(fromTjTq: demangled) {
+                nonFinalClasses.insert(classPath)
+            }
+        }
         var mangled = mangled
         if mangled.hasSuffix("Tj") {
             mangled = String(mangled.dropLast(2))
@@ -297,6 +388,9 @@ class Parser {
         }
         
 
+        if demangled.contains("unsafeMutableAddressor") || demangled.contains("unsafeAddressor") {
+            return
+        }
         
         var d = demangled
         let d_orig = demangled
@@ -418,7 +512,15 @@ class Parser {
             if d_orig.contains("default argument") {
                 return
             }
-            let junkKeywords = ["descriptor", "type metadata", "metadata accessor", "metadata instantiation", "witness table", "helper", "offset", "lookup function", "variable", "function pointer", "lazy cache", "block copy", "block destroy", "property descriptor", "reflection metadata", "resilient class stub"]
+            // Note: bare "descriptor" and "offset" were removed — they also match legitimate
+            // Swift properties named "descriptor" or "offset" (e.g. Tensor.SharedStorage.offset).
+            // "opaque type descriptor for" is added explicitly to catch that ABI bookkeeping symbol.
+            // "field offset for" covers the real ABI field-offset metadata we don't want.
+            let junkKeywords = ["type metadata", "metadata accessor", "metadata instantiation",
+                                "witness table", "helper", "field offset for", "lookup function", "variable",
+                                "function pointer", "lazy cache", "block copy", "block destroy",
+                                "property descriptor", "reflection metadata", "resilient class stub",
+                                "opaque type descriptor for"]
             for junk in junkKeywords {
                 if d_orig.contains(junk) {
                     if (d_orig.contains("dispatch thunk") || d_orig.contains("method descriptor")) && d_orig.contains("(") {
@@ -430,9 +532,31 @@ class Parser {
             }
         }
         
-        if d_orig.contains("deinit") || 
+        if d_orig.contains("deinit") ||
            d_orig.contains("initializeBufferWithCopy") ||
            d_orig.contains("async function pointer") {
+            if d_orig.contains("deinit") {
+                var typePath = d_orig
+                    .replacingOccurrences(of: ".__deallocating_deinit", with: "")
+                    .replacingOccurrences(of: ".deinit", with: "")
+                    .trimmingCharacters(in: .whitespaces)
+                let descriptors = ["nominal type descriptor for ", "type metadata for ", "metaclass for ", "resilient class stub for ", "ObjC resilient class stub for ", "dispatch thunk of ", "method descriptor for "]
+                for desc in descriptors {
+                    if typePath.starts(with: desc) {
+                        typePath = String(typePath.dropFirst(desc.count))
+                    }
+                }
+                let cleaned = cleanType(typePath)
+                if !cleaned.isEmpty {
+                    let node = findOrCreateType(name: cleaned)
+                    if originalMangled.contains("VfD") {
+                        setKind("struct", for: node)
+                        node.conformances.insert("~Copyable")
+                    } else {
+                        setKind("class", for: node)
+                    }
+                }
+            }
             return
         }
 
@@ -622,7 +746,7 @@ class Parser {
             if !prefix.hasSuffix("<") && cleanD.contains(" -> ") {
                 var fullMemberPath = prefix.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " :", with: "")
                 if fullMemberPath.contains(".__") {
-                    if fullMemberPath.hasSuffix(".__allocating_init") {
+                    if fullMemberPath.contains(".__allocating_init") {
                         fullMemberPath = fullMemberPath.replacingOccurrences(of: ".__allocating_init", with: ".init")
                     } else {
                         return
@@ -745,6 +869,9 @@ class Parser {
                     let parentName = typeName.components(separatedBy: ".").last!
                     let node = findOrCreateType(name: cleanType(typeName))
                     if let k = forcedKind { setKind(k, for: node) }
+                    if d_orig.contains(".__allocating_init") {
+                        setKind("class", for: node)
+                    }
                     
                     let escapedMemberName = escapeKeyword(memberName) + methodGenericsPart
                     
@@ -773,15 +900,19 @@ class Parser {
 
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
                         let initSig = Parser.fixUnnamedParameters(signature, escapingMap: symbolEscapingMap[originalMangled] ?? symbolEscapingMap[mangled], defaultArgs: defaultArgMap[mangled])
-                        let initKeyword = isFailable ? "init?" : "init"
-                        if mangled.contains("PAAE") {
-                            node.extensionMembers[initKeyword + initSig] = .initializer(initKeyword + initSig)
-                        } else if let constraints = constraints {
-                            node.constrainedExtensions[constraints, default: [:]][initKeyword + initSig] = .initializer(initKeyword + initSig)
-                        } else if mangled.contains("PA") && mangled.contains("rlE") {
-                            node.extensionMembers[initKeyword + initSig] = .initializer(initKeyword + initSig)
+                        var initFull = isFailable ? "init?" : "init"
+                        initFull += methodGenericsPart
+                        initFull += initSig
+                        if !methodWhereClause.isEmpty {
+                            initFull += methodWhereClause
+                        }
+                        let isExternal = getTopLevelModule(for: node) != defaultModule
+                        if let constraints = constraints {
+                            node.constrainedExtensions[constraints, default: [:]][initFull] = .initializer(initFull)
+                        } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
+                            node.extensionMembers[initFull] = .initializer(initFull)
                         } else {
-                            node.members[initKeyword + initSig] = .initializer(initKeyword + initSig)
+                            node.members[initFull] = .initializer(initFull)
                         }
                     } else {
                         let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
@@ -789,11 +920,10 @@ class Parser {
                         if !methodWhereClause.isEmpty {
                             fixedSignature += methodWhereClause
                         }
-                        if mangled.contains("PAAE") {
-                            node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
-                        } else if let constraints = constraints {
+                        let isExternal = getTopLevelModule(for: node) != defaultModule
+                        if let constraints = constraints {
                             node.constrainedExtensions[constraints, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
-                        } else if mangled.contains("PA") && mangled.contains("rlE") {
+                        } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
                             node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                         } else {
                             node.members[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
@@ -943,17 +1073,26 @@ class Parser {
                 }
 
                 let escapedMemberName = escapeKeyword(memberName)
-                if mangled.contains("PAAE") {
-                    node.extensionMembers[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
-                } else if let constraints = constraints {
-                    node.constrainedExtensions[constraints, default: [:]][escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
-                } else if mangled.contains("PA") && mangled.contains("rlE") {
-                    node.extensionMembers[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                // Subscripts can have multiple overloads with the same name ("subscript") but
+                // different parameter types. Use type as part of the storage key to avoid collision.
+                let storageKey: String
+                if isSubscript {
+                    storageKey = "\(escapedMemberName)[\(type)]"
+                } else if isStatic {
+                    storageKey = "static \(escapedMemberName)"
                 } else {
-                    node.members[escapedMemberName] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                    storageKey = escapedMemberName
+                }
+                let isExternal = getTopLevelModule(for: node) != defaultModule
+                if let constraints = constraints {
+                    node.constrainedExtensions[constraints, default: [:]][storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
+                    node.extensionMembers[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                } else {
+                    node.members[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                 }
                 if !tbdSymbols.contains(mangled + "Tj") {
-                    node.finalMembers.insert(escapedMemberName)
+                    node.finalMembers.insert(storageKey)
                 }
             }
             return
@@ -991,8 +1130,30 @@ class Parser {
     private func findOrCreateType(name: String) -> TypeNode {
         if name.contains("<") { fputs("findOrCreateType with <: \(name)\n", stderr) }
         var parts = name.components(separatedBy: ".")
+        if parts[0] == "__C" && parts.count > 1 {
+            if let defaultMod = modules[defaultModule] {
+                var current = defaultMod
+                var found = true
+                for part in parts.dropFirst() {
+                    if let nextNode = current.nestedTypes[part] {
+                        current = nextNode
+                    } else {
+                        found = false
+                        break
+                    }
+                }
+                if found {
+                    parts[0] = defaultModule
+                }
+            }
+        }
 
-        let isTopLevel = isModuleAvailable(parts[0]) || parts[0] == "__C" || parts[0] == defaultModule || modules[parts[0]] != nil
+        var isTopLevel = isModuleAvailable(parts[0]) || parts[0] == "__C" || parts[0] == defaultModule || modules[parts[0]] != nil
+        if isTopLevel && parts[0] != defaultModule && parts[0] != "__C" {
+            if modules[defaultModule]?.nestedTypes[parts[0]] != nil {
+                isTopLevel = false
+            }
+        }
         if !isTopLevel {
             parts.insert(defaultModule, at: 0)
         }
@@ -1003,12 +1164,13 @@ class Parser {
         
         let moduleName = parts[0]
         
-        // Skip creating nodes for __C module as they should be resolved via imports or typealiases
-        if moduleName == "__C" {
-            // We return a dummy node so the caller doesn't crash, but it won't be in modules dictionary
+        // Skip creating nodes for generic placeholders
+        if let last = parts.last, Parser.isGenericPlaceholder(last) {
             let current = TypeNode(name: name)
             return current
         }
+
+
 
         if modules[moduleName] == nil {
             modules[moduleName] = TypeNode(name: moduleName)
@@ -1024,6 +1186,14 @@ class Parser {
             current = current.nestedTypes[part]!
         }
         return current
+    }
+
+    func getTopLevelModule(for node: TypeNode) -> String {
+        var current = node
+        while let p = current.parent {
+            current = p
+        }
+        return current.name
     }
 
     private func splitPath(_ path: String) -> (String, String) {
@@ -1059,7 +1229,6 @@ class Parser {
         
         n = n.replacingOccurrences(of: "\\(extension in [^)]+\\):", with: "", options: .regularExpression)
         
-        n = n.replacingOccurrences(of: "__C\\.UAF([a-zA-Z0-9_]+)", with: "UnifiedAssetFramework.UAF$1", options: .regularExpression)
         if n.hasSuffix(".Array") && n != "Swift.Array" && !n.hasPrefix("Swift.") { n = n.replacingOccurrences(of: ".Array", with: ".JSONArray") }
         if n.hasSuffix(".Dictionary") && n != "Swift.Dictionary" && !n.hasPrefix("Swift.") { n = n.replacingOccurrences(of: ".Dictionary", with: ".JSONDictionary") }
         if n.hasSuffix(".Object") && n != "Swift.Object" && !n.hasPrefix("Swift.") { n = n.replacingOccurrences(of: ".Object", with: ".JSONObject") }
@@ -1068,15 +1237,73 @@ class Parser {
         return n
     }
 
+    static func isGenericPlaceholder(_ s: String) -> Bool {
+        if s.hasPrefix("Generic") { return true }
+        if s.count == 1 {
+            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+            return placeholders.contains(s)
+        }
+        if s.count > 1 {
+            let first = String(s.first!)
+            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+            if placeholders.contains(first) {
+                let suffix = s.dropFirst()
+                return suffix.allSatisfy { $0.isNumber }
+            }
+        }
+        return false
+    }
+
+    static func fixInlineArrayValGenerics(_ input: String) -> String {
+        var result = input
+        var searchStart = result.startIndex
+        while let range = result[searchStart...].range(of: "InlineArray<") {
+            let startIdx = range.upperBound
+            var depth = 1
+            var commaIdx: String.Index? = nil
+            var scanIdx = startIdx
+            while scanIdx < result.endIndex {
+                let char = result[scanIdx]
+                if char == "<" {
+                    depth += 1
+                } else if char == ">" {
+                    depth -= 1
+                    if depth == 0 {
+                        break
+                    }
+                } else if char == "," && depth == 1 {
+                    commaIdx = scanIdx
+                }
+                scanIdx = result.index(after: scanIdx)
+            }
+            
+            if depth == 0, let comma = commaIdx {
+                let firstArg = result[startIdx..<comma].trimmingCharacters(in: .whitespaces)
+                let secondArgStart = result.index(after: comma)
+                let secondArg = result[secondArgStart..<scanIdx].trimmingCharacters(in: .whitespaces)
+                if secondArg == "Int" || secondArg == "Swift.Int" {
+                    if Parser.isGenericPlaceholder(firstArg) {
+                        searchStart = scanIdx
+                        continue
+                    }
+                    result.replaceSubrange(startIdx..<scanIdx, with: "1, \(firstArg)")
+                    let newLen = 3 + firstArg.count
+                    searchStart = result.index(startIdx, offsetBy: newLen + 1, limitedBy: result.endIndex) ?? result.endIndex
+                    continue
+                }
+            }
+            searchStart = scanIdx
+        }
+        return result
+    }
+
     func simplifyType(_ type: String, parentName: String? = nil, isMethodSignature: Bool = false) -> String {
-        var t = type.replacingOccurrences(of: "CVBufferRef", with: "CVBuffer")
+        var t = Parser.fixInlineArrayValGenerics(type)
+        t = t.replacingOccurrences(of: "CVBufferRef", with: "CVBuffer")
         t = t.replaceWord("Decoder", with: "Swift.Decoder", allowPrecededByDot: false)
         t = t.replaceWord("Encoder", with: "Swift.Encoder", allowPrecededByDot: false)
         t = t.replacingOccurrences(of: "any (Swift\\.)?AsyncSequence<[^>]+>", with: "any AsyncSequence", options: .regularExpression)
         t = t.replacingOccurrences(of: "\\(extension in [^)]+\\):", with: "", options: .regularExpression)
-        t = t.replacingOccurrences(of: "__C\\.UAF([a-zA-Z0-9_]+)", with: "UnifiedAssetFramework.UAF$1", options: .regularExpression)
-        t = t.replacingOccurrences(of: "__C.UAFSubscriptionDownloadStatus", with: "UnifiedAssetFramework.UAFSubscriptionDownloadStatus")
-        t = t.replacingOccurrences(of: "__C\\.OS_xpc_object", with: "XPC.OS_xpc_object", options: .regularExpression)
         
         // For each discovered protocol, add 'any' prefix when used as an existential type.
         // Track which ones are "ambiguous" (also have a concrete type with the same short name)
@@ -1140,16 +1367,19 @@ class Parser {
             if word == "__C" {
                 t = t.replaceWordDot(word, with: "")
             } else if word != "Swift" && word != defaultModule && isModuleAvailable(word) {
-                let systemModules: Set<String> = [
-                    "Swift", "Foundation", "ObjectiveC", "os", "Dispatch", "Metal", "CoreGraphics",
-                    "CoreVideo", "CoreMedia", "IOSurface", "UniformTypeIdentifiers", "XPC", "Synchronization",
-                    "MetricKit", "Combine"
-                ]
-                if !systemModules.contains(word) {
-                    referencedModules.insert(word)
-                } else {
-                    t = t.replaceWordDot(word, with: "")
-                    referencedModules.insert(word)
+                let isLocalType = modules[defaultModule]?.nestedTypes[word] != nil
+                if !isLocalType {
+                    let systemModules: Set<String> = [
+                        "Swift", "Foundation", "ObjectiveC", "os", "Dispatch", "Metal", "CoreGraphics",
+                        "CoreVideo", "CoreMedia", "IOSurface", "UniformTypeIdentifiers", "XPC", "Synchronization",
+                        "MetricKit", "Combine"
+                    ]
+                    if !systemModules.contains(word) {
+                        referencedModules.insert(word)
+                    } else {
+                        t = t.replaceWordDot(word, with: "")
+                        referencedModules.insert(word)
+                    }
                 }
             }
         }
@@ -1260,6 +1490,10 @@ class Parser {
             t = String(t[..<brace]).trimmingCharacters(in: .whitespaces)
         }
         t = t.replacingOccurrences(of: "}", with: "")
+
+        if t.contains("& any ") {
+            t = t.replacingOccurrences(of: "& any ", with: "& ")
+        }
 
         if isMethodSignature {
             return stripLabelsFromMethodSignature(t)
@@ -1417,7 +1651,7 @@ class Parser {
         }
         
         // 3. Built-in system modules
-        let system = ["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "CoreVideo", "CoreMedia", "IOSurface"]
+        let system = ["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "CoreVideo", "CoreMedia", "IOSurface", "__C"]
         if system.contains(name) {
             return true
         }
@@ -1717,7 +1951,7 @@ class Parser {
         
         // Phase 1: Generate type/class/enum declarations
         for moduleName in sortedModuleNames {
-            if ["Swift", "Foundation", "ObjectiveC"].contains(moduleName) { continue }
+            if ["Swift", "Foundation", "ObjectiveC", "__C"].contains(moduleName) { continue }
             if moduleName != defaultModule && isModuleAvailable(moduleName) {
                 continue
             }
@@ -1790,7 +2024,7 @@ class Parser {
         
         // Phase 2: Generate type extensions
         for moduleName in sortedModuleNames {
-            if moduleName != defaultModule && isModuleAvailable(moduleName) && !["Swift", "Foundation", "ObjectiveC"].contains(moduleName) {
+            if moduleName != defaultModule && isModuleAvailable(moduleName) && !["Swift", "Foundation", "ObjectiveC", "XPC", "UnifiedAssetFramework", "__C"].contains(moduleName) {
                 continue
             }
             guard let module = modules[moduleName] else { continue }
@@ -1802,6 +2036,8 @@ class Parser {
                 let pathPrefix: String
                 if moduleName == "Swift" {
                     pathPrefix = "Swift"
+                } else if moduleName == "__C" {
+                    pathPrefix = ""
                 } else if moduleName == defaultModule {
                     pathPrefix = ""
                 } else {
@@ -1813,7 +2049,7 @@ class Parser {
 
         // Phase 3: Generate namespace and convenient typealiases
         for moduleName in sortedModuleNames {
-            if ["Swift", "Foundation", "ObjectiveC"].contains(moduleName) { continue }
+            if ["Swift", "Foundation", "ObjectiveC", "__C"].contains(moduleName) { continue }
             if moduleName != defaultModule && isModuleAvailable(moduleName) {
                 continue
             }
@@ -1850,8 +2086,14 @@ class Parser {
             guard let module = modules[moduleName] else { continue }
             
             if isModuleAvailable(moduleName) {
+                // Types whose generic parameters have Comparable/other constraints can't be
+                // aliased with <Any> — skip them entirely in Phase 4.
+                let constrainedGenericTypes: Set<String> = [
+                    "Range", "ClosedRange", "PartialRangeFrom", "PartialRangeThrough", "PartialRangeUpTo"
+                ]
                 let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
                 for type in sortedTypes {
+                    if constrainedGenericTypes.contains(type.name) { continue }
                     let flattenedName = "\(moduleName)_\(type.name)"
                     if !definedTypes.contains(flattenedName) {
                         definedTypes.insert(flattenedName)
@@ -1859,7 +2101,11 @@ class Parser {
                         
                         // Check if type is publicly defined in the SDK or Local framework modules
                         if isTypeDefinedInFramework(module: moduleName, typeName: type.name) {
-                            output += "public typealias \(flattenedName)\(gps) = \(moduleName).\(type.name)\(gps)\n"
+                            if moduleName == "__C" {
+                                output += "public typealias \(flattenedName)\(gps) = \(type.name)\(gps)\n"
+                            } else {
+                                output += "public typealias \(flattenedName)\(gps) = \(moduleName).\(type.name)\(gps)\n"
+                            }
                         } else {
                             // Leak/Missing type in dependency - generate local stub to compile
                             output += "public struct \(flattenedName)\(gps): Hashable, Codable, Sendable {}\n"
@@ -1892,12 +2138,19 @@ class Parser {
         
         let sortedTypes = referencedTypes.sorted()
         for type in sortedTypes {
-            if systemTypes.contains(type) || type == defaultModule || type == "___SHIELDED_\(defaultModule)___" || discoveredNamespaces.contains(type) || isModuleAvailable(type) || ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"].contains(type) { continue }
+            if Parser.isGenericPlaceholder(type) { continue }
+            if ["Type", "Element", "Protocol"].contains(type) { continue }
+            if systemTypes.contains(type) || type == defaultModule || type == "___SHIELDED_\(defaultModule)___" || discoveredNamespaces.contains(type) || isModuleAvailable(type) || ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"].contains(type) || modules["__C"]?.nestedTypes[type] != nil { continue }
             if type.count == 1 { continue }
             if type.hasPrefix("JSON") { continue }
             
             // Check if defined
             var isDefined = allDefinedInOutput.contains(type)
+            if !isDefined {
+                if let node = modules[defaultModule]?.nestedTypes[type], node.isObjcBridged {
+                    isDefined = true
+                }
+            }
             if !isDefined {
                 for ns in discoveredNamespaces {
                     if ns != defaultModule && isModuleAvailable(ns) {
@@ -1911,12 +2164,20 @@ class Parser {
             if !isDefined {
                 // Check if used with "any", ends with "_P", or is in discoveredProtocols
                 let flatDiscoveredProtocols = Set(discoveredProtocols.map { $0.replacingOccurrences(of: ".", with: "_") })
-                let isProtocolRef = protocolRefTypes.contains(type) || 
+                // If the type is a namespace prefix for a known protocol (e.g. `Mod.Source` in discoveredProtocols)
+                // then `type` is a namespace/module, not a protocol itself – skip protocol classification.
+                let isNamespacePrefixForProtocol = discoveredProtocols.contains(where: { $0.hasPrefix(type + ".") })
+                let isProtocolRef = !isNamespacePrefixForProtocol && (
+                                    protocolRefTypes.contains(type) || 
                                     type.hasSuffix("_P") || 
                                     discoveredProtocols.contains(type) || 
                                     flatDiscoveredProtocols.contains(type) || 
-                                    discoveredProtocols.contains(where: { $0.hasSuffix("." + type) })
-                if isProtocolRef {
+                                    discoveredProtocols.contains(where: { $0.hasSuffix("." + type) }))
+                // If the type is a namespace prefix for a known protocol (e.g. `Mod.Source` in discoveredProtocols)
+                // then `type` is an external module/namespace – skip generating any local stub for it.
+                if isNamespacePrefixForProtocol {
+                    // Skip: this is an external module prefix, not a local type to stub
+                } else if isProtocolRef {
                     stubs += "public protocol \(type) {}\n"
                 } else {
                     // Check if used as generic in the output
@@ -2040,7 +2301,7 @@ class Parser {
         }
     }
 
-    private func findOrCreateDiscoveredTypePath(module: String, path: [String]) -> TypeNode {
+    func findOrCreateDiscoveredTypePath(module: String, path: [String]) -> TypeNode {
         if modules[module] == nil {
             modules[module] = TypeNode(name: module)
         }
@@ -2545,4 +2806,18 @@ class Parser {
         let finalType = attrs + "(" + escapedParams.joined(separator: ", ") + ") " + throwsModifier + "-> " + escapeClosures(in: rightPart)
         return (isTopLevelParameter && isEscaping) ? "@escaping " + finalType : finalType
     }
+
+    func findTypeNode(module: String, path: [String]) -> TypeNode? {
+        guard let root = modules[module] else { return nil }
+        var current = root
+        for part in path {
+            if let child = current.nestedTypes[part] {
+                current = child
+            } else {
+                return nil
+            }
+        }
+        return current
+    }
 }
+
