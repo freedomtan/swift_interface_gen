@@ -1,6 +1,7 @@
 import Foundation
-import CoreAIDelegates
+import CoreAI
 
 print("Starting CoreAIDelegates test")
-print("CacheManager: \(CacheManager.self)")
+print("AIModelCache: \(AIModelCache.self)")
+print("SpecializationOptions: \(SpecializationOptions.self)")
 print("Types verified")

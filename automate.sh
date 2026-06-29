@@ -219,33 +219,52 @@ swiftc -emit-module -module-name "$FRAMEWORK" "/tmp/${FRAMEWORK}Interface_module
 
 rm -f "/tmp/${FRAMEWORK}Interface_module.swift"
 
-echo "--- Compiling Mock Dynamic Library ---"
+echo "--- Compiling Mock Dynamic Library (First Pass) ---"
 # Strip default argument assignments to prevent compiler-generated local default arg getters that conflict with the stubs
 sed 's/ = dummyDefaultValue()//g' "${FRAMEWORK}Interface.swift" > "/tmp/${FRAMEWORK}Interface_dylib.swift"
 
+# First pass: compile without exports list — any missing symbols become stubs.
+# Apply install_name so the dylib loads correctly from LocalFrameworks.
 LINKER_FLAGS=""
-if [ -f "${FRAMEWORK}_exports.txt" ]; then
-    LINKER_FLAGS="$LINKER_FLAGS -Xlinker -exported_symbols_list -Xlinker ${FRAMEWORK}_exports.txt"
-fi
 INSTALL_NAME=$(get_install_name "$FRAMEWORK")
 if [ -n "$INSTALL_NAME" ]; then
     LINKER_FLAGS="$LINKER_FLAGS -Xlinker -install_name -Xlinker $INSTALL_NAME"
 fi
-
 swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
     -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
     "/tmp/${FRAMEWORK}Interface_dylib.swift" \
     -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
-    -sdk "$SDK_ROOT" -language-mode 6 $LINKER_FLAGS
+    -sdk "$SDK_ROOT" -language-mode 6
 
 rm -f "/tmp/${FRAMEWORK}Interface_dylib.swift"
 
-echo "--- Comparing Symbols (Verification) ---"
+echo "--- Comparing Symbols (First Pass) ---"
 rm -f dummy_stubs.s stubs.s stubs.o
+./swift-interface-gen --compare "${FRAMEWORK}_exports.txt" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" stubs.s
+
+if [ -f stubs.s ] && [ -s stubs.s ]; then
+    echo "--- Compiling Assembly Stubs ---"
+    clang -c stubs.s -o stubs.o
+
+    echo "--- Re-compiling Mock Dynamic Library with Stubs ---"
+    sed 's/ = dummyDefaultValue()//g' "${FRAMEWORK}Interface.swift" > "/tmp/${FRAMEWORK}Interface_dylib.swift"
+
+    swiftc -emit-library -o "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" \
+        -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
+        "/tmp/${FRAMEWORK}Interface_dylib.swift" stubs.o \
+        -enable-library-evolution -module-name "$FRAMEWORK" -F LocalFrameworks \
+        -sdk "$SDK_ROOT" -language-mode 6 $LINKER_FLAGS \
+        -Xlinker -exported_symbols_list -Xlinker "${FRAMEWORK}_exports.txt"
+
+    rm -f "/tmp/${FRAMEWORK}Interface_dylib.swift"
+fi
+
+echo "--- Comparing Symbols (Final / Verification) ---"
+rm -f dummy_stubs.s
 ./swift-interface-gen --compare "${FRAMEWORK}_exports.txt" "LocalFrameworks/${FRAMEWORK}.framework/${FRAMEWORK}" dummy_stubs.s
 
 # Clean up temporary files
-rm -f dummy_stubs.s "${FRAMEWORK}_exports.txt"
+rm -f dummy_stubs.s stubs.s stubs.o "${FRAMEWORK}_exports.txt"
 
 echo "--- Compiling Test Program ---"
 swiftc -F LocalFrameworks "$TEST_FILE" \

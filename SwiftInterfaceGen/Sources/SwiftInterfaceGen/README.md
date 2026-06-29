@@ -16,6 +16,11 @@ This directory contains the source code for the `swift-interface-gen` tool. The 
 
 When the tool runs, it executes the following sequential pipeline:
 
+![Mermaid Diagram](./diagrams/README_mermaid_1.svg)
+
+<details>
+<summary>Diagram Source (Mermaid)</summary>
+
 ```mermaid
 graph TD
     A[main.swift: CLI Entry] --> B[TBD Symbol Extraction]
@@ -26,6 +31,7 @@ graph TD
     F --> G[main.swift: Post-Processing & Cleanup]
     G --> H[Output Swift Interface]
 ```
+</details>
 
 ### 1. Symbol Extraction & Re-exports
 * The tool parses the `.tbd` stub file, extracting all mangled Swift ABI symbols (starting with `_$s`) and Objective-C classes (starting with `_OBJC_CLASS_$_`).

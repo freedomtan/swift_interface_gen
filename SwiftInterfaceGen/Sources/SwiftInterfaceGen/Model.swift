@@ -26,13 +26,50 @@ class TypeNode {
     var baseClass: String?
     var rawType: String?
     var finalMembers: Set<String> = []
+    var isObjcBridged: Bool = false  // true when this is an ObjC class extended in Swift (So-prefix symbols)
     weak var parent: TypeNode? = nil
+
+    private func isLifetimeSpanType(_ type: String) -> Bool {
+        let clean = type.replacingOccurrences(of: "Optional<", with: "")
+                        .replacingOccurrences(of: ">", with: "")
+                        .trimmingCharacters(in: .whitespaces)
+        return clean.contains("Span<") || clean == "RawSpan" || clean == "MutableRawSpan" || clean.contains("MutableSpan<")
+    }
 
     func hasConformance(_ proto: String) -> Bool {
         return conformances.contains(proto) || 
                conformances.contains("Swift.\(proto)") || 
                conformances.contains("any \(proto)") || 
                conformances.contains("any Swift.\(proto)")
+    }
+
+    static func getDefaultValue(for type: String) -> String {
+        var cleanType = type.trimmingCharacters(in: .whitespaces)
+        if cleanType.hasPrefix("Swift.") {
+            cleanType = String(cleanType.dropFirst(6))
+        }
+        if cleanType.hasPrefix("Optional<") || cleanType.hasSuffix("?") || cleanType == "Any?" {
+            return "nil"
+        }
+        if cleanType == "Bool" {
+            return "false"
+        }
+        if cleanType == "Int" || cleanType == "Double" || cleanType == "Float" || cleanType == "UInt64" || cleanType == "Int64" || cleanType == "UInt32" || cleanType == "Int32" {
+            return "0"
+        }
+        if cleanType == "String" {
+            return "\"\""
+        }
+        if cleanType.hasPrefix("Array<") || (cleanType.hasPrefix("[") && cleanType.hasSuffix("]") && !cleanType.contains(":")) {
+            return "[]"
+        }
+        if cleanType.hasPrefix("Dictionary<") || (cleanType.hasPrefix("[") && cleanType.contains(":")) {
+            return "[:]"
+        }
+        if cleanType.hasPrefix("Set<") {
+            return "[]"
+        }
+        return "dummyDefaultValue()"
     }
 
     init(name: String) {
@@ -53,22 +90,9 @@ class TypeNode {
 
     func injectDefaultArguments(signature: String, methodName: String, isStatic: Bool, parser: Parser?) -> String {
         guard let parser = parser else { return signature }
-        
-        let defaultModule = parser.defaultModule
-        var pathComponents = [String]()
-        if !defaultModule.isEmpty {
-            pathComponents.append(defaultModule)
-        }
-        let enc = getEnclosingPath()
-        if !enc.isEmpty {
-            pathComponents.append(enc)
-        }
-        pathComponents.append(self.name)
-        let fullTypeName = pathComponents.joined(separator: ".")
-        
-        // Find paren block in signature
         guard let openParen = signature.firstIndex(of: "("),
-              let closeParen = signature.lastIndex(of: ")") else {
+              let closeParen = signature.lastIndex(of: ")"),
+              openParen < closeParen else {
             return signature
         }
         
@@ -88,6 +112,13 @@ class TypeNode {
             }
         }
         
+        let defaultModule = parser.defaultModule
+        var pathComponents = [String]()
+        if !defaultModule.isEmpty { pathComponents.append(defaultModule) }
+        let enc = getEnclosingPath()
+        if !enc.isEmpty { pathComponents.append(enc) }
+        pathComponents.append(self.name)
+        let fullTypeName = pathComponents.joined(separator: ".")
         let methodKey = "\(fullTypeName).\(methodName)(\(labels.joined(separator: ":"))\(labels.isEmpty ? "" : ":"))"
         
         guard let indices = parser.defaultArguments[methodKey] else {
@@ -98,7 +129,13 @@ class TypeNode {
         for (i, param) in params.enumerated() {
             let trimmed = param.trimmingCharacters(in: .whitespaces)
             if indices.contains(i) {
-                newParams.append("\(trimmed) = dummyDefaultValue()")
+                var defaultValue = "dummyDefaultValue()"
+                if let colonIdx = trimmed.firstIndex(of: ":") {
+                    let typePart = String(trimmed[trimmed.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
+                    defaultValue = TypeNode.getDefaultValue(for: typePart)
+                    fputs("applyDefaultArguments key: \(methodKey) typePart: '\(typePart)' resolved: '\(defaultValue)'\n", stderr)
+                }
+                newParams.append("\(trimmed) = \(defaultValue)")
             } else {
                 newParams.append(trimmed)
             }
@@ -146,8 +183,11 @@ class TypeNode {
     func generateCode(indent: String = "", nameOverride: String? = nil, parser: Parser? = nil) -> String {
         let n = nameOverride ?? name
         if n.contains(" ") { return "" }
-        var lines = [String]()
         let actualKind = kind == "unknown" ? "struct" : kind
+        if isObjcBridged && actualKind == "enum" {
+            return ""
+        }
+        var lines = [String]()
         let isProtocol = actualKind == "protocol"
         let isEnum = actualKind == "enum"
 
@@ -324,6 +364,14 @@ class TypeNode {
             cleanConformances.remove("Decodable")
             cleanConformances.remove("Encodable")
         }
+        if cleanConformances.contains("~Copyable") || cleanConformances.contains("Swift.~Copyable") {
+            cleanConformances.remove("Codable")
+            cleanConformances.remove("Decodable")
+            cleanConformances.remove("Encodable")
+            cleanConformances.remove("Hashable")
+            cleanConformances.remove("Equatable")
+            cleanConformances.remove("Comparable")
+        }
         self.conformances = cleanConformances
         inherits.append(contentsOf: cleanConformances.sorted())
         
@@ -354,18 +402,36 @@ class TypeNode {
         var seen = Set<String>()
         inheritsList = inheritsList.filter { seen.insert($0).inserted }
         if actualKind == "struct" || actualKind == "class" || actualKind == "enum" {
-            // Comparable is safe to keep — we emit the < stub and the descriptor is valuable.
-            // The rest cause compiler errors (require many complex protocol requirements).
-            let forbiddenProtocols: Set<String> = [
-                "AdditiveArithmetic", "BinaryFloatingPoint", "ExpressibleByFloatLiteral",
-                "ExpressibleByIntegerLiteral", "FloatingPoint", "Numeric", "SignedNumeric", "Strideable"
-            ]
+            // For custom float types (Float4, Float8, BFloat16) that explicitly conform to
+            // numeric protocols in the TBD, we keep those conformances so the protocol
+            // conformance descriptor symbols are generated. For all other types, these
+            // protocols cause compiler errors because they require many protocol requirements
+            // that our stubs cannot satisfy.
+            let isCustomFloatType = ["Float4", "Float8", "BFloat16"].contains(n)
+            let forbiddenProtocols: Set<String> = isCustomFloatType
+                ? []  // allow all conformances for custom float types
+                : ["AdditiveArithmetic", "BinaryFloatingPoint",
+                   "FloatingPoint", "Numeric", "SignedNumeric", "Strideable",
+                   "BinaryInteger", "FixedWidthInteger", "SignedInteger", "UnsignedInteger"]
             inheritsList = inheritsList.filter { !forbiddenProtocols.contains($0) }
         }
         if actualKind == "class" {
             // Strip Equatable and Hashable — these generate extra conformance descriptors
             // that the TBD does not export for class types.
             inheritsList = inheritsList.filter { !["Hashable", "Codable", "Sendable", "Equatable"].contains($0) }
+            
+            var needsUncheckedSendable = false
+            for inheritsType in inheritsList {
+                if inheritsType == "Sendable" || inheritsType.hasSuffix("Error") {
+                    needsUncheckedSendable = true
+                }
+                if let parser = parser, let protoNode = parser.modules[parser.defaultModule]?.nestedTypes[inheritsType], protoNode.conformances.contains("Sendable") {
+                    needsUncheckedSendable = true
+                }
+            }
+            if needsUncheckedSendable {
+                inheritsList.append("@unchecked Sendable")
+            }
         }
         
         if let idx = inheritsList.firstIndex(of: "Sendable") {
@@ -387,6 +453,10 @@ class TypeNode {
             isGeneric = false
             inScope.insert("A")
             inScope.insert("B")
+        } else if typeName == "SupportedArgument" {
+            displayTypeName += "<A: Equatable>"
+            isGeneric = false
+            inScope.insert("A")
         } else if typeName == "XPCServiceClientConnection" {
             displayTypeName += "<A: XPCService>"
             isGeneric = false
@@ -435,11 +505,55 @@ class TypeNode {
             displayTypeName += "<\(params.joined(separator: ", "))>"
         }
         
-        // NSObject subclasses need `open` so that library-evolution mode generates dispatch
-        // thunks (Tj) for overridable/required methods like init?(coder:).
-        let isNSObjectSubclass = baseClass == "NSObject"
-        let classVisibility = (actualKind == "class" && isNSObjectSubclass) ? "open" : "public"
-        lines.append("\(indent)\(classVisibility) \(actualKind) \(displayTypeName)\(inheritance) {")
+        // ObjC-bridged types are extended via a Swift extension (not declared as a new class).
+        // The extension block is wrapped in sentinel comments so orchestrate.py can strip it
+        // from the module-interface compilation phase (which can't use -import-objc-header).
+        if isObjcBridged && actualKind == "class" {
+            lines.append("\(indent)// --- ObjC Extension (bridge-header required) ---")
+            lines.append("\(indent)extension \(displayTypeName) {")
+        } else {
+            // NSObject subclasses need `open` so that library-evolution mode generates dispatch
+            // thunks (Tj) for overridable/required methods like init?(coder:).
+            let isNSObjectSubclass = baseClass == "NSObject"
+            var classVisibility = (actualKind == "class" && isNSObjectSubclass) ? "open" : "public"
+            if actualKind == "class" && classVisibility == "public" && name != "NSObject" {
+                var hasSubclass = false
+                var isNonFinalInTBD = false
+                if let parser = parser {
+                    let defaultModule = parser.defaultModule
+                    var pathComponents = [String]()
+                    if !defaultModule.isEmpty { pathComponents.append(defaultModule) }
+                    let enc = getEnclosingPath()
+                    if !enc.isEmpty { pathComponents.append(enc) }
+                    pathComponents.append(name)
+                    let fullClassName = pathComponents.joined(separator: ".")
+                    
+                    if parser.nonFinalClasses.contains(fullClassName) {
+                        isNonFinalInTBD = true
+                    }
+                    
+                    func scanForSubclass(node: TypeNode) {
+                        if node.kind == "class", let base = node.baseClass {
+                            let cleanBase = base.components(separatedBy: ".").last ?? ""
+                            if cleanBase == name {
+                                hasSubclass = true
+                            }
+                        }
+                        for nested in node.nestedTypes.values {
+                            scanForSubclass(node: nested)
+                        }
+                    }
+                    for mod in parser.modules.values {
+                        scanForSubclass(node: mod)
+                    }
+                }
+                if !hasSubclass && !isNonFinalInTBD {
+                    classVisibility = "final " + classVisibility
+                }
+            }
+            let fixedLayoutAttr = (actualKind == "class") ? "@_fixed_layout " : ""
+            lines.append("\(indent)\(fixedLayoutAttr)\(classVisibility) \(actualKind) \(displayTypeName)\(inheritance) {")
+        }
         
         let nextIndent = indent + "    "
         
@@ -496,9 +610,9 @@ class TypeNode {
             case .initializer(let sig):
                 isOverride = baseClass == "NSObject" && sig.starts(with: "init()")
             case .property(let n, _, _, _):
-                isOverride = baseClass == "NSObject" && ["description", "hash", "debugDescription"].contains(n)
+                isOverride = !isObjcBridged && baseClass == "NSObject" && ["description", "hash", "debugDescription"].contains(n)
             case .method(let n, _, _):
-                isOverride = baseClass == "NSObject" && ["isEqual"].contains(n)
+                isOverride = !isObjcBridged && baseClass == "NSObject" && ["isEqual"].contains(n)
             default:
                 isOverride = false
             }
@@ -540,14 +654,51 @@ class TypeNode {
                 }
             case .initializer(let sig):
                 var cleanedSig = injectDefaultArguments(signature: sig, methodName: "init", isStatic: false, parser: parser)
+                
+                var initGenericInScope = Set<String>()
+                if let openAngle = cleanedSig.firstIndex(of: "<"),
+                   let openParen = cleanedSig.firstIndex(of: "("),
+                   openAngle < openParen {
+                    var depth = 0
+                    var closeAngle: String.Index? = nil
+                    var i = openAngle
+                    while i < openParen {
+                        if cleanedSig[i] == "<" { depth += 1 }
+                        else if cleanedSig[i] == ">" {
+                            depth -= 1
+                            if depth == 0 { closeAngle = i; break }
+                        }
+                        i = cleanedSig.index(after: i)
+                    }
+                    if let ca = closeAngle {
+                        let inside = String(cleanedSig[cleanedSig.index(after: openAngle)..<ca])
+                        for param in inside.components(separatedBy: ",") {
+                            let p = param.trimmingCharacters(in: .whitespaces)
+                            if !p.isEmpty { initGenericInScope.insert(p) }
+                        }
+                    }
+                }
+                let effectiveScope = inScope.union(initGenericInScope)
+
                 if isProtocol {
                     cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
                     cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                     cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
                 } else {
-                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: inScope)
+                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: effectiveScope)
                 }
-                cleanedSig = cleanScope(cleanedSig)
+                
+                let localCleanScope = { (s: String) -> String in
+                    var res = s
+                    let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                    for p in placeholders {
+                        if !effectiveScope.contains(p) {
+                            res = res.replaceWord(p, with: "Any")
+                        }
+                    }
+                    return res
+                }
+                cleanedSig = localCleanScope(cleanedSig)
                 
                 var normalizedSig = cleanedSig
                 if let parser = parser, !parser.defaultModule.isEmpty {
@@ -561,7 +712,11 @@ class TypeNode {
                 else if isEnum {
                     lines.append("\(nextIndent)public \(cleanedSig) { fatalError() }")
                 }
-                else {
+                else if isObjcBridged {
+                    // Swift extension on an ObjC class: use @nonobjc convenience init to produce
+                    // the So-prefixed mangled symbols without conflicting with the ObjC -init.
+                    lines.append("\(nextIndent)@nonobjc public \(overrideMod)convenience \(cleanedSig) { fatalError() }")
+                } else {
                     // For classes, ensure the init body is non-empty to force symbol emission.
                     // If it's NSObject, use super.init(), otherwise fatalError().
                     let initBody = isOverride && cleanedSig.starts(with: "init()") ? "{ super.init() }" : "{ fatalError() }"
@@ -570,7 +725,12 @@ class TypeNode {
                     lines.append("\(nextIndent)\(requiredMod)public \(overrideMod)\(cleanedSig) \(initBody)")
                 }
             case .property(let n, let t, let isReadOnly, let isStatic):
-                let propKey = "\(isStatic ? "static" : "instance")-\(n)"
+                // Subscripts can have multiple overloads (e.g. subscript([Int]) and subscript(Int...))
+                // so include the type signature in the dedup key to allow both to emit.
+                let isSubscriptMember = n == "subscript" || n == "`subscript`"
+                let propKey = isSubscriptMember
+                    ? "\(isStatic ? "static" : "instance")-\(n)-\(t)"
+                    : "\(isStatic ? "static" : "instance")-\(n)"
                 if generatedProperties.contains(propKey) { continue }
                 generatedProperties.insert(propKey)
                 
@@ -593,13 +753,51 @@ class TypeNode {
                     cleanT = cleanT.replacePlaceholderDotsWithSelf()
                     cleanT = cleanT.replaceWord("A", with: "Self")
                     cleanT = cleanT.replaceMultiSegmentSelfPathsWithAny()
-                } else {
+                } else if !isSubscriptMember {
                     cleanT = cleanT.replaceGenericPlaceholderPathsWithAny(inScope: inScope)
+                    cleanT = cleanScope(cleanT)
+                } else {
+                    var subGenericInScope = Set<String>()
+                    if let openAngle = cleanT.firstIndex(of: "<"),
+                       let openParen = cleanT.firstIndex(of: "("),
+                       openAngle < openParen {
+                        var depth = 0
+                        var closeAngle: String.Index? = nil
+                        var i = openAngle
+                        while i < openParen {
+                            if cleanT[i] == "<" { depth += 1 }
+                            else if cleanT[i] == ">" {
+                                depth -= 1
+                                if depth == 0 { closeAngle = i; break }
+                            }
+                            i = cleanT.index(after: i)
+                        }
+                        if let ca = closeAngle {
+                            let inside = String(cleanT[cleanT.index(after: openAngle)..<ca])
+                            for param in inside.components(separatedBy: ",") {
+                                let p = param.trimmingCharacters(in: .whitespaces)
+                                if !p.isEmpty { subGenericInScope.insert(p) }
+                            }
+                        }
+                    }
+                    let effectiveScope = inScope.union(subGenericInScope)
+                    
+                    let localCleanScope = { (s: String) -> String in
+                        var res = s
+                        let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                        for p in placeholders {
+                            if !effectiveScope.contains(p) {
+                                res = res.replaceWord(p, with: "Any")
+                            }
+                        }
+                        return res
+                    }
+                    cleanT = localCleanScope(cleanT)
                 }
-                cleanT = cleanScope(cleanT)
 
                 let staticMod = isStatic ? "static " : ""
-                let finalMod = (!isStatic && self.kind == "class" && self.finalMembers.contains(n)) ? "final " : ""
+                let isFinal = isSubscriptMember ? (self.finalMembers.contains("\(n)[\(t)]") || self.finalMembers.contains("\(n)[\(cleanT)]")) : self.finalMembers.contains(n)
+                let finalMod = (!isStatic && self.kind == "class" && isFinal) ? "final " : ""
                 if n == "subscript" || n == "`subscript`" {
                     lines.append(renderSubscript(cleanT: cleanT, isProtocol: isProtocol, isReadOnly: isReadOnly, staticMod: staticMod, finalMod: finalMod, overrideMod: overrideMod, nextIndent: nextIndent, inScope: inScope))
                 } else if isProtocol {
@@ -608,10 +806,14 @@ class TypeNode {
                 } else {
                     let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
                     let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
-                    let hasLifetime = isReadOnly && (cleanT.contains("Span") || cleanT.contains("RawSpan") || cleanT.contains("MutableSpan"))
+                    let hasLifetime = isReadOnly && isLifetimeSpanType(cleanT)
                     let getPrefix = hasLifetime ? "@_lifetime(borrow self) get" : "get"
                     let suffix = isReadOnly ? "{ \(getPrefix) \(getter) }" : "{ \(getPrefix) \(getter) set {} }"
-                    lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)var \(n): \(cleanT) \(suffix)")
+                    if cleanT.contains("Mutex<") || cleanT.contains("Synchronization.Mutex<") {
+                        lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)let \(n): \(cleanT)")
+                    } else {
+                        lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)var \(n): \(cleanT) \(suffix)")
+                    }
                 }
             case .method(let n, let sig, var isStatic):
                 var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
@@ -624,8 +826,8 @@ class TypeNode {
                 
                 var lifetimeAttr = ""
                 if let arrowRange = cleanedSig.range(of: "->", options: .backwards) {
-                    let retPart = cleanedSig[arrowRange.upperBound...]
-                    if retPart.contains("Span") {
+                    let retPart = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                    if isLifetimeSpanType(retPart) {
                         lifetimeAttr = "@_lifetime(borrow self) "
                     }
                 }
@@ -838,8 +1040,9 @@ class TypeNode {
                         if left.hasSuffix(".Type") && !left.contains("`Type`") { left = left.replacingOccurrences(of: ".Type", with: ".`Type`") }
                         if right.hasSuffix(".Type") && !right.contains("`Type`") { right = right.replacingOccurrences(of: ".Type", with: ".`Type`") }
 
-                        let leftType = (left == right && self.kind != "class") ? "Self" : left
-                        let rightType = (left == right && self.kind != "class") ? "Self" : right
+                        let paramPrefix = self.hasConformance("~Copyable") ? "borrowing " : ""
+                        let leftType = paramPrefix + ((left == right && self.kind != "class") ? "Self" : left)
+                        let rightType = paramPrefix + ((left == right && self.kind != "class") ? "Self" : right)
                         lines.append("\(nextIndent)public static func == (lhs: \(leftType), rhs: \(rightType)) -> \(returnType) { \(returnType == "Bool" ? "true" : "fatalError()") }")
                         continue
                     }
@@ -954,9 +1157,15 @@ class TypeNode {
                     lines.append("\(nextIndent)open func encode(with coder: NSCoder) {}")
                 }
             }
+            if actualKind == "struct" && hasConformance("~Copyable") {
+                lines.append("\(nextIndent)deinit {}")
+            }
         }
         
         lines.append("\(indent)}")
+        if isObjcBridged && actualKind == "class" {
+            lines.append("\(indent)// --- End ObjC Extension ---")
+        }
         
         return lines.joined(separator: "\n")
     }
@@ -1084,6 +1293,10 @@ class TypeNode {
             } else if name == "Optional" && path == "Swift" {
                 constraintSuffix = constraintSuffix.replaceWord("A", with: "Wrapped")
             }
+            let isObjcExt = (parser?.getTopLevelModule(for: self) == "__C")
+            if isObjcExt {
+                extLines.append("// --- ObjC Extension (bridge-header required) ---")
+            }
             extLines.append("extension \(currentPath)\(constraintSuffix) {")
             let extNextIndent = "    "
             
@@ -1104,9 +1317,47 @@ class TypeNode {
                     if isProtocol {
                         cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                     }
-                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: extInScope)
-                    cleanedSig = extCleanScope(cleanedSig)
-                    extLines.append("\(extNextIndent)public \(cleanedSig) { fatalError() }")
+                    var initGenericInScope = Set<String>()
+                    if let openAngle = cleanedSig.firstIndex(of: "<"),
+                       let openParen = cleanedSig.firstIndex(of: "("),
+                       openAngle < openParen {
+                        var depth = 0
+                        var closeAngle: String.Index? = nil
+                        var i = openAngle
+                        while i < openParen {
+                            if cleanedSig[i] == "<" { depth += 1 }
+                            else if cleanedSig[i] == ">" {
+                                depth -= 1
+                                if depth == 0 { closeAngle = i; break }
+                            }
+                            i = cleanedSig.index(after: i)
+                        }
+                        if let ca = closeAngle {
+                            let inside = String(cleanedSig[cleanedSig.index(after: openAngle)..<ca])
+                            for param in inside.components(separatedBy: ",") {
+                                let p = param.trimmingCharacters(in: .whitespaces)
+                                if !p.isEmpty { initGenericInScope.insert(p) }
+                            }
+                        }
+                    }
+                    let effectiveScope = extInScope.union(initGenericInScope)
+                    cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny(inScope: effectiveScope)
+                    let localCleanScope = { (s: String) -> String in
+                        var res = s
+                        let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                        for p in placeholders {
+                            if !effectiveScope.contains(p) {
+                                res = res.replaceWord(p, with: "Any")
+                            }
+                        }
+                        return res
+                    }
+                    cleanedSig = localCleanScope(cleanedSig)
+                    if isObjcExt {
+                        extLines.append("\(extNextIndent)@nonobjc public convenience \(cleanedSig) { fatalError() }")
+                    } else {
+                        extLines.append("\(extNextIndent)public \(cleanedSig) { fatalError() }")
+                    }
                 case .property(let n, let t, let isReadOnly, let isStatic):
                     var cleanT = t
                     cleanT = cleanT.stripParentPrefix(parentName: self.name)
@@ -1125,14 +1376,25 @@ class TypeNode {
                     } else {
                         let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
                         let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
-                        let hasLifetime = isReadOnly && (cleanT.contains("Span") || cleanT.contains("RawSpan") || cleanT.contains("MutableSpan"))
+                        let hasLifetime = isReadOnly && isLifetimeSpanType(cleanT)
                         let getPrefix = hasLifetime ? "@_lifetime(borrow self) get" : "get"
                         let suffix = isReadOnly ? "{ \(getPrefix) \(getter) }" : "{ \(getPrefix) \(getter) set {} }"
-                        extLines.append("\(extNextIndent)public \(staticMod)var \(n): \(cleanT) \(suffix)")
+                        if cleanT.contains("Mutex<") || cleanT.contains("Synchronization.Mutex<") {
+                            extLines.append("\(extNextIndent)public \(staticMod)let \(n): \(cleanT)")
+                        } else {
+                            extLines.append("\(extNextIndent)public \(staticMod)var \(n): \(cleanT) \(suffix)")
+                        }
                     }
-                case .method(let name, let sig, let isStatic):
-                    var cleanedSig = sig
-                    cleanedSig = injectDefaultArguments(signature: cleanedSig, methodName: name, isStatic: isStatic, parser: parser)
+                case .method(let name, let sig, var isStatic):
+                    var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
+                                        .replacingOccurrences(of: " prefix", with: "")
+                                        .replacingOccurrences(of: " postfix", with: "")
+                    let cleanN = name.replacingOccurrences(of: " infix", with: "").replacingOccurrences(of: " prefix", with: "").replacingOccurrences(of: " postfix", with: "").trimmingCharacters(in: .whitespaces)
+                    let isOperator = !cleanN.isEmpty && cleanN.allSatisfy { "+-*/=<>&|^~%!?.".contains($0) }
+                    if isOperator {
+                        isStatic = true
+                    }
+                    cleanedSig = injectDefaultArguments(signature: cleanedSig, methodName: cleanN, isStatic: isStatic, parser: parser)
                     var shouldReplaceA = true
                     if cleanedSig.hasGenericPlaceholderInBrackets(p: "A") || cleanedSig.hasGenericPlaceholderInBrackets(p: "A1") {
                         shouldReplaceA = false
@@ -1212,7 +1474,8 @@ class TypeNode {
                     let staticMod = isStatic ? "static " : ""
                     var extLifetimeAttr = ""
                     if let arrowRange = cleanedSig.range(of: "->", options: .backwards) {
-                        if cleanedSig[arrowRange.upperBound...].contains("Span") {
+                        let retPart = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                        if isLifetimeSpanType(retPart) {
                             extLifetimeAttr = "@_lifetime(borrow self) "
                         }
                     }
@@ -1229,6 +1492,9 @@ class TypeNode {
                 }
             }
             extLines.append("}")
+            if isObjcExt {
+                extLines.append("// --- End ObjC Extension ---")
+            }
             return extLines.joined(separator: "\n") + "\n\n"
         }
 
@@ -1393,7 +1659,7 @@ class TypeNode {
             genericPart = ""
             retType = "Any"
             if let split = splitFunctionType(cleanedSig) {
-                var paramsPart = split.params
+                let paramsPart = split.params
                 retType = split.ret
                 if paramsPart.hasPrefix("<") {
                     if let closeAngleIdx = paramsPart.firstIndex(of: ">") {
@@ -1408,13 +1674,27 @@ class TypeNode {
             }
         }
         
+        if !genericPart.isEmpty {
+            let inner = genericPart.trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
+            let gps = inner.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            var newGps = [String]()
+            for gp in gps {
+                if params.contains("InlineArray<\(gp),") {
+                    newGps.append("let \(gp): Int")
+                } else {
+                    newGps.append(gp)
+                }
+            }
+            genericPart = "<" + newGps.joined(separator: ", ") + ">"
+        }
+        
         if isProtocol {
             let suffix = isReadOnly ? "{ get }" : "{ get set }"
             return "\(nextIndent)\(staticMod)subscript\(genericPart)\(params) -> \(retType) \(suffix)"
         } else {
             let defaultVal = TypeNode.defaultReturnValue(for: retType)
             let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
-            let hasLifetime = isReadOnly && (retType.contains("Span") || retType.contains("RawSpan") || retType.contains("MutableSpan"))
+            let hasLifetime = isReadOnly && isLifetimeSpanType(retType)
             let getPrefix = hasLifetime ? "@_lifetime(borrow self) get" : "get"
             let suffix = isReadOnly ? "{ \(getPrefix) \(getter) }" : "{ \(getPrefix) \(getter) set {} }"
             return "\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)subscript\(genericPart)\(params) -> \(retType) \(suffix)"

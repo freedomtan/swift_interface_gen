@@ -513,7 +513,7 @@ extension String {
                     let lastComponent = components.last ?? ""
                     let prefix = String(result[prefixStartIdx..<dotIdx])
                     
-                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"]
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence"]
                     let suffixComponents = Array(components.dropFirst())
                     let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
                     
@@ -528,8 +528,10 @@ extension String {
                             result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "\(actualPrefix).\(sub)")
                             startSearch = result.index(prefixStartIdx, offsetBy: actualPrefix.count + 1 + sub.count, limitedBy: result.endIndex) ?? result.endIndex
                         } else {
-                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "\(actualPrefix).\(lastComponent)")
-                            startSearch = result.index(prefixStartIdx, offsetBy: actualPrefix.count + 1 + lastComponent.count, limitedBy: result.endIndex) ?? result.endIndex
+                            // Associated-type path like A.EventType or A.Stream cannot be expressed
+                            // without the protocol constraint. Replace with Any for mock interfaces.
+                            result.replaceSubrange(prefixStartIdx..<endPathIdx, with: "Any")
+                            startSearch = result.index(prefixStartIdx, offsetBy: 3, limitedBy: result.endIndex) ?? result.endIndex
                         }
                     } else if ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"].contains(lastComponent) {
                         if allAllowed {
@@ -1284,7 +1286,16 @@ extension String {
                         }
                         
                         if count > 0 {
-                            let placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
+                            let placeholders: String
+                            if word == "Result" && count == 2 {
+                                placeholders = "Any, Error"
+                            } else if word == "InlineArray" && count == 2 {
+                                placeholders = "1, Any"
+                            } else if word == "CatalogAsset" && count == 2 {
+                                placeholders = "ModelCatalog.GenericA, ModelCatalog.GenericA"
+                            } else {
+                                placeholders = Array(repeating: "Any", count: count).joined(separator: ", ")
+                            }
                             result.append("\(word)<\(placeholders)>")
                             continue
                         }
