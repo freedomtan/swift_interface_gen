@@ -513,7 +513,7 @@ extension String {
                     let lastComponent = components.last ?? ""
                     let prefix = String(result[prefixStartIdx..<dotIdx])
                     
-                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence"]
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence", "EventType", "Stream"]
                     let suffixComponents = Array(components.dropFirst())
                     let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
                     
@@ -622,7 +622,7 @@ extension String {
     // selfPattern1: \b([a-zA-Z0-9_]+\.)+\(self.name)<[^>]+> -> Self
     // selfPattern2: \b([a-zA-Z0-9_]+\.)+\(self.name)\b -> Self
     // prefixPattern: \b([a-zA-Z0-9_]+\.)+\(self.name)\b -> self.name
-    func replaceSelfPattern(parentName: String, enclosingPath: String, replaceWith: String) -> String {
+    func replaceSelfPattern(parentName: String, enclosingPath: String, replaceWith: String, defaultModule: String = "") -> String {
         var result = self
         var startSearch = result.startIndex
         while let range = result.range(of: parentName, range: startSearch..<result.endIndex) {
@@ -673,10 +673,13 @@ extension String {
             }
             
             if isValidPrefix {
-                // If this is a nested type with a non-empty enclosing path, verify the scanned prefix ends with enclosingPath + "."
-                if !enclosingPath.isEmpty {
-                    let scannedPrefix = String(result[prefixStartIdx...beforeDotIdx])
-                    if !scannedPrefix.hasSuffix(enclosingPath + ".") {
+                let scannedPrefix = range.lowerBound > result.startIndex ? String(result[prefixStartIdx..<beforeDotIdx]) : ""
+                if enclosingPath.isEmpty {
+                    if !scannedPrefix.isEmpty && !defaultModule.isEmpty && scannedPrefix != defaultModule {
+                        isValidPrefix = false
+                    }
+                } else {
+                    if scannedPrefix != enclosingPath && (!defaultModule.isEmpty && scannedPrefix != (defaultModule + "." + enclosingPath)) {
                         isValidPrefix = false
                     }
                 }
@@ -984,10 +987,25 @@ extension String {
                     baseType = String(lastComponent[result.index(after: underscoreIdx)...])
                 }
                 
-                let isConcrete = concreteTypes.contains(baseType) || concreteTypes.contains(lastComponent)
+                let components = fullType.components(separatedBy: ".")
+                var isNestedUnderConcrete = false
+                if components.count > 1 {
+                    let first = components[0]
+                    if concreteTypes.contains(first) {
+                        isNestedUnderConcrete = true
+                    } else if components.count > 2 {
+                        let second = components[1]
+                        if concreteTypes.contains(second) {
+                            isNestedUnderConcrete = true
+                        }
+                    }
+                }
+                
+                let isConcrete = concreteTypes.contains(baseType) || concreteTypes.contains(lastComponent) || isNestedUnderConcrete
                 // Don't strip if this type is ALSO a protocol (e.g. ResourceBundle is both a
                 // concrete nested enum AND a top-level protocol — keep 'any' for the protocol usage)
-                let isAlsoProtocol = protocolNames.contains(lastComponent) || protocolNames.contains(baseType)
+                // but if it is nested under a concrete type, it cannot be a protocol in Swift
+                let isAlsoProtocol = !isNestedUnderConcrete && (protocolNames.contains(lastComponent) || protocolNames.contains(baseType))
                 
                 if isConcrete && !isAlsoProtocol {
                     result.replaceSubrange(range, with: "")
@@ -1276,13 +1294,18 @@ extension String {
                             }
                         }
                     }
-                    
                     if !followedByGeneric && !precededByDefinition {
                         var count = 0
                         if let cVal = flatGenerics[word] {
                             count = cVal
                         } else if let cVal = shortGenerics[word] {
-                            count = cVal
+                            var isPrecededByDot = false
+                            if start > 0 && chars[start - 1] == "." {
+                                isPrecededByDot = true
+                            }
+                            if !isPrecededByDot {
+                                count = cVal
+                            }
                         }
                         
                         if count > 0 {

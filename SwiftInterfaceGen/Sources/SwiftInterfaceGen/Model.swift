@@ -741,7 +741,7 @@ class TypeNode {
                 // Strip the parent's fully qualified prefix from any nested types
                 cleanT = cleanT.stripParentPrefix(parentName: self.name)
 
-                cleanT = cleanT.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith)
+                cleanT = cleanT.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith, defaultModule: parser?.defaultModule ?? "")
                 cleanT = cleanT.replaceWordWithoutGeneric(self.name, with: selfReplaceWith)
 
                 if let brace = cleanT.firstIndex(of: "{") {
@@ -843,7 +843,7 @@ class TypeNode {
                 // Strip the parent's fully qualified prefix from any nested types
                 cleanedSig = cleanedSig.stripParentPrefix(parentName: self.name)
                 
-                cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith)
+                cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith, defaultModule: parser?.defaultModule ?? "")
                 cleanedSig = cleanedSig.replaceWordWithoutGeneric(self.name, with: selfReplaceWith)
                 
                 var shouldReplaceA = true

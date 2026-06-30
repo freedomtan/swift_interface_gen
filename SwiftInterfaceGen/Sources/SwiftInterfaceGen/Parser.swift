@@ -1305,6 +1305,7 @@ class Parser {
         t = t.replacingOccurrences(of: "any (Swift\\.)?AsyncSequence<[^>]+>", with: "any AsyncSequence", options: .regularExpression)
         t = t.replacingOccurrences(of: "\\(extension in [^)]+\\):", with: "", options: .regularExpression)
         
+
         // For each discovered protocol, add 'any' prefix when used as an existential type.
         // Track which ones are "ambiguous" (also have a concrete type with the same short name)
         // so we can preserve their module prefix to avoid Swift shadowing inside nested type bodies.
@@ -2818,6 +2819,28 @@ class Parser {
             }
         }
         return current
+    }
+
+    func isConcreteTypeNonGeneric(shortName: String) -> Bool {
+        func check(node: TypeNode) -> Bool? {
+            if node.name == shortName {
+                return !node.isGeneric
+            }
+            for child in node.nestedTypes.values {
+                if let res = check(node: child) {
+                    return res
+                }
+            }
+            return nil
+        }
+        for module in modules.values {
+            for type in module.nestedTypes.values {
+                if let res = check(node: type) {
+                    return res
+                }
+            }
+        }
+        return false
     }
 }
 

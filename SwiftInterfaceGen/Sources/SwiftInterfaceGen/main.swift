@@ -832,12 +832,17 @@ struct SwiftInterfaceGen {
             }
             guard let firstChar = shortName.first, firstChar.isUppercase else { continue } // Only types!
             
-            let flatName = t.replacingOccurrences(of: ".", with: "_")
-            flatGenerics[flatName] = max(flatGenerics[flatName] ?? 0, count)
+            let isNonGenericConcrete = parser.isConcreteTypeNonGeneric(shortName: shortName)
+            if !isNonGenericConcrete {
+                let flatName = t.replacingOccurrences(of: ".", with: "_")
+                flatGenerics[flatName] = max(flatGenerics[flatName] ?? 0, count)
+            }
             
             let components = t.components(separatedBy: ".")
             if components.count <= 2 {
-                shortGenerics[shortName] = max(shortGenerics[shortName] ?? 0, count)
+                if !isNonGenericConcrete {
+                    shortGenerics[shortName] = max(shortGenerics[shortName] ?? 0, count)
+                }
             }
         }
         
@@ -896,6 +901,51 @@ struct SwiftInterfaceGen {
                     c.replaceSubrange(r, with: "\(prefix)<Any>")
                 }
             }
+        }
+
+        if parser.defaultModule == "AppleIntelligenceReporting" {
+            c = c.replacingOccurrences(
+                of: "class lazySource<A> {",
+                with: "class lazySource<A> where A: IntelligencePlatformLibrary.Stream {"
+            )
+            c = c.replacingOccurrences(
+                of: "class lazySourceInternal<A> {",
+                with: "class lazySourceInternal<A> where A: IntelligencePlatformLibrary_AppleInternal.Stream {"
+            )
+            c += """
+
+extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.Availability: IntelligencePlatformLibrary.Stream {
+    public typealias EventType = Any
+}
+extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.Invocation.Step: IntelligencePlatformLibrary.Stream {
+    public typealias EventType = Any
+}
+extension IntelligencePlatformLibrary.Library.Streams.MobileAsset.LifeCycle.InstrumentationEvent: IntelligencePlatformLibrary.Stream {
+    public typealias EventType = Any
+}
+extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.Buddy: IntelligencePlatformLibrary.Stream {
+    public typealias EventType = Any
+}
+extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.MobileAsset: IntelligencePlatformLibrary.Stream {
+    public typealias EventType = Any
+}
+extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.MobileAssetVerbose: IntelligencePlatformLibrary.Stream {
+    public typealias EventType = Any
+}
+extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.ModelCatalog: IntelligencePlatformLibrary.Stream {
+    public typealias EventType = Any
+}
+extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.SoftwareUpdateController: IntelligencePlatformLibrary.Stream {
+    public typealias EventType = Any
+}
+extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.UnifiedAssetFramework: IntelligencePlatformLibrary.Stream {
+    public typealias EventType = Any
+}
+extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.AppleIntelligence.Reporting.ModelIO: IntelligencePlatformLibrary_AppleInternal.Stream {
+    public typealias EventType = Any
+}
+
+"""
         }
 
         // Final cleanup of redundant newlines
@@ -1192,7 +1242,8 @@ struct SwiftInterfaceGen {
                 kindKeyword = "class"
             }
             
-            var s = "\(indent)public \(kindKeyword) \(name)\(params)"
+            let escapedName = ["Type", "Protocol", "Self", "self"].contains(name) ? "`\(name)`" : name
+            var s = "\(indent)public \(kindKeyword) \(escapedName)\(params)"
             if kindKeyword == "struct" {
                 s += ": Codable, Hashable, Sendable {\n"
                 s += "\(indent)    public init() {}\n"
@@ -1434,8 +1485,7 @@ struct SwiftInterfaceGen {
             for child in root.nested.values {
                 let fullPath = "\(mod).\(child.name)"
                 if child.isProtocol || protocolAssociatedTypes[fullPath] != nil ||
-                   child.name == "Visitor" || child.name == "Decoder" || child.name == "Encoder" ||
-                   child.name == "Message" || child.name == "Enum" {
+                   ["Visitor", "Decoder", "Encoder", "Message", "Enum", "Stream"].contains(child.name) {
                     child.isProtocol = true
                     topLevelProtocols.append(child)
                 } else {
@@ -1466,6 +1516,9 @@ struct SwiftInterfaceGen {
                             fileContent += "    associatedtype \(assoc)\n"
                         }
                     }
+                }
+                if proto.name == "Stream" {
+                    fileContent += "    associatedtype EventType\n"
                 }
                 fileContent += "}\n\n"
             }
