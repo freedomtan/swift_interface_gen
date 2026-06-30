@@ -457,6 +457,10 @@ class TypeNode {
             displayTypeName += "<A: Equatable>"
             isGeneric = false
             inScope.insert("A")
+        } else if typeName == "ResourceBundleIdentifier" {
+            displayTypeName += "<A: ResourceBundle>"
+            isGeneric = false
+            inScope.insert("A")
         } else if typeName == "XPCServiceClientConnection" {
             displayTypeName += "<A: XPCService>"
             isGeneric = false
