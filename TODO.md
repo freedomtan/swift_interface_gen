@@ -5,6 +5,9 @@
 - [x] Implement target-isolated dynamic stub generation directories (`tmp_stubs_{name}`) to prevent dependency-resolution overwrite conflicts.
 - [x] Solve namespace conflicts when nested structures match external module names (e.g. `ModelCatalog.Model.ResourceBundle.TokenGeneration`).
 - [x] Auto-Cleanup Flag: Added a `--clean` command-line option to `orchestrate.py` to automatically remove target-specific temporary stub directories (like `tmp_stubs_{name}`) after successful runs.
+- [x] **Eliminate all ModelCatalog first-pass stubs (was 11, then 10, now 0):**
+  - Constrained extension `ResourceBundleIdentifier<where A==LLMBundle>.serverConfiguration()` fixed via `<A: ResourceBundle>` generic constraint in `Model.swift`.
+  - `fA_` default-argument accessor stubs eliminated by: (a) emitting typed constant defaults (`[]`, `[:]`, `{ false }`, `{ _ in false }`, `_Default_Proto()`) so Swift natively compiles the thunks, and (b) switching `--compare` from `nm -gU` to `nm -U` so locally-scoped thunks are found without assembly stubs.
 
 ## Future Improvements
 
@@ -13,9 +16,6 @@
 - [ ] **Parallel Compilation:** Build independent branches of the framework dependency graph concurrently to speed up multi-framework compilation runs.
 
 ### 2. Generator Improvements
-- [ ] **Eliminate 11 ModelCatalog first-pass stubs:** The remaining stubs fall into known categories; resolving them would allow ModelCatalog to build with 0 assembly stubs:
-  - **`fA_` default-argument accessors (10 stubs):** Functions like `Catalog.isIFPEnabled(gestalt:)` and `TokenBucketInMemoryRateLimiter.init(interval:dateProvider:)` have default parameter values. Swift only exports stable `fA_` data symbols when defaults are constant expressions (literals, `nil`, `[]`). Current approach uses `dummyDefaultValue()` which produces a local-only symbol. Fix: detect the parameter type from the interface and emit a typed literal default (e.g. `nil` for protocol existentials, `0.0` for `Double`, `{}` for closures).
-  - **Constrained extension method (1 stub):** `ResourceBundleIdentifier<where A == LLMBundle>.serverConfiguration()` — a type-equality-constrained extension. Parser support for `where A == ConcreteType` constraints is needed to emit `extension ResourceBundleIdentifier where A == LLMBundle { func serverConfiguration() ... }`.
 - [ ] **Associated Type & Protocol Requirement Reconstructor:** Extract associated types and required members from external protocols to generate more complete stub definitions, reducing compilation layout errors.
 - [ ] **Cross-SDK Recompilation Support:** Extend the SDK search paths and target compilation commands to support compiling mock private frameworks for iOS, iPadOS, watchOS, and tvOS simulators.
 - [ ] **Optimized Swift ABI Nominal Type Classification:** Enhance the nominal type lookup logic to better classify enums, classes, and protocols, especially in obscure generic constraints.

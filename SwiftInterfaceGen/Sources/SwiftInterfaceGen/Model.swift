@@ -45,6 +45,12 @@ class TypeNode {
 
     static func getDefaultValue(for type: String) -> String {
         var cleanType = type.trimmingCharacters(in: .whitespaces)
+        // Strip @escaping / @autoclosure / @Sendable attributes
+        while cleanType.hasPrefix("@") {
+            if let spaceIdx = cleanType.firstIndex(of: " ") {
+                cleanType = String(cleanType[cleanType.index(after: spaceIdx)...]).trimmingCharacters(in: .whitespaces)
+            } else { break }
+        }
         if cleanType.hasPrefix("Swift.") {
             cleanType = String(cleanType.dropFirst(6))
         }
@@ -69,6 +75,48 @@ class TypeNode {
         if cleanType.hasPrefix("Set<") {
             return "[]"
         }
+        // Closure types: "(Args) -> ReturnType" or "(Args) throws -> ReturnType"
+        if cleanType.hasPrefix("(") {
+            // Find the matching closing paren for the argument list
+            var depth = 0
+            var closeParenIdx: String.Index? = nil
+            var i = cleanType.startIndex
+            while i < cleanType.endIndex {
+                let ch = cleanType[i]
+                if ch == "(" { depth += 1 }
+                else if ch == ")" {
+                    depth -= 1
+                    if depth == 0 {
+                        closeParenIdx = i
+                        break
+                    }
+                }
+                i = cleanType.index(after: i)
+            }
+            if let closeParen = closeParenIdx {
+                let argsPart = String(cleanType[cleanType.index(after: cleanType.startIndex)..<closeParen])
+                    .trimmingCharacters(in: .whitespaces)
+                let afterParen = String(cleanType[cleanType.index(after: closeParen)...]).trimmingCharacters(in: .whitespaces)
+                // afterParen is "-> ReturnType" or "throws -> ReturnType"
+                var retType = "Void"
+                if let arrowRange = afterParen.range(of: "->") {
+                    retType = String(afterParen[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                }
+                let retDefault = getDefaultValue(for: retType)
+                if argsPart.isEmpty {
+                    return "{ \(retDefault) }"
+                } else {
+                    return "{ _ in \(retDefault) }"
+                }
+            }
+        }
+        // Protocol existential: "any ProtocolName" or "any Module.ProtocolName"
+        // Use a sentinel struct _Default_ProtocolName that will be emitted by postProcess.
+        if cleanType.hasPrefix("any ") {
+            let protoName = String(cleanType.dropFirst(4))
+                .components(separatedBy: ".").last ?? String(cleanType.dropFirst(4))
+            return "_Default_\(protoName)()"
+        }
         return "dummyDefaultValue()"
     }
 
@@ -90,12 +138,21 @@ class TypeNode {
 
     func injectDefaultArguments(signature: String, methodName: String, isStatic: Bool, parser: Parser?) -> String {
         guard let parser = parser else { return signature }
-        guard let openParen = signature.firstIndex(of: "("),
-              let closeParen = signature.lastIndex(of: ")"),
-              openParen < closeParen else {
-            return signature
+        guard let openParen = signature.firstIndex(of: "(") else { return signature }
+        // Find the matching close paren by depth to avoid matching tuple return types
+        var depth = 0
+        var closeParen: String.Index? = nil
+        var idx = openParen
+        while idx < signature.endIndex {
+            if signature[idx] == "(" { depth += 1 }
+            else if signature[idx] == ")" {
+                depth -= 1
+                if depth == 0 { closeParen = idx; break }
+            }
+            idx = signature.index(after: idx)
         }
-        
+        guard let closeParen = closeParen, openParen < closeParen else { return signature }
+
         let paramsStr = String(signature[signature.index(after: openParen)..<closeParen])
         // Split parameters by top-level commas
         let params = parser.splitTopLevelCommas(paramsStr)

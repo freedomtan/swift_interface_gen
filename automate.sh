@@ -208,7 +208,9 @@ mkdir -p "$MODULE_DIR"
 
 echo "--- Emitting Swift Module Interface ---"
 # Strip stubs to prevent duplicate/conflicting symbols during module compilation
-sed -n '/\/\/ --- Automatically Generated Self-Alignment Stubs ---/q;p' "${FRAMEWORK}Interface.swift" > "/tmp/${FRAMEWORK}Interface_module.swift"
+sed -n '/\/\/ --- Automatically Generated Self-Alignment Stubs ---\|\/\/ --- Protocol Default Sentinels/q;p' "${FRAMEWORK}Interface.swift" \
+  | sed 's/ = _Default_[A-Za-z_][A-Za-z0-9_]*()//g' \
+  > "/tmp/${FRAMEWORK}Interface_module.swift"
 
 swiftc -emit-module -module-name "$FRAMEWORK" "/tmp/${FRAMEWORK}Interface_module.swift" \
     -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \

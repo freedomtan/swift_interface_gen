@@ -956,6 +956,73 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             newLines.append(line)
         }
         c = newLines.joined(separator: "\n")
+        // Emit sentinel structs for any protocol existential defaults (_Default_ProtocolName)
+        // so that "= _Default_Foo()" compiles and produces a stable fA_ symbol.
+        let defaultSentinelPattern = "_Default_([A-Za-z_][A-Za-z0-9_]*)\\(\\)"
+        var sentinelProtocols = [String]()
+        var searchRange = c.startIndex..<c.endIndex
+        while let matchRange = c.range(of: defaultSentinelPattern, options: .regularExpression, range: searchRange) {
+            let matched = String(c[matchRange])
+            // Extract protocol name between _Default_ and ()
+            if let start = matched.range(of: "_Default_")?.upperBound,
+               let end = matched.range(of: "()")?.lowerBound {
+                let proto = String(matched[start..<end])
+                if !sentinelProtocols.contains(proto) {
+                    sentinelProtocols.append(proto)
+                }
+            }
+            searchRange = matchRange.upperBound..<c.endIndex
+        }
+        // Build the sentinel struct source — placed after the generic helpers so Phase A still
+        // sees GenericA/etc., but stripped at the sentinel marker for module emit.
+        var sentinelSource = ""
+        for proto in sentinelProtocols {
+            // Remove any previously generated bare stub for this name (e.g. from unknown-type scan)
+            let barePattern = "public struct _Default_\(proto):[^\n]*\n?"
+            c = c.replacingOccurrences(of: barePattern, with: "", options: .regularExpression)
+            // Scan the generated code for this protocol's requirements and synthesise stubs.
+            var members = [String]()
+            if let protoRange = c.range(of: "public protocol \(proto)") {
+                // Find the opening brace
+                if let braceStart = c[protoRange.upperBound...].firstIndex(of: "{") {
+                    var depth = 1
+                    var idx = c.index(after: braceStart)
+                    var bodyLines = [String]()
+                    while idx < c.endIndex && depth > 0 {
+                        if c[idx] == "{" { depth += 1 }
+                        else if c[idx] == "}" { depth -= 1; if depth == 0 { break } }
+                        else if c[idx] == "\n" {
+                            let lineStart = c.index(after: idx)
+                            if let lineEnd = c[lineStart...].firstIndex(of: "\n") {
+                                bodyLines.append(String(c[lineStart..<lineEnd]))
+                            }
+                        }
+                        idx = c.index(after: idx)
+                    }
+                    for line in bodyLines {
+                        let trimmed = line.trimmingCharacters(in: .whitespaces)
+                        if trimmed.hasPrefix("var ") {
+                            // e.g. "var foo: Type { get }" → emit computed property stub
+                            if let colonIdx = trimmed.firstIndex(of: ":") {
+                                let varName = String(trimmed[trimmed.index(trimmed.startIndex, offsetBy: 4)..<colonIdx]).trimmingCharacters(in: .whitespaces)
+                                var typePart = String(trimmed[trimmed.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
+                                if let braceIdx = typePart.firstIndex(of: "{") {
+                                    typePart = String(typePart[..<braceIdx]).trimmingCharacters(in: .whitespaces)
+                                }
+                                members.append("    public var \(varName): \(typePart) { get { fatalError() } }")
+                            }
+                        } else if trimmed.hasPrefix("func ") {
+                            // e.g. "func now() -> Date" → emit method stub
+                            let sig = trimmed.hasPrefix("func ") ? String(trimmed.dropFirst(5)) : trimmed
+                            members.append("    public func \(sig) { fatalError() }")
+                        }
+                    }
+                }
+            }
+            let body = members.isEmpty ? "" : "\n" + members.joined(separator: "\n") + "\n"
+            sentinelSource += "\npublic struct _Default_\(proto): \(proto) { public init() {}\(body)}\n"
+        }
+
         c += "\n\npublic func dummyDefaultValue<T>() -> T { fatalError() }\n"
         c += "\n"
         c += "public struct GenericA: Hashable, Codable, Sendable {}\n"
@@ -972,6 +1039,12 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c += "    public var baseURL: URL { get { fatalError() } }\n"
             c += "    public var metadataURL: URL { get { fatalError() } }\n"
             c += "}\n"
+        }
+        // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
+        // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
+        if !sentinelSource.isEmpty {
+            c += "\n// --- Protocol Default Sentinels (dylib-only, stripped for module emit) ---\n"
+            c += sentinelSource
         }
         return c
     }
@@ -1051,8 +1124,10 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
         
         // Generate stubs.s
         var stubsContent = ".data\n.align 3\n"
+        var stubCount = 0
         for sym in missing {
             stubsContent += ".globl \(sym)\n\(sym):\n    .quad 0\n"
+            stubCount += 1
         }
         do {
             try stubsContent.write(toFile: stubsSPath, atomically: true, encoding: .utf8)
@@ -1062,10 +1137,13 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
         }
     }
     
-    static func extractDylibSymbols(dylibPath: String) -> Set<String> {
+static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/nm")
-        process.arguments = ["-gU", dylibPath]
+        // Use -U (no -g) so local symbols (e.g. Swift fA_ default-argument thunks emitted
+        // as local 't' under -enable-library-evolution) are included in the comparison.
+        // Only .quad 0 stubs are generated for symbols truly absent from the dylib.
+        process.arguments = ["-U", dylibPath]
         
         let pipe = Pipe()
         process.standardOutput = pipe
