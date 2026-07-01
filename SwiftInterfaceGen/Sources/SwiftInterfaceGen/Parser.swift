@@ -40,7 +40,7 @@ class Parser {
     let systemTypes = SystemTypesSet(base: [
         "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
         "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
-        "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder",
+        "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "Never",
         // Range types require Comparable constraints — never alias with <Any>
         "Range", "ClosedRange", "PartialRangeFrom", "PartialRangeThrough", "PartialRangeUpTo",
         "UnsafeRawBufferPointer", "UnsafeMutableRawBufferPointer",
