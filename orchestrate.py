@@ -180,12 +180,20 @@ def build_framework(name):
     # 1. Build swift-interface-gen first
     print("--- Building Generator ---")
     subprocess.check_call([
+        "clang++", "-O3", "-std=c++11", "-c",
+        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.cpp",
+        "-o", "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o"
+    ])
+    subprocess.check_call([
         "swiftc", "-O", "-parse-as-library",
         "SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift",
         "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Parser.swift",
         "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Model.swift",
         "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Config.swift",
         "SwiftInterfaceGen/Sources/SwiftInterfaceGen/String+RegexFree.swift",
+        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/TreeNode.swift",
+        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o",
+        "-lc++",
         "-o", "./swift-interface-gen"
     ])
     

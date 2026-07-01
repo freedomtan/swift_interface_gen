@@ -937,9 +937,8 @@ class Parser {
             }
         }
 
-        if cleanD.contains(" : ") {
-            let parts = cleanD.components(separatedBy: " : ")
-            var fullMemberPath = parts[0].trimmingCharacters(in: .whitespaces)
+        if let firstColonRange = cleanD.range(of: " : ") {
+            var fullMemberPath = String(cleanD[..<firstColonRange.lowerBound]).trimmingCharacters(in: .whitespaces)
             
             var isReadOnly = d_orig.contains(" { get }") || !d_orig.contains(" { get set }")
             if fullMemberPath.hasSuffix(".getter") {
@@ -959,7 +958,7 @@ class Parser {
             let (typeName, memberName) = splitPath(fullMemberPath)
             let parentName = typeName.components(separatedBy: ".").last!
             let isSubscript = memberName == "subscript" || memberName == "`subscript`"
-            var typeVal = parts[1]
+            var typeVal = String(cleanD[firstColonRange.upperBound...]).trimmingCharacters(in: .whitespaces)
             if isSubscript {
                 if typeVal.hasPrefix("<") {
                     let pCount = parentGenericCount(typeName: typeName)
@@ -1494,6 +1493,15 @@ class Parser {
 
         if t.contains("& any ") {
             t = t.replacingOccurrences(of: "& any ", with: "& ")
+        }
+
+        // Parenthesize optional existentials: 'any Protocol?' -> '(any Protocol)?'
+        if t.contains("any ") {
+            t = t.replacingOccurrences(
+                of: #"any\s+([a-zA-Z0-9_.]+)([\?!])"#,
+                with: "(any $1)$2",
+                options: .regularExpression
+            )
         }
 
         if isMethodSignature {

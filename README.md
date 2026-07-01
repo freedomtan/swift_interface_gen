@@ -51,7 +51,8 @@ If you prefer to run the steps manually:
 ### 1. Build the Generator
 ```bash
 cd SwiftInterfaceGen/Sources/SwiftInterfaceGen
-swiftc -parse-as-library main.swift Parser.swift Model.swift Config.swift String+RegexFree.swift -o ../../../swift-interface-gen
+clang++ -O3 -std=c++11 -c DemangleWrapper.cpp -o DemangleWrapper.o
+swiftc -parse-as-library main.swift Parser.swift Model.swift Config.swift String+RegexFree.swift TreeNode.swift DemangleWrapper.o -lc++ -o ../../../swift-interface-gen
 cd ../../../
 ```
 

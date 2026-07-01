@@ -449,65 +449,23 @@ struct SwiftInterfaceGen {
         return "\(sdkRoot)\(lib).tbd"
     }
 
-    struct TreeNode {
-        let kind: String
-        let text: String?
-        let indent: Int
-    }
 
-    class TreeNodeObj {
-        let kind: String
-        let text: String?
-        var children = [TreeNodeObj]()
-        init(kind: String, text: String?) {
-            self.kind = kind
-            self.text = text
-        }
-    }
 
     static func runDemangleExpand(symbols: [String], parser: Parser) -> [String: [Int: Bool]] {
         var allResults: [String: [Int: Bool]] = [:]
-        let chunkSize = 100
-        for i in stride(from: 0, to: symbols.count, by: chunkSize) {
-            let end = min(i + chunkSize, symbols.count)
-            let chunk = Array(symbols[i..<end])
-            let chunkResult = runDemangleExpandChunk(symbols: chunk, parser: parser)
-            allResults.merge(chunkResult) { (_, new) in new }
+        for symbol in symbols {
+            symbol.withCString { cStr in
+                if let astCStr = swift_demangle_ast(cStr) {
+                    let ast = String(cString: astCStr)
+                    let lines = ast.components(separatedBy: .newlines)
+                    allResults[symbol] = parseParameters(from: lines)
+                    if let root = buildTree(from: lines) {
+                        traverseAndRegisterTypes(node: root, parser: parser)
+                    }
+                }
+            }
         }
         return allResults
-    }
-
-    static func runDemangleExpandChunk(symbols: [String], parser: Parser) -> [String: [Int: Bool]] {
-        let result: [String: [Int: Bool]] = [:]
-        if symbols.isEmpty { return result }
-        
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["swift-demangle", "--expand"]
-        
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        
-        process.standardInput = inputPipe
-        process.standardOutput = outputPipe
-        
-        do {
-            try process.run()
-        } catch {
-            print("Failed to run swift-demangle --expand: \(error)", to: &Self.standardError)
-            return result
-        }
-        
-        let symbolsData = (symbols.joined(separator: "\n") + "\n").data(using: .utf8)!
-        try? inputPipe.fileHandleForWriting.write(contentsOf: symbolsData)
-        try? inputPipe.fileHandleForWriting.close()
-        
-        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        
-        guard let output = String(data: data, encoding: .utf8) else { return result }
-        
-        return parseExpandTree(output: output, parser: parser)
     }
 
     static func buildTree(from lines: [String]) -> TreeNodeObj? {
@@ -607,45 +565,7 @@ struct SwiftInterfaceGen {
         return nil
     }
 
-    static func parseExpandTree(output: String, parser: Parser) -> [String: [Int: Bool]] {
-        var result: [String: [Int: Bool]] = [:]
-        
-        let lines = output.components(separatedBy: .newlines)
-        var currentSymbol: String? = nil
-        var symbolLines: [String] = []
-        
-        func handleSymbol(_ sym: String, lines: [String]) {
-            result[sym] = parseParameters(from: lines)
-            if let root = buildTree(from: lines) {
-                traverseAndRegisterTypes(node: root, parser: parser)
-            }
-        }
-        
-        for line in lines {
-            if line.isEmpty { continue }
-            if line.hasPrefix("Demangling for ") {
-                if let sym = currentSymbol {
-                    handleSymbol(sym, lines: symbolLines)
-                }
-                currentSymbol = line.replacingOccurrences(of: "Demangling for ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                symbolLines = []
-            } else if currentSymbol != nil {
-                if !line.hasPrefix(" ") && !line.contains("kind=") {
-                    if let sym = currentSymbol {
-                        handleSymbol(sym, lines: symbolLines)
-                    }
-                    currentSymbol = nil
-                    symbolLines = []
-                } else {
-                    symbolLines.append(line)
-                }
-            }
-        }
-        if let sym = currentSymbol {
-            handleSymbol(sym, lines: symbolLines)
-        }
-        return result
-    }
+
 
     static func parseParameters(from lines: [String]) -> [Int: Bool] {
         var nodes: [TreeNode] = []
@@ -750,20 +670,11 @@ struct SwiftInterfaceGen {
         if mangledName.starts(with: "_OBJC_CLASS_$_") {
             return mangledName.replacingOccurrences(of: "_OBJC_CLASS_$_", with: "class ")
         }
-        
         return mangledName.withCString { mangledNamePtr in
-            guard let demangledNamePtr = _stdlib_demangleImpl(
-                mangledNamePtr,
-                mangledNameLength: mangledName.count,
-                outputBuffer: nil,
-                outputBufferLength: nil,
-                flags: 0
-            ) else {
-                return nil
+            if let demangledNamePtr = swift_demangle_flat(mangledNamePtr) {
+                return String(cString: demangledNamePtr)
             }
-            let demangledName = String(cString: demangledNamePtr)
-            free(demangledNamePtr)
-            return demangledName
+            return nil
         }
     }
 
@@ -892,7 +803,7 @@ struct SwiftInterfaceGen {
         // protocol's associated type `Stream` equals the generic param `A`).  Outside a protocol
         // body, `Self.Stream` is not meaningful – replace with `Any` so the class compiles.
         if let regex = try? NSRegularExpression(
-            pattern: #"(any\s+\S+Source)<Self\.Stream>"#, options: []) {
+            pattern: #"(any\s+\S+Source)<Self\.Stream\s*>"#, options: []) {
             let matches = regex.matches(in: c, range: NSRange(c.startIndex..., in: c))
             for m in matches.reversed() {
                 if let r = Range(m.range, in: c),
@@ -1631,3 +1542,9 @@ func _stdlib_demangleImpl(
     outputBufferLength: UnsafeMutablePointer<Int>?,
     flags: Int32
 ) -> UnsafeMutablePointer<Int8>?
+
+@_silgen_name("swift_demangle_flat")
+func swift_demangle_flat(_ symbol: UnsafePointer<Int8>) -> UnsafePointer<Int8>?
+
+@_silgen_name("swift_demangle_ast")
+func swift_demangle_ast(_ symbol: UnsafePointer<Int8>) -> UnsafePointer<Int8>?
