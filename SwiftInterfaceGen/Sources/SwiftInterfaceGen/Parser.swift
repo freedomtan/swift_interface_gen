@@ -2599,15 +2599,15 @@ class Parser {
         if trimmed.hasSuffix("?") || trimmed.hasPrefix("Optional<") || trimmed.hasSuffix("!") {
             if trimmed.hasSuffix("?") {
                 let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
-                return escapeClosures(in: inner, isEscaping: isEscaping) + "?"
+                return escapeClosures(in: inner, isTopLevelParameter: isTopLevelParameter, isEscaping: isEscaping) + "?"
             }
             if trimmed.hasSuffix("!") {
                 let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
-                return escapeClosures(in: inner, isEscaping: isEscaping) + "!"
+                return escapeClosures(in: inner, isTopLevelParameter: isTopLevelParameter, isEscaping: isEscaping) + "!"
             }
             if trimmed.hasPrefix("Optional<") && trimmed.hasSuffix(">") {
                 let inner = String(trimmed.dropFirst(9).dropLast()).trimmingCharacters(in: .whitespaces)
-                return "Optional<" + escapeClosures(in: inner, isEscaping: isEscaping) + ">"
+                return "Optional<" + escapeClosures(in: inner, isTopLevelParameter: isTopLevelParameter, isEscaping: isEscaping) + ">"
             }
         }
         
@@ -2744,7 +2744,12 @@ class Parser {
         } else {
             let escaped = escapeClosures(in: paramsString)
             let isFunc = escaped.contains("->")
-            let isOpt = escaped.hasSuffix("?") || escaped.hasPrefix("Optional<")
+            let isOpt: Bool
+            if isFunc {
+                isOpt = escaped.hasPrefix("Optional<") || escaped.hasSuffix(")?") || escaped.hasSuffix(")?!")
+            } else {
+                isOpt = escaped.hasSuffix("?") || escaped.hasPrefix("Optional<") || escaped.hasSuffix("!")
+            }
             let hasEsc = escaped.contains("@escaping")
             let escPrefix = (isFunc && !isOpt && !hasEsc && isEscaping) ? "@escaping " : ""
             let finalType = attrs + escPrefix + escaped + " " + throwsModifier + "-> " + escapeClosures(in: rightPart)
@@ -2800,7 +2805,12 @@ class Parser {
             let escapedType = escapeClosures(in: type)
             let cleanEscType = escapedType.trimmingCharacters(in: .whitespaces)
             let isFunc = cleanEscType.contains("->")
-            let isOpt = cleanEscType.hasSuffix("?") || cleanEscType.hasPrefix("Optional<")
+            let isOpt: Bool
+            if isFunc {
+                isOpt = cleanEscType.hasPrefix("Optional<") || cleanEscType.hasSuffix(")?") || cleanEscType.hasSuffix(")?!")
+            } else {
+                isOpt = cleanEscType.hasSuffix("?") || cleanEscType.hasPrefix("Optional<") || cleanEscType.hasSuffix("!")
+            }
             let hasEsc = cleanEscType.contains("@escaping")
             
             let finalType: String
