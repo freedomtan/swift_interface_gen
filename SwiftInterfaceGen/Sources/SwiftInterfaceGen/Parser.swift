@@ -347,6 +347,11 @@ class Parser {
                 let indexStr = defArgPart.replacingOccurrences(of: "default argument ", with: "").trimmingCharacters(in: .whitespaces)
                 if let index = Int(indexStr) {
                     var funcPart = funcPartFull
+                    // Strip "(extension in Module):" prefix from protocol/type extension methods
+                    if funcPart.hasPrefix("(extension in "),
+                       let colonIdx = funcPart.firstIndex(of: ":") {
+                        funcPart = String(funcPart[funcPart.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
+                    }
                     if funcPart.hasPrefix("static ") {
                         funcPart = String(funcPart.dropFirst(7))
                     }
