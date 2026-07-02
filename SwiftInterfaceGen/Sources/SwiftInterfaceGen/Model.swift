@@ -477,9 +477,13 @@ class TypeNode {
             inheritsList = inheritsList.filter { !forbiddenProtocols.contains($0) }
         }
         if actualKind == "class" {
-            // Strip Equatable and Hashable — these generate extra conformance descriptors
-            // that the TBD does not export for class types.
-            inheritsList = inheritsList.filter { !["Hashable", "Codable", "Sendable", "Equatable"].contains($0) }
+            // Strip Equatable, Hashable, and Codable — these generate extra conformance descriptors
+            // that the TBD does not export for most class types.
+            // Exception: keep Codable if the TBD actually exports Encodable/Decodable Mc symbols.
+            let hasCodableMc = parser?.conformancesFromTBD.contains(where: { $0.hasPrefix("\(n):") && ($0.hasSuffix(":Encodable") || $0.hasSuffix(":Decodable")) }) == true
+            var toStrip: Set<String> = ["Hashable", "Sendable", "Equatable"]
+            if !hasCodableMc { toStrip.formUnion(["Codable", "Encodable", "Decodable"]) }
+            inheritsList = inheritsList.filter { !toStrip.contains($0) }
             
             var needsUncheckedSendable = false
             for inheritsType in inheritsList {

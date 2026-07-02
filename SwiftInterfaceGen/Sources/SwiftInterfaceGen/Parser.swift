@@ -132,6 +132,8 @@ class Parser {
     private var scannedLocalSwiftFiles = false
     var tbdSymbols = Set<String>()
     var nonFinalClasses = Set<String>()
+    // "TypeName:ProtocolName" entries for Mc conformance descriptors found in TBD symbols.
+    var conformancesFromTBD = Set<String>()
     var referencedModules = Set<String>()
     var symbolEscapingMap: [String: [Int: Bool]] = [:]
     // Maps base function mangled symbol → set of parameter indices that have default values
@@ -505,6 +507,10 @@ class Parser {
                         discoveredProtocols.insert(cleanProto)
                         let shortProto = cleanProto.components(separatedBy: ".").last ?? cleanProto
                         discoveredProtocols.insert(shortProto)
+
+                        // Record "TypeName:ProtoName" for class conformance filtering in generateCode
+                        let shortType = cleanType(typePath).components(separatedBy: ".").last ?? cleanType(typePath)
+                        conformancesFromTBD.insert("\(shortType):\(shortProto)")
                     }
                     return
                 }
@@ -2038,10 +2044,14 @@ class Parser {
         
         // Phase 2: Generate type extensions
         for moduleName in sortedModuleNames {
-            if moduleName != defaultModule && isModuleAvailable(moduleName) && !["Swift", "Foundation", "ObjectiveC", "XPC", "UnifiedAssetFramework", "__C"].contains(moduleName) {
+            guard let module = modules[moduleName] else { continue }
+            // Skip system modules unless they have extension members contributed by this module
+            let hasExtensionMembers = module.nestedTypes.values.contains { !$0.extensionMembers.isEmpty || !$0.constrainedExtensions.isEmpty }
+            if moduleName != defaultModule && isModuleAvailable(moduleName)
+                && !["Swift", "Foundation", "ObjectiveC", "XPC", "UnifiedAssetFramework", "__C"].contains(moduleName)
+                && !hasExtensionMembers {
                 continue
             }
-            guard let module = modules[moduleName] else { continue }
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             for type in sortedTypes {
                 let flattenedName = "\(moduleName)_\(type.name)"
@@ -2054,6 +2064,10 @@ class Parser {
                     pathPrefix = ""
                 } else if moduleName == defaultModule {
                     pathPrefix = ""
+                } else if isModuleAvailable(moduleName) {
+                    // External available module — use dot-qualified path so extensions are
+                    // emitted as "extension ModuleName.TypeName { ... }"
+                    pathPrefix = moduleName
                 } else {
                     pathPrefix = "\(moduleName)_"
                 }

@@ -159,6 +159,7 @@ def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_
 built = set()
 building = set()
 clean_after = False
+keep_stubs = False
 
 def build_framework(name):
     if name in built:
@@ -426,10 +427,11 @@ def build_framework(name):
     compile_framework(name, interface_dylib_src, is_stub=False, emit_module=False, emit_library=True, use_exports=True, extra_objects=[stubs_o] + bridge_extra_objects)
 
     # Clean up temp files (interface_dylib_src is now the original interface file, do not delete it)
-    if os.path.exists(stubs_s):
-        os.remove(stubs_s)
-    if os.path.exists(stubs_o):
-        os.remove(stubs_o)
+    if not keep_stubs:
+        if os.path.exists(stubs_s):
+            os.remove(stubs_s)
+        if os.path.exists(stubs_o):
+            os.remove(stubs_o)
         
     # Phase E: Final Symbol Alignment Verification
     print("--- Comparing Symbols (Verification) ---")
@@ -482,9 +484,12 @@ if __name__ == "__main__":
     if "--clean" in sys.argv:
         clean_after = True
         sys.argv.remove("--clean")
-        
+    if "--keep-stubs" in sys.argv:
+        keep_stubs = True
+        sys.argv.remove("--keep-stubs")
+
     if len(sys.argv) < 3:
-        print("Usage: ./orchestrate.py <FrameworkName> <TestFile.swift> [--clean]")
+        print("Usage: ./orchestrate.py <FrameworkName> <TestFile.swift> [--clean] [--keep-stubs]")
         sys.exit(1)
         
     target = sys.argv[1]

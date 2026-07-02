@@ -1443,7 +1443,42 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         
         let fm = FileManager.default
         try? fm.createDirectory(atPath: outputDir, withIntermediateDirectories: true, attributes: nil)
-        
+
+        // Pre-load type kind info from dependency TBD files so StubNode gets the correct
+        // struct/enum/class keyword instead of defaulting to struct.
+        let sdkRoot = ConfigManager.sdkRoot
+        let tbdSearchPaths = [
+            "\(sdkRoot)/System/Library/PrivateFrameworks",
+            "\(sdkRoot)/System/Library/SubFrameworks",
+            "\(sdkRoot)/System/Library/Frameworks"
+        ]
+        for mod in externalTypes.keys {
+            var tbdContent: String? = nil
+            for searchPath in tbdSearchPaths {
+                let paths = [
+                    "\(searchPath)/\(mod).framework/\(mod).tbd",
+                    "\(searchPath)/\(mod).framework/Versions/A/\(mod).tbd",
+                    "\(searchPath)/\(mod).framework/Versions/Current/\(mod).tbd"
+                ]
+                for p in paths {
+                    if let c = try? String(contentsOfFile: p, encoding: .utf8) {
+                        tbdContent = c; break
+                    }
+                }
+                if tbdContent != nil { break }
+            }
+            if let content = tbdContent {
+                let depSymbols = extractSymbols(from: content)
+                var depDemangledMap: [(mangled: String, demangled: String)] = []
+                for sym in depSymbols {
+                    if let dem = demangle(symbol: sym) {
+                        depDemangledMap.append((mangled: sym, demangled: dem))
+                    }
+                }
+                parser.discoverNominalTypes(demangledMap: depDemangledMap, currentModule: mod)
+            }
+        }
+
         for (mod, items) in externalTypes {
             var fileContent = "import Foundation\n\n"
             let root = StubNode(name: mod)
