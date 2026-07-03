@@ -1580,6 +1580,8 @@ class TypeNode {
                     finalConstraint = finalConstraint.replacingOccurrences(of: "where A ", with: "where Self ")
                     finalConstraint = finalConstraint.replacingOccurrences(of: ", A:", with: ", Self:")
                     finalConstraint = finalConstraint.replacingOccurrences(of: ", A ", with: ", Self ")
+                    // Replace A.member with Self.member for associated type constraints
+                    finalConstraint = finalConstraint.replaceWord("A", with: "Self")
                 }
                 output += generateOneExtension(membersList: Array(membersMap.values), constraint: finalConstraint)
             }

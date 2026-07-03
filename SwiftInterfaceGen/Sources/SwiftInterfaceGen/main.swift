@@ -1396,6 +1396,24 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 }
             }
         }
+        // Scan "extension Module.TypeName where TypeName.AssocType == X" patterns to extract
+        // associated types for external protocols used as extension targets.
+        let extWherePattern = "extension\\s+([A-Za-z_][A-Za-z0-9_.]+)\\s+where\\s+([A-Za-z_][A-Za-z0-9_.]+)\\.([A-Za-z_][A-Za-z0-9_]+)"
+        if let regex = try? NSRegularExpression(pattern: extWherePattern, options: []) {
+            let nsRange = NSRange(outputCode.startIndex..<outputCode.endIndex, in: outputCode)
+            let matches = regex.matches(in: outputCode, options: [], range: nsRange)
+            for m in matches {
+                if let typeRange = Range(m.range(at: 1), in: outputCode),
+                   let assocRange = Range(m.range(at: 3), in: outputCode) {
+                    let typeName = String(outputCode[typeRange])
+                    let assocName = String(outputCode[assocRange])
+                    let shortName = typeName.components(separatedBy: ".").last ?? typeName
+                    protocolAssociatedTypes[typeName, default: []].insert(assocName)
+                    protocolAssociatedTypes[shortName, default: []].insert(assocName)
+                }
+            }
+        }
+
         let wherePattern = "where\\s+([^\\{]+)"
         if let regex = try? NSRegularExpression(pattern: wherePattern, options: []) {
             let nsRange = NSRange(outputCode.startIndex..<outputCode.endIndex, in: outputCode)
@@ -1509,7 +1527,8 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             for child in root.nested.values {
                 let fullPath = "\(mod).\(child.name)"
                 if child.isProtocol || protocolAssociatedTypes[fullPath] != nil ||
-                   ["Visitor", "Decoder", "Encoder", "Message", "Enum", "Stream"].contains(child.name) {
+                   ["Visitor", "Decoder", "Encoder", "Message", "Enum", "Stream"].contains(child.name) ||
+                   child.name.hasSuffix("Protocol") || child.name.hasSuffix("Providing") || child.name.hasSuffix("Delegate") {
                     child.isProtocol = true
                     topLevelProtocols.append(child)
                 } else {

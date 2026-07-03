@@ -2045,15 +2045,44 @@ class Parser {
         // Phase 2: Generate type extensions
         for moduleName in sortedModuleNames {
             guard let module = modules[moduleName] else { continue }
-            // Skip system modules unless they have extension members contributed by this module
-            let hasExtensionMembers = module.nestedTypes.values.contains { !$0.extensionMembers.isEmpty || !$0.constrainedExtensions.isEmpty }
-            if moduleName != defaultModule && isModuleAvailable(moduleName)
-                && !["Swift", "Foundation", "ObjectiveC", "XPC", "UnifiedAssetFramework", "__C"].contains(moduleName)
-                && !hasExtensionMembers {
+            // Skip system/standard modules and non-default modules without extension members.
+            // Exception: external private framework modules that have extension members added
+            // by the current defaultModule (e.g. toAIR* properties on IPL enums).
+            let systemAndStandardModules: Set<String> = [
+                "Swift", "Foundation", "ObjectiveC", "XPC", "UnifiedAssetFramework", "__C",
+                "CoreAI", "Dispatch", "os", "Metal", "CoreGraphics", "CoreVideo", "IOSurface",
+                "MetricKit", "Combine", "Synchronization", "CoreMedia"
+            ]
+            if systemAndStandardModules.contains(moduleName) { continue }
+            // For external available modules, only emit extensions when they contain
+            // read-only computed properties (toX converters) — not operators or methods,
+            // which can fail when the external type turns out to be a protocol.
+            let hasReadOnlyPropertyExtensions = module.nestedTypes.values.contains { node in
+                node.extensionMembers.values.contains {
+                    if case .property(_, _, let isReadOnly, _) = $0 { return isReadOnly }
+                    return false
+                }
+            }
+            if moduleName != defaultModule && isModuleAvailable(moduleName) && !hasReadOnlyPropertyExtensions {
                 continue
             }
+            let isExternalAvailable = moduleName != defaultModule && isModuleAvailable(moduleName)
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             for type in sortedTypes {
+                // For external available modules, only emit types that have read-only property extensions
+                if isExternalAvailable {
+                    let hasROP = type.extensionMembers.values.contains {
+                        if case .property(_, _, let isReadOnly, _) = $0 { return isReadOnly }
+                        return false
+                    }
+                    if !hasROP { continue }
+                    // Strip non-property extension members to avoid emitting operators/methods
+                    // that may not compile against the external module's actual type kind.
+                    type.extensionMembers = type.extensionMembers.filter {
+                        if case .property(_, _, let isReadOnly, _) = $0.value { return isReadOnly }
+                        return false
+                    }
+                }
                 let flattenedName = "\(moduleName)_\(type.name)"
                 if !definedTypes.contains(flattenedName) && type.extensionMembers.isEmpty && type.constrainedExtensions.isEmpty { continue }
                 
