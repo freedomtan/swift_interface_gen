@@ -3,6 +3,7 @@ import Foundation
 class Parser {
     var modules: [String: TypeNode] = [:]
     var defaultModule: String = ""
+    var primaryTargetModule: String = ""
     let swiftKeywords: Set<String> = [
         "associatedtype", "class", "deinit", "enum", "extension", "fileprivate",
         "func", "import", "init", "inout", "internal", "let", "open", "operator",
@@ -323,6 +324,29 @@ class Parser {
         return 0
     }
 
+    static func getMangledModule(_ mangled: String) -> String? {
+        var s = mangled
+        if s.hasPrefix("_$s") {
+            s = String(s.dropFirst(3))
+        } else if s.hasPrefix("$s") {
+            s = String(s.dropFirst(2))
+        } else {
+            return nil
+        }
+        var lenStr = ""
+        for c in s {
+            if c.isNumber {
+                lenStr.append(c)
+            } else {
+                break
+            }
+        }
+        guard let len = Int(lenStr) else { return nil }
+        s = String(s.dropFirst(lenStr.count))
+        guard s.count >= len else { return nil }
+        return String(s.prefix(len))
+    }
+
     func parse(mangled: String, demangled: String, currentModule: String) {
         let originalMangled = mangled
         if originalMangled.hasSuffix("Tj") || originalMangled.hasSuffix("Tq") {
@@ -338,6 +362,42 @@ class Parser {
         }
         self.defaultModule = currentModule
         self.currentPrecomputeModule = currentModule
+        
+        // Auto-detect ~Copyable constraints to mark protocols as ~Copyable
+        if demangled.contains(" where ") && demangled.contains("~Copyable") {
+            let parts = demangled.components(separatedBy: " where ")
+            if parts.count >= 2 {
+                let whereClause = parts[1]
+                let constraints = whereClause.components(separatedBy: ",")
+                var nonCopyableParams = Set<String>()
+                var paramProtocols = [String: Set<String>]()
+                
+                for c in constraints {
+                    let constraint = c.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if constraint.hasSuffix(": ~Copyable") || constraint.hasSuffix(": any ~Copyable") || constraint.contains("~Copyable") {
+                        let param = constraint.components(separatedBy: ":")[0].trimmingCharacters(in: .whitespaces)
+                        nonCopyableParams.insert(param)
+                    } else if constraint.contains(":") {
+                        let components = constraint.components(separatedBy: ":")
+                        let param = components[0].trimmingCharacters(in: .whitespaces)
+                        let proto = components[1].trimmingCharacters(in: .whitespaces)
+                        paramProtocols[param, default: []].insert(proto)
+                    }
+                }
+                
+                for param in nonCopyableParams {
+                    if let protos = paramProtocols[param] {
+                        for proto in protos {
+                            let cleanProto = proto.replacingOccurrences(of: "any ", with: "").trimmingCharacters(in: .whitespaces)
+                            let node = findOrCreateType(name: cleanProto)
+                            if !node.conformances.contains("~Copyable") {
+                                node.conformances.insert("~Copyable")
+                            }
+                        }
+                    }
+                }
+            }
+        }
         
         // Parse default arguments from demangled string
         if demangled.contains("default argument ") {
@@ -917,11 +977,16 @@ class Parser {
                         if !methodWhereClause.isEmpty {
                             initFull += methodWhereClause
                         }
-                        let isExternal = getTopLevelModule(for: node) != defaultModule
+                        let isExternal = getTopLevelModule(for: node) != primaryTargetModule
+                        let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
                         if let constraints = constraints {
-                            node.constrainedExtensions[constraints, default: [:]][initFull] = .initializer(initFull)
+                            if symbolModule == primaryTargetModule {
+                                node.constrainedExtensions[constraints, default: [:]][initFull] = .initializer(initFull)
+                            }
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
-                            node.extensionMembers[initFull] = .initializer(initFull)
+                            if symbolModule == primaryTargetModule {
+                                node.extensionMembers[initFull] = .initializer(initFull)
+                            }
                         } else {
                             node.members[initFull] = .initializer(initFull)
                         }
@@ -931,11 +996,16 @@ class Parser {
                         if !methodWhereClause.isEmpty {
                             fixedSignature += methodWhereClause
                         }
-                        let isExternal = getTopLevelModule(for: node) != defaultModule
+                        let isExternal = getTopLevelModule(for: node) != primaryTargetModule
+                        let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
                         if let constraints = constraints {
-                            node.constrainedExtensions[constraints, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                            if symbolModule == primaryTargetModule {
+                                node.constrainedExtensions[constraints, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                            }
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
-                            node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                            if symbolModule == primaryTargetModule {
+                                node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                            }
                         } else {
                             node.members[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                         }
@@ -1093,11 +1163,16 @@ class Parser {
                 } else {
                     storageKey = escapedMemberName
                 }
-                let isExternal = getTopLevelModule(for: node) != defaultModule
+                let isExternal = getTopLevelModule(for: node) != primaryTargetModule
+                let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
                 if let constraints = constraints {
-                    node.constrainedExtensions[constraints, default: [:]][storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                    if symbolModule == primaryTargetModule {
+                        node.constrainedExtensions[constraints, default: [:]][storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                    }
                 } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
-                    node.extensionMembers[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                    if symbolModule == primaryTargetModule {
+                        node.extensionMembers[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                    }
                 } else {
                     node.members[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                 }
@@ -1613,7 +1688,14 @@ class Parser {
             }
 
             let isEsc = escapingMap?[paramIndex] ?? true
-            let escapedType = Parser.escapeClosures(in: typePart, isTopLevelParameter: true, isEscaping: isEsc)
+            var escapedType = Parser.escapeClosures(in: typePart, isTopLevelParameter: true, isEscaping: isEsc)
+            
+            let cleanType = escapedType.trimmingCharacters(in: .whitespaces)
+            let isNoncopyableType = cleanType.contains("Span") || cleanType.contains("Executable") || cleanType.contains("PixelBuffer")
+            let hasOwnership = cleanType.hasPrefix("borrowing ") || cleanType.hasPrefix("consuming ") || cleanType.hasPrefix("inout ") || cleanType.hasPrefix("__shared ") || cleanType.hasPrefix("__owned ")
+            if isNoncopyableType && !hasOwnership {
+                escapedType = "borrowing " + escapedType
+            }
 
             if isSubscript {
                 if hasLabel && labelName != "_" {

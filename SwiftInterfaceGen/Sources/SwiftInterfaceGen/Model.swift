@@ -332,7 +332,7 @@ class TypeNode {
             }
             genericParamsList = "<\(params.joined(separator: ", "))>"
         }
-        let selfReplaceWith = name + (isGeneric ? genericParamsList : "")
+        let selfReplaceWith = isProtocol ? "Self" : name + (isGeneric ? genericParamsList : "")
         for member in members.values {
             if case .associatedType(let code) = member {
                 let parts = code.components(separatedBy: " ")
@@ -1270,7 +1270,8 @@ class TypeNode {
     func generateExtensions(defaultModule: String, parser: Parser? = nil, path: String = "") -> String {
         var output = ""
         let separator = (path.isEmpty || path.hasSuffix("_") || path.hasSuffix(".")) ? "" : "."
-        let currentPath = path.isEmpty ? name : path + separator + name
+        let escapedName = escapeKeyword(name)
+        let currentPath = path.isEmpty ? escapedName : path + separator + escapedName
         
         var inScope = Set<String>()
         let isProtocol = kind == "protocol"
@@ -1353,6 +1354,9 @@ class TypeNode {
             }
 
             var constraintSuffix = constraint != nil ? " " + constraint! : ""
+            if kind != "protocol" && !isGeneric {
+                constraintSuffix = ""
+            }
             if name == "Array" && path == "Swift" {
                 constraintSuffix = constraintSuffix.replaceWord("A", with: "Element")
             } else if name == "Dictionary" && path == "Swift" {
@@ -1422,10 +1426,11 @@ class TypeNode {
                         return res
                     }
                     cleanedSig = localCleanScope(cleanedSig)
+                    let convenienceMod = (kind == "class" || baseClass != nil) ? "convenience " : ""
                     if isObjcExt {
-                        extLines.append("\(extNextIndent)@nonobjc public convenience \(cleanedSig) { fatalError() }")
+                        extLines.append("\(extNextIndent)@nonobjc public \(convenienceMod)\(cleanedSig) { fatalError() }")
                     } else {
-                        extLines.append("\(extNextIndent)public \(cleanedSig) { fatalError() }")
+                        extLines.append("\(extNextIndent)public \(convenienceMod)\(cleanedSig) { fatalError() }")
                     }
                 case .property(let n, let t, let isReadOnly, let isStatic):
                     var cleanT = t
@@ -1539,6 +1544,7 @@ class TypeNode {
                         return res
                     }
                     cleanedSig = methodCleanScope(cleanedSig)
+                    cleanedSig = cleanedSig.removingUnusedMethodGenericParams()
                     
                     let staticMod = isStatic ? "static " : ""
                     var extLifetimeAttr = ""

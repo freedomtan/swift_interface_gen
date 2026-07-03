@@ -29,6 +29,7 @@ struct SwiftInterfaceGen {
         
         let parser = Parser()
         parser.defaultModule = currentModule
+        parser.primaryTargetModule = currentModule
         parser.currentPrecomputeModule = currentModule
         
         let reexportedLibraries = extractReexportedLibraries(from: content)
@@ -718,6 +719,11 @@ struct SwiftInterfaceGen {
         // Clean up invalid generic method declarations or erasures (only if followed by '(')
         c = c.stripAnyGenericApplicationBeforeParen()
         
+        // Replace `any Self` inside protocol bodies with `any <ProtocolName>`.
+        // The demangler produces `[any Self]` for some protocol requirements, but conforming
+        // types implement them with the explicit protocol name (e.g. `[any AppleIntelligenceError]`).
+        c = c.replaceAnySelfInProtocolBodies()
+
         // Strip invalid 'any' prefixes from concrete types
         let protocolShortNames = Set(parser.discoveredProtocols.map { $0.components(separatedBy: ".").last ?? $0 })
         c = c.stripInvalidAnyPrefixes(concreteTypes: parser.discoveredConcreteTypes, protocolNames: protocolShortNames)
@@ -1208,6 +1214,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         var kind: String = "struct"
         var genericCount: Int = 0
         var nested: [String: StubNode] = [:]
+        var conformances: [String] = []
         
         init(name: String) {
             self.name = name
@@ -1223,7 +1230,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             }
             
             var kindKeyword = "struct"
-            if isProtocol {
+            if isProtocol || kind == "protocol" {
                 kindKeyword = "protocol"
             } else if kind == "enum" {
                 kindKeyword = "enum"
@@ -1231,20 +1238,49 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 kindKeyword = "class"
             }
             
+            var inheritance = ""
+            if kindKeyword == "protocol" {
+                let uniqueConformances = Array(Set(conformances)).sorted()
+                if !uniqueConformances.isEmpty {
+                    inheritance = ": " + uniqueConformances.joined(separator: ", ")
+                }
+            } else {
+                var uniqueConformances = Set<String>(conformances)
+                if uniqueConformances.contains("Codable") {
+                    uniqueConformances.remove("Decodable")
+                    uniqueConformances.remove("Encodable")
+                }
+                let isNonCopyable = uniqueConformances.contains("~Copyable") || uniqueConformances.contains("any ~Copyable")
+                if kindKeyword == "struct" || kindKeyword == "enum" {
+                    if !isNonCopyable {
+                        uniqueConformances.insert("Codable")
+                        uniqueConformances.insert("Hashable")
+                    }
+                    uniqueConformances.insert("Sendable")
+                } else if kindKeyword == "class" {
+                    if !uniqueConformances.contains("Sendable") && !uniqueConformances.contains("@unchecked Sendable") {
+                        uniqueConformances.insert("@unchecked Sendable")
+                    }
+                }
+                if isNonCopyable {
+                    uniqueConformances.remove("Codable")
+                    uniqueConformances.remove("Decodable")
+                    uniqueConformances.remove("Encodable")
+                    uniqueConformances.remove("Hashable")
+                    uniqueConformances.remove("Equatable")
+                }
+                let sortedConformances = uniqueConformances.sorted()
+                if !sortedConformances.isEmpty {
+                    inheritance = ": " + sortedConformances.joined(separator: ", ")
+                }
+            }
+            
             let escapedName = ["Type", "Protocol", "Self", "self"].contains(name) ? "`\(name)`" : name
-            var s = "\(indent)public \(kindKeyword) \(escapedName)\(params)"
-            if kindKeyword == "struct" {
-                s += ": Codable, Hashable, Sendable {\n"
-                s += "\(indent)    public init() {}\n"
-            } else if kindKeyword == "class" {
-                // Classes cannot auto-synthesize Codable/Hashable — use @unchecked Sendable only
-                s += ": @unchecked Sendable {\n"
+            var s = "\(indent)public \(kindKeyword) \(escapedName)\(params)\(inheritance) {\n"
+            if kindKeyword == "struct" || kindKeyword == "class" {
                 s += "\(indent)    public init() {}\n"
             } else if kindKeyword == "enum" {
-                s += ": Codable, Hashable, Sendable {\n"
                 s += "\(indent)    case case0\n"
-            } else {
-                s += " {\n"
             }
             
             for child in nested.values.sorted(by: { $0.name < $1.name }) {
@@ -1256,6 +1292,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
     }
 
     static func generateStubs(outputCode: String, currentModule: String, outputDir: String, parser: Parser) {
+        try? outputCode.write(toFile: "/tmp/finalCode_\(currentModule)_first_run.swift", atomically: true, encoding: .utf8)
         var externalTypes = [String: [(typeName: String, isProtocol: Bool, genericCount: Int)]]()
         
         var constraintTypes = Set<String>()
@@ -1369,6 +1406,57 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                             isProto = true
                         }
                         externalTypes[mod, default: []].append((typeName: typeName, isProtocol: isProto, genericCount: genericCount))
+                    }
+                }
+            }
+        }
+        
+        var queue = [String]()
+        for (mod, items) in externalTypes {
+            for item in items {
+                var cleanName = item.typeName
+                if cleanName.hasPrefix("\(mod).") {
+                    cleanName = String(cleanName.dropFirst(mod.count + 1))
+                }
+                queue.append("\(mod).\(cleanName)")
+            }
+        }
+        var visited = Set(queue)
+        var qIndex = 0
+        while qIndex < queue.count {
+            let fullTypeName = queue[qIndex]
+            qIndex += 1
+            
+            let parts = fullTypeName.components(separatedBy: ".")
+            let mod = parts[0]
+            let path = Array(parts.dropFirst())
+            
+            if let node = parser.findTypeNode(module: mod, path: path) {
+                for conf in node.conformances {
+                    let cleanConf = conf.replacingOccurrences(of: "any ", with: "")
+                    let confParts = cleanConf.components(separatedBy: ".")
+                    guard confParts.count >= 2 else { continue }
+                    let confMod = confParts[0]
+                    
+                    let sdkRoot = ConfigManager.sdkRoot
+                    let isPrivate = FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/PrivateFrameworks/\(confMod).framework") ||
+                                    FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(confMod).framework")
+                    
+                    if isPrivate && confMod != currentModule {
+                        let confName = confParts.dropFirst().joined(separator: ".")
+                        let fullConfName = "\(confMod).\(confName)"
+                        if !visited.contains(fullConfName) {
+                            visited.insert(fullConfName)
+                            queue.append(fullConfName)
+                            
+                            var isProto = false
+                            if let confNode = parser.findTypeNode(module: confMod, path: Array(confParts.dropFirst())) {
+                                isProto = (confNode.kind == "protocol")
+                            } else {
+                                isProto = confName.contains("Representable") || confName.contains("Protocol") || confName.contains("Delegate")
+                            }
+                            externalTypes[confMod, default: []].append((typeName: fullConfName, isProtocol: isProto, genericCount: 0))
+                        }
                     }
                 }
             }
@@ -1498,6 +1586,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         }
 
         for (mod, items) in externalTypes {
+            print("Stubbing: \(mod) has \(items.count) items: \(items.map { $0.typeName })", to: &Self.standardError)
             var fileContent = "import Foundation\n\n"
             let root = StubNode(name: mod)
             for item in items {
@@ -1510,12 +1599,41 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                         let node = StubNode(name: part)
                         if let typeNode = parser.findTypeNode(module: mod, path: pathSoFar) {
                             node.kind = typeNode.kind
+                            node.conformances = typeNode.conformances.compactMap { conf in
+                                let clean = conf.hasPrefix(mod + ".") ? String(conf.dropFirst(mod.count + 1)) : conf
+                                let noAny = clean.replacingOccurrences(of: "any ", with: "")
+                                
+                                let rawNoAny = conf.replacingOccurrences(of: "any ", with: "")
+                                let isSwift = rawNoAny.hasPrefix("Swift.") || ["Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Sendable", "Error", "CustomStringConvertible", "Comparable", "Sequence", "Collection", "Strideable", "Numeric", "SignedNumeric", "AdditiveArithmetic", "FloatingPoint", "BinaryFloatingPoint", "LosslessStringConvertible", "CaseIterable", "RawRepresentable", "CodingKey", "LocalizedError"].contains(noAny)
+                                let isFoundation = rawNoAny.hasPrefix("Foundation.")
+                                
+                                if isSwift || isFoundation {
+                                    var baseName = noAny
+                                    if baseName.hasPrefix("Swift.") {
+                                        baseName = String(baseName.dropFirst(6))
+                                    }
+                                    if baseName.hasPrefix("Foundation.") {
+                                        baseName = String(baseName.dropFirst(11))
+                                    }
+                                    let whitelist = ["Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Sendable", "Error"]
+                                    if whitelist.contains(baseName) {
+                                        return baseName
+                                    } else {
+                                        return nil
+                                    }
+                                }
+                                
+                                if noAny.contains("ExpressibleBy") {
+                                    return nil
+                                }
+                                return noAny
+                            }
                         }
                         current.nested[part] = node
                     }
                     current = current.nested[part]!
                 }
-                if item.isProtocol {
+                if item.isProtocol || current.kind == "protocol" {
                     current.isProtocol = true
                 }
                 current.genericCount = max(current.genericCount, item.genericCount)
@@ -1526,7 +1644,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             
             for child in root.nested.values {
                 let fullPath = "\(mod).\(child.name)"
-                if child.isProtocol || protocolAssociatedTypes[fullPath] != nil ||
+                if child.isProtocol || child.kind == "protocol" || protocolAssociatedTypes[fullPath] != nil ||
                    ["Visitor", "Decoder", "Encoder", "Message", "Enum", "Stream"].contains(child.name) ||
                    child.name.hasSuffix("Protocol") || child.name.hasSuffix("Providing") || child.name.hasSuffix("Delegate") {
                     child.isProtocol = true

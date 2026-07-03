@@ -2005,32 +2005,70 @@ extension String {
         // The function body is everything from `(` onward
         let funcBody = String(self[openParen...])
         
+        var checkBody = funcBody
+        var whereClause = ""
+        if let whereRange = funcBody.range(of: " where ") {
+            checkBody = String(funcBody[..<whereRange.lowerBound])
+            whereClause = String(funcBody[whereRange.upperBound...])
+        } else if let whereRange = funcBody.range(of: "where ") {
+            checkBody = String(funcBody[..<whereRange.lowerBound])
+            whereClause = String(funcBody[whereRange.upperBound...])
+        }
+        
         // Parse generic params (split on comma, handling nested brackets)
         let rawParams = bracketContent.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         
         var keptParams = [String]()
+        var prunedParams = Set<String>()
         for param in rawParams {
             if param.isEmpty { continue }
-            // Check if the param name (whole-word) appears in the function body
-            let used = funcBody.replaceWord(param, with: "").count < funcBody.count
-            if used {
+            // Check if the param name (whole-word) appears in the signature (excluding where clause)
+            let usedInSig = checkBody.replaceWord(param, with: "").count < checkBody.count
+            if usedInSig {
                 keptParams.append(param)
+            } else {
+                prunedParams.insert(param)
             }
-            // Also keep params that aren't GenericX — if it was declared without Generic prefix
-            // it is a real type constraint we should preserve.
-            else if !param.hasPrefix("Generic") {
-                keptParams.append(param)
+        }
+        
+        // Clean up the where clause: remove constraints referencing pruned parameters
+        // and also any constraints containing ~Copyable.
+        var finalWhere = ""
+        if !whereClause.isEmpty {
+            let constraints = whereClause.components(separatedBy: ",")
+            var keptConstraints = [String]()
+            for constraint in constraints {
+                let trimmed = constraint.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty { continue }
+                if trimmed.contains("~Copyable") || trimmed.contains("~ Copyable") {
+                    continue
+                }
+                var mentionsPruned = false
+                for pruned in prunedParams {
+                    if trimmed.replaceWord(pruned, with: "").count < trimmed.count {
+                        mentionsPruned = true
+                        break
+                    }
+                }
+                if !mentionsPruned {
+                    keptConstraints.append(trimmed)
+                }
             }
-            // If it IS a GenericX param and NOT used, skip it (prune it).
+            if !keptConstraints.isEmpty {
+                finalWhere = " where " + keptConstraints.joined(separator: ", ")
+            }
         }
         
         let prefix = String(self[..<openAngle])
         let suffix = String(self[self.index(after: ca)...])
         
+        // If we removed the where clause from funcBody, we must replace it in the returned string
+        let baseSig = suffix.range(of: " where ") != nil ? String(suffix[..<suffix.range(of: " where ")!.lowerBound]) : (suffix.range(of: "where ") != nil ? String(suffix[..<suffix.range(of: "where ")!.lowerBound]) : suffix)
+        
         if keptParams.isEmpty {
-            return prefix + suffix
+            return prefix + baseSig + finalWhere
         } else {
-            return prefix + "<" + keptParams.joined(separator: ", ") + ">" + suffix
+            return prefix + "<" + keptParams.joined(separator: ", ") + ">" + baseSig + finalWhere
         }
     }
 
@@ -2074,5 +2112,60 @@ extension String {
             startIdx = result.index(range.lowerBound, offsetBy: flatSubPath.count)
         }
         return result
+    }
+
+    // Replaces `any Self` inside protocol bodies with `any <ProtocolName>`.
+    // The demangler sometimes produces `[any Self]` for protocol requirements whose
+    // real Swift source uses the protocol name (e.g. `[any AppleIntelligenceError]`).
+    // Leaving `[any Self]` causes conforming types that implement `[any Proto]` to
+    // fail with "does not conform to protocol".
+    func replaceAnySelfInProtocolBodies() -> String {
+        let lines = self.components(separatedBy: "\n")
+        var result = [String]()
+        // Stack of (protocolName, minDepthToRemain): pop when globalDepth < minDepthToRemain
+        var protocolStack: [(name: String, minDepth: Int)] = []
+        var depth = 0
+
+        for line in lines {
+            let opens = line.filter { $0 == "{" }.count
+            let closes = line.filter { $0 == "}" }.count
+            let net = opens - closes
+
+            // Detect `protocol Name` opening on this line
+            if opens > 0 {
+                var searchStart = line.startIndex
+                while let kRange = line.range(of: "protocol ", range: searchStart..<line.endIndex) {
+                    let afterKeyword = kRange.upperBound
+                    // Read the protocol name (alphanumeric + _)
+                    var nameEnd = afterKeyword
+                    while nameEnd < line.endIndex && (line[nameEnd].isLetter || line[nameEnd].isNumber || line[nameEnd] == "_") {
+                        nameEnd = line.index(after: nameEnd)
+                    }
+                    if nameEnd > afterKeyword {
+                        let protocolName = String(line[afterKeyword..<nameEnd])
+                        // minDepth = depth after processing this line
+                        protocolStack.append((name: protocolName, minDepth: depth + net))
+                    }
+                    searchStart = kRange.upperBound
+                }
+            }
+
+            // Replace `any Self` if inside a protocol body
+            var processedLine = line
+            if let current = protocolStack.last {
+                processedLine = processedLine.replacingOccurrences(of: "any Self", with: "any \(current.name)")
+            }
+
+            depth += net
+
+            // Pop protocols whose body has been closed
+            while let top = protocolStack.last, depth < top.minDepth {
+                protocolStack.removeLast()
+            }
+
+            result.append(processedLine)
+        }
+
+        return result.joined(separator: "\n")
     }
 }
