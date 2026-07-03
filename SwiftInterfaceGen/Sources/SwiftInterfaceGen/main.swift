@@ -1626,6 +1626,18 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                                 if noAny.contains("ExpressibleBy") {
                                     return nil
                                 }
+                                // Filter out conformances to protocols defined in the target module
+                                // (currentModule). simplifyType strips the currentModule prefix, so
+                                // e.g. TokenGenerationCore.XPCRevivable becomes bare XPCRevivable
+                                // which doesn't exist when compiling this dependency stub in isolation.
+                                if !noAny.contains(".") || noAny.hasPrefix(currentModule + ".") {
+                                    if let targetModule = parser.modules[currentModule] {
+                                        let shortName = noAny.components(separatedBy: ".").last ?? noAny
+                                        if let protoNode = targetModule.nestedTypes[shortName], protoNode.kind == "protocol" {
+                                            return nil
+                                        }
+                                    }
+                                }
                                 return noAny
                             }
                         }
