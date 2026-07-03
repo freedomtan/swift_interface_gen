@@ -510,25 +510,20 @@ class TypeNode {
         var displayTypeName = escapeKeyword(typeName)
         if typeName == "BidirectionalXPCServiceClientConnection" {
             displayTypeName += "<A: XPCService, B: XPCService>"
-            isGeneric = false
             inScope.insert("A")
             inScope.insert("B")
         } else if typeName == "CatalogAsset" {
             displayTypeName += "<A: AssetMetadata, B: AssetContents>"
-            isGeneric = false
             inScope.insert("A")
             inScope.insert("B")
         } else if typeName == "SupportedArgument" {
             displayTypeName += "<A: Equatable>"
-            isGeneric = false
             inScope.insert("A")
         } else if typeName == "ResourceBundleIdentifier" {
             displayTypeName += "<A: ResourceBundle>"
-            isGeneric = false
             inScope.insert("A")
         } else if typeName == "XPCServiceClientConnection" {
             displayTypeName += "<A: XPCService>"
-            isGeneric = false
             inScope.insert("A")
         } else if isGeneric && !isProtocol && !displayTypeName.contains("<") {
             var count = 1
