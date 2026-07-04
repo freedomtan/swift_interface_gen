@@ -1708,6 +1708,32 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 print("Error: Could not write stub file to \(filePath)", to: &Self.standardError)
             }
         }
+
+        // Emit minimal empty stubs for private-framework modules that were discovered
+        // (via discoveredNamespaces) but have no referenced types in the interface
+        // (e.g. GenerativeModelsFoundation) — their import line still requires the
+        // module to exist at compile time.
+        let systemMods: Set<String> = ["Swift", "Foundation", "ObjectiveC", "Dispatch", "os",
+            "Metal", "CoreGraphics", "CoreVideo", "IOSurface", "MetricKit", "Combine",
+            "Synchronization", "CoreMedia", "XPC", "CoreAI", "UniformTypeIdentifiers"]
+        for modName in parser.discoveredNamespaces {
+            guard modName != currentModule && !externalTypes.keys.contains(modName) else { continue }
+            guard !systemMods.contains(modName) else { continue }
+            // Only emit if it's a private framework in the SDK
+            var tbdExists = false
+            for searchPath in tbdSearchPaths {
+                let p = "\(searchPath)/\(modName).framework/\(modName).tbd"
+                if FileManager.default.fileExists(atPath: p) { tbdExists = true; break }
+                let p2 = "\(searchPath)/\(modName).framework/Versions/A/\(modName).tbd"
+                if FileManager.default.fileExists(atPath: p2) { tbdExists = true; break }
+            }
+            guard tbdExists else { continue }
+            let filePath = "\(outputDir)/\(modName).swift"
+            guard !FileManager.default.fileExists(atPath: filePath) else { continue }
+            let emptyStub = "import Foundation\n// Empty stub for \(modName)\n"
+            try? emptyStub.write(toFile: filePath, atomically: true, encoding: .utf8)
+            print("Generated empty stub for \(modName) at \(filePath)", to: &Self.standardError)
+        }
     }
 
     struct StandardError: TextOutputStream {
