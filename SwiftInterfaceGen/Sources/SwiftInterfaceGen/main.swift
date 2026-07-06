@@ -717,6 +717,26 @@ struct SwiftInterfaceGen {
         
         // Clean up invalid generic method declarations or erasures (only if followed by '(')
         c = c.stripAnyGenericApplicationBeforeParen()
+
+        // Fix: `var $foo` — `$` prefix is reserved for projected values of property wrappers.
+        // The real symbol is the projected value (e.g. Published<T>.Publisher). Rename to avoid
+        // the reserved-name error while still emitting the symbol.
+        c = c.replacingOccurrences(of: " var $", with: " var _proj_")
+
+        // Fix: `struct [A]: Protocol` — an extension on Array<A> was emitted as a struct.
+        // Drop these lines; the conformance is provided by the real framework at runtime.
+        if let regex = try? NSRegularExpression(pattern: "^public struct \\[[^\\]]+\\].*\\{[^\\}]*\\}\\s*$",
+                                                options: [.anchorsMatchLines, .dotMatchesLineSeparators]) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
+        }
+
+        // Fix: `Decode<A><A>` double-generic — a single-letter generic arg was appended twice.
+        // Pattern: `TypeName<X><X>` where the second `<X>` is a stray duplicate.
+        if let regex = try? NSRegularExpression(pattern: "(<[A-Z][A-Za-z0-9_]*>)(<[A-Z][A-Za-z0-9_]*>)", options: []) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "$1")
+        }
         
         // Replace `any Self` inside protocol bodies with `any <ProtocolName>`.
         // The demangler produces `[any Self]` for some protocol requirements, but conforming
