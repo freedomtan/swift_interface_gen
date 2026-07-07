@@ -125,7 +125,11 @@ struct SwiftInterfaceGen {
 
     static func resolveImports(from code: String, currentModule: String, parser: Parser) -> [String] {
         var imports = Set<String>()
-        imports.insert("Foundation")
+        // Foundation-level modules must not import Foundation (circular dependency)
+        let foundationLevel: Set<String> = ["Foundation", "Combine", "CoreFoundation", "Dispatch", "os"]
+        if !foundationLevel.contains(currentModule) {
+            imports.insert("Foundation")
+        }
         
         for mod in parser.referencedModules {
             if mod != currentModule && mod != "Swift" && mod != "__C" && mod != "CoreAI" {
@@ -142,6 +146,7 @@ struct SwiftInterfaceGen {
         if code.contains("MLModel") { imports.insert("CoreML") }
         if code.contains("DispatchQueue") { imports.insert("Dispatch") }
         if code.contains("OS_xpc_object") { imports.insert("XPC") }
+        if code.contains("NSWindow") || code.contains("NSView") || code.contains("NSViewController") || code.contains("NSResponder") { imports.insert("AppKit") }
         if code.contains("UAF") && currentModule != "UnifiedAssetFramework" { imports.insert("UnifiedAssetFramework") }
         
         for mod in parser.discoveredNamespaces {
@@ -718,6 +723,19 @@ struct SwiftInterfaceGen {
         // Clean up invalid generic method declarations or erasures (only if followed by '(')
         c = c.stripAnyGenericApplicationBeforeParen()
 
+        // Fix: `<Any: P>`, `<each Any>`, `<Self: P>` generic-parameter-NAME clauses on
+        // func/init/subscript/associatedtype declarations (Any/Self are Swift keywords and
+        // cannot name a generic parameter). Line-scoped to declarations only.
+        c = c.removeInvalidAnyGenericClauses()
+
+        // Fix: `associatedtype Result<Any, Error>` — associated types can't be generic.
+        // Strip the `<...>` clause after the associatedtype name.
+        if let regex = try? NSRegularExpression(
+            pattern: "(associatedtype\\s+[A-Za-z_][A-Za-z0-9_]*)<[^>]*>", options: []) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "$1")
+        }
+
         // Fix: `var $foo` — `$` prefix is reserved for projected values of property wrappers.
         // The real symbol is the projected value (e.g. Published<T>.Publisher). Rename to avoid
         // the reserved-name error while still emitting the symbol.
@@ -731,13 +749,62 @@ struct SwiftInterfaceGen {
                 in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
         }
 
-        // Fix: `Decode<A><A>` double-generic — a single-letter generic arg was appended twice.
-        // Pattern: `TypeName<X><X>` where the second `<X>` is a stray duplicate.
-        if let regex = try? NSRegularExpression(pattern: "(<[A-Z][A-Za-z0-9_]*>)(<[A-Z][A-Za-z0-9_]*>)", options: []) {
-            c = regex.stringByReplacingMatches(
-                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "$1")
+        // Fix: `TypeName<A><A, A1>` double-generic — method-level generic was appended alongside
+        // a struct-level generic. Merge consecutive `<X><Y>` into `<X>` (keep only the first).
+        var mergeChanged = true
+        while mergeChanged {
+            mergeChanged = false
+            var searchIdx = c.startIndex
+            while let ltRange = c.range(of: "><", range: searchIdx..<c.endIndex) {
+                // Found `><` — check if both sides are generic brackets
+                // Find the opening `<` for the first bracket
+                var depth = 0
+                var firstOpen: String.Index? = nil
+                var scanBack = ltRange.lowerBound
+                while scanBack >= c.startIndex {
+                    if c[scanBack] == ">" { depth += 1 }
+                    else if c[scanBack] == "<" {
+                        depth -= 1
+                        if depth == 0 { firstOpen = scanBack; break }
+                    }
+                    if scanBack == c.startIndex { break }
+                    scanBack = c.index(before: scanBack)
+                }
+                // Find the closing `>` for the second bracket
+                depth = 0
+                var secondClose: String.Index? = nil
+                var scanFwd = c.index(before: ltRange.upperBound)  // the `<`
+                while scanFwd < c.endIndex {
+                    if c[scanFwd] == "<" { depth += 1 }
+                    else if c[scanFwd] == ">" { depth -= 1; if depth == 0 { secondClose = scanFwd; break } }
+                    scanFwd = c.index(after: scanFwd)
+                }
+                if let fo = firstOpen, let sc = secondClose {
+                    // Check: the char before firstOpen is a valid type-name char
+                    var isTypeGeneric = false
+                    if fo > c.startIndex {
+                        let prev = c[c.index(before: fo)]
+                        isTypeGeneric = prev.isLetter || prev.isNumber || prev == "_"
+                    }
+                    if isTypeGeneric {
+                        // Remove the second `<...>` bracket: from the `<` to `>` (inclusive)
+                        // ltRange = range of `><` — upperBound-1 is the `<` of second bracket
+                        let secondOpen = c.index(before: ltRange.upperBound)
+                        c.removeSubrange(secondOpen...sc)
+                        mergeChanged = true
+                        break
+                    }
+                }
+                searchIdx = ltRange.upperBound
+            }
         }
         
+        // Fix `Any<T>` — `Any` followed by generic args is invalid, strip the generic.
+        if let regex = try? NSRegularExpression(pattern: "\\bAny<[^>]*>", options: []) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "Any")
+        }
+
         // Replace `any Self` inside protocol bodies with `any <ProtocolName>`.
         // The demangler produces `[any Self]` for some protocol requirements, but conforming
         // types implement them with the explicit protocol name (e.g. `[any AppleIntelligenceError]`).
@@ -783,7 +850,17 @@ struct SwiftInterfaceGen {
         }
         
         c = c.applyDiscoveredGenerics(flatGenerics: flatGenerics, shortGenerics: shortGenerics)
-        
+
+        // Re-apply: applyDiscoveredGenerics may have re-added `<Any, Error>` to associatedtype.
+        // Strip generic clauses from associatedtype declarations (associatedtypes can't be generic).
+        if let regex = try? NSRegularExpression(
+            pattern: "(associatedtype\\s+[A-Za-z_][A-Za-z0-9_]*)<[^>]*>", options: []) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "$1")
+        }
+        // Also re-apply removeInvalidAnyGenericClauses for any new `<Any:>` that may appear.
+        c = c.removeInvalidAnyGenericClauses()
+
         // Clean up invalid generic typealiases
         c = c.stripGenericFromTypealias()
         

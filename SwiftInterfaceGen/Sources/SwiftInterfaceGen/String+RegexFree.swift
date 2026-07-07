@@ -905,6 +905,325 @@ extension String {
         return result
     }
 
+    // 20a. removeInvalidAnyGenericClauses
+    // On func/init/subscript/associatedtype DECLARATION lines only, strips a `<...>` generic
+    // parameter clause whose parameter NAME is a Swift keyword (Any, Self) or a parameter pack
+    // (`each Any`). These arise when unresolved generic placeholders (A, B, ...) are substituted
+    // with `Any`. Restricted to declaration lines by prefix so type-use positions like
+    // `Array<Any>` in a body are never touched.
+    func removeInvalidAnyGenericClauses() -> String {
+        let lines = self.components(separatedBy: "\n")
+        let fixed = lines.map { (line: String) -> String in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // A declaration line contains one of these keywords (possibly after modifiers
+            // like `public final static`), followed by a generic clause.
+            let isDecl = trimmed.contains("func ") || trimmed.contains("init<")
+                || trimmed.contains("init(") || trimmed.contains("subscript")
+                || trimmed.hasPrefix("associatedtype ")
+            guard isDecl, line.contains("<") else { return line }
+
+            var out = line
+
+            // Fix `<T where T: P, ...>` — Swift 5.9+ obsoleted inline where in generic params.
+            // Also handles orphaned `<where T: P, ...>` (param name was dropped).
+            // Strategy: extract the param name + constraints, replace `<T where ...>` with `<T>`,
+            // and append ` where ...` after the closing `)` of the parameter list.
+            var whereChanged = true
+            while whereChanged {
+                whereChanged = false
+                // Match either `<where ` (orphaned) or `<Ident where ` (inline)
+                var matchStart: String.Index? = nil
+                var paramName: String = ""
+                var clauseContent: String = ""
+                var matchEnd: String.Index? = nil
+
+                if let r = out.range(of: "<where ") {
+                    // Orphaned: `<where Ident: P, ...>`
+                    let lt = r.lowerBound
+                    let afterWhere = r.upperBound
+                    var nameEnd = afterWhere
+                    while nameEnd < out.endIndex && (out[nameEnd].isLetter || out[nameEnd].isNumber || out[nameEnd] == "_") {
+                        nameEnd = out.index(after: nameEnd)
+                    }
+                    if nameEnd > afterWhere {
+                        let pname = String(out[afterWhere..<nameEnd])
+                        if !["Any", "Self", "some", "any", "each"].contains(pname) {
+                            var depth = 0; var j = lt; var gt: String.Index? = nil
+                            while j < out.endIndex {
+                                if out[j] == "<" { depth += 1 }
+                                else if out[j] == ">" { depth -= 1; if depth == 0 { gt = j; break } }
+                                j = out.index(after: j)
+                            }
+                            if let g = gt {
+                                var raw = String(out[out.index(after: lt)..<g])
+                                if raw.hasPrefix("where ") { raw = String(raw.dropFirst(6)) }
+                                matchStart = lt; paramName = pname; clauseContent = raw; matchEnd = g
+                            }
+                        } else {
+                            // `<where Any:...>` — strip entirely
+                            var depth = 0; var j = lt; var gt: String.Index? = nil
+                            while j < out.endIndex {
+                                if out[j] == "<" { depth += 1 }
+                                else if out[j] == ">" { depth -= 1; if depth == 0 { gt = j; break } }
+                                j = out.index(after: j)
+                            }
+                            if let g = gt { out.removeSubrange(lt...g); whereChanged = true }
+                            break
+                        }
+                    }
+                }
+
+                // Also fix `<T where T: P>` style (inline where in generic bracket, e.g. from old demangler)
+                if matchStart == nil {
+                    // Scan for `<Ident where ` pattern
+                    var scan = out.startIndex
+                    while scan < out.endIndex {
+                        guard let ltRange = out.range(of: "<", range: scan..<out.endIndex) else { break }
+                        let lt = ltRange.lowerBound
+                        // Read identifier after `<`
+                        var identEnd = ltRange.upperBound
+                        while identEnd < out.endIndex && (out[identEnd].isLetter || out[identEnd].isNumber || out[identEnd] == "_") {
+                            identEnd = out.index(after: identEnd)
+                        }
+                        if identEnd > ltRange.upperBound {
+                            let pname = String(out[ltRange.upperBound..<identEnd])
+                            // Check if followed by ` where `
+                            let rest = String(out[identEnd...])
+                            if rest.hasPrefix(" where ") {
+                                // Found `<Ident where`
+                                var depth = 0; var j = lt; var gt: String.Index? = nil
+                                while j < out.endIndex {
+                                    if out[j] == "<" { depth += 1 }
+                                    else if out[j] == ">" { depth -= 1; if depth == 0 { gt = j; break } }
+                                    j = out.index(after: j)
+                                }
+                                if let g = gt {
+                                    let inner = String(out[out.index(after: lt)..<g])
+                                    // inner = "Ident where constraints..."
+                                    if let wRange = inner.range(of: " where ") {
+                                        let constraints = String(inner[wRange.upperBound...])
+                                        matchStart = lt; paramName = pname; clauseContent = constraints; matchEnd = g
+                                    }
+                                }
+                                break
+                            }
+                        }
+                        scan = ltRange.upperBound
+                    }
+                }
+
+                guard let ms = matchStart, let me = matchEnd else { break }
+
+                // Strip labeled-tuple syntax from constraint RHS: `(_ arg1: Any, _ arg2: Any)` → `(Any, Any)`
+                var cleanClause = clauseContent
+                cleanClause = cleanClause.stripLabeledTupleInWhereClause()
+
+                // Replace `<Ident where ...>` with `<Ident>` and append where clause after closing `)`
+                out.replaceSubrange(ms...me, with: "<\(paramName)>")
+                // Find the closing `)` of the param list after the new `<Ident>`
+                if let parenClose = out.range(of: ") {", range: ms..<out.endIndex)?.lowerBound ??
+                                       out.range(of: ") ->", range: ms..<out.endIndex)?.lowerBound ??
+                                       out.range(of: ") throws", range: ms..<out.endIndex)?.lowerBound ??
+                                       out.range(of: ") async", range: ms..<out.endIndex)?.lowerBound {
+                    let insertAt = out.index(after: parenClose)
+                    out.insert(contentsOf: " where \(cleanClause)", at: insertAt)
+                }
+                whereChanged = true
+            }
+
+            // Fix unnamed single-param signatures left by generic stripping: `(TypeName) ->` etc.
+            // This handles `(GenericA) ->`, `(Any) ->` etc. that lack argument labels.
+            // Excluded: typed-throws `throws(Error)` and closure types `(T) -> R`.
+            let keywordsBeforeParen: Set<String> = ["throws", "async", "rethrows", "await", "catch", "return"]
+            for suffix in [") ->", ") {", ") throws", ") async"] {
+                var searchFrom = out.startIndex
+                while let r = out.range(of: suffix, range: searchFrom..<out.endIndex) {
+                    let closeP = r.lowerBound
+                    // Find matching `(` by scanning backwards
+                    var depth = 0; var j = closeP; var openP: String.Index? = nil
+                    while j >= out.startIndex {
+                        if out[j] == ")" { depth += 1 }
+                        else if out[j] == "(" { depth -= 1; if depth == 0 { openP = j; break } }
+                        if j == out.startIndex { break }
+                        j = out.index(before: j)
+                    }
+                    if let op = openP {
+                        // Check: the char/word BEFORE `(` must be an identifier or `>`, not a keyword
+                        var prevEnd = op
+                        while prevEnd > out.startIndex {
+                            let pi = out.index(before: prevEnd)
+                            if out[pi].isWhitespace { prevEnd = pi } else { break }
+                        }
+                        var prevStart = prevEnd
+                        while prevStart > out.startIndex {
+                            let pi = out.index(before: prevStart)
+                            if out[pi].isLetter || out[pi].isNumber || out[pi] == "_" { prevStart = pi } else { break }
+                        }
+                        let prevWord = String(out[prevStart..<prevEnd])
+                        // Skip if preceded by a keyword (typed-throws, async closure, etc.)
+                        if keywordsBeforeParen.contains(prevWord) {
+                            searchFrom = r.upperBound
+                            continue
+                        }
+                        let inner = String(out[out.index(after: op)..<closeP]).trimmingCharacters(in: .whitespaces)
+                        // Single bare type with no `:` (no label) — needs `_ arg1: `
+                        if !inner.isEmpty && !inner.contains(":") && !inner.contains(",") && !inner.contains("->") {
+                            let replacement = "(_ arg1: \(inner))"
+                            out.replaceSubrange(op...closeP, with: replacement)
+                            searchFrom = out.index(op, offsetBy: replacement.count, limitedBy: out.endIndex) ?? out.endIndex
+                            continue
+                        }
+                    }
+                    searchFrom = r.upperBound
+                }
+            }
+
+            // Bad clause openers: `<Any` / `<Self` used as the generic param NAME, or `<each Any`
+            let badOpeners = ["<Any:", "<Any,", "<Any>", "<Any ", "<each Any",
+                              "<Self:", "<Self,", "<Self>", "<Self "]
+            var changed = true
+            while changed {
+                changed = false
+                for opener in badOpeners {
+                    guard let r = out.range(of: opener) else { continue }
+                    // Verify this `<` is a generic-param opener, i.e. the char before it is an
+                    // identifier char (method name) — not itself inside a `<...>` type argument.
+                    let lt = r.lowerBound
+                    // Find matching `>` by depth from `lt`
+                    var depth = 0
+                    var j = lt
+                    var gt: String.Index? = nil
+                    while j < out.endIndex {
+                        if out[j] == "<" { depth += 1 }
+                        else if out[j] == ">" { depth -= 1; if depth == 0 { gt = j; break } }
+                        j = out.index(after: j)
+                    }
+                    if let g = gt {
+                        out.removeSubrange(lt...g)
+                        changed = true
+                        break
+                    }
+                }
+            }
+            // After stripping a func/init generic clause, a bare `(Any)` parameter list is left
+            // unnamed — give it a label so it parses.
+            out = out.replacingOccurrences(of: "(Any) ->", with: "(_ arg1: Any) ->")
+            out = out.replacingOccurrences(of: "(Any) {", with: "(_ arg1: Any) {")
+            out = out.replacingOccurrences(of: "(Any) throws", with: "(_ arg1: Any) throws")
+            out = out.replacingOccurrences(of: "(Any) async", with: "(_ arg1: Any) async")
+            return out
+        }
+        return fixed.joined(separator: "\n")
+    }
+
+    // 20b-helper. stripLabeledTupleInWhereClause: converts `(_ arg1: Any, _ arg2: Any)` style
+    // back to `(Any, Any)` for use in where-clause type positions (not parameter lists).
+    func stripLabeledTupleInWhereClause() -> String {
+        // Pattern: `(_ argN: Type, ...)` → `(Type, ...)`
+        // Simple approach: replace `_ arg\d+: ` with `` inside parens
+        var out = self
+        var startSearch = out.startIndex
+        while let r = out.range(of: "(_ arg", range: startSearch..<out.endIndex) {
+            // Find matching `)` from start of `(`
+            let lparen = r.lowerBound
+            var depth = 0; var j = lparen; var rparen: String.Index? = nil
+            while j < out.endIndex {
+                if out[j] == "(" { depth += 1 }
+                else if out[j] == ")" { depth -= 1; if depth == 0 { rparen = j; break } }
+                j = out.index(after: j)
+            }
+            if let rp = rparen {
+                // Strip `_ argN: ` from each element
+                let inner = String(out[out.index(after: lparen)..<rp])
+                var cleaned = ""
+                var cur = ""
+                var d = 0
+                for ch in inner {
+                    if ch == "(" || ch == "[" { d += 1 }
+                    else if ch == ")" || ch == "]" { d -= 1 }
+                    else if ch == "," && d == 0 {
+                        cleaned += stripOneLabel(cur.trimmingCharacters(in: .whitespaces)) + ", "
+                        cur = ""
+                        continue
+                    }
+                    cur.append(ch)
+                }
+                if !cur.trimmingCharacters(in: .whitespaces).isEmpty {
+                    cleaned += stripOneLabel(cur.trimmingCharacters(in: .whitespaces))
+                }
+                out.replaceSubrange(lparen...rp, with: "(\(cleaned))")
+                startSearch = lparen
+            } else {
+                startSearch = r.upperBound
+            }
+        }
+        return out
+    }
+
+    private func stripOneLabel(_ s: String) -> String {
+        // `_ argN: Type` → `Type`, `label argN: Type` → `Type`
+        let parts = s.components(separatedBy: ": ")
+        if parts.count >= 2 {
+            let label = parts[0].trimmingCharacters(in: .whitespaces)
+            let words = label.components(separatedBy: " ")
+            // If looks like `_ argN` or `label argN` pattern → strip
+            if words.count == 2, words[1].hasPrefix("arg") {
+                return parts.dropFirst().joined(separator: ": ")
+            }
+        }
+        return s
+    }
+
+    // 20b. cleanAnyWhereConstraints: on declaration lines, removes where-clause same-type
+    // constraints whose LHS is `Any` (e.g. `Any == Void`, `Any == (Any, Any)`).
+    // Keeps conformance constraints (T: P) and same-type constraints where neither side is `Any`.
+    // Also removes empty where clauses left behind.
+    func cleanAnyWhereConstraints() -> String {
+        guard self.contains(" where ") else { return self }
+        // Find the ` where ` boundary — only in declaration context (already line-scoped by caller)
+        let result = self
+        // Find ` where ` — keep the part before and after
+        guard let whereRange = result.range(of: " where ") else { return result }
+        let beforeWhere = String(result[..<whereRange.lowerBound])
+        let constraintStr = String(result[whereRange.upperBound...])
+
+        // Split the constraint list on top-level commas (not inside parens/brackets)
+        var constraints = [String]()
+        var current = ""
+        var depth = 0
+        for ch in constraintStr {
+            if ch == "(" || ch == "[" { depth += 1 }
+            else if ch == ")" || ch == "]" { depth -= 1 }
+            else if ch == "," && depth == 0 {
+                constraints.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+                continue
+            }
+            current.append(ch)
+        }
+        if !current.trimmingCharacters(in: .whitespaces).isEmpty {
+            constraints.append(current.trimmingCharacters(in: .whitespaces))
+        }
+
+        // Keep constraints that don't have `Any` on the LHS of `==`
+        let kept = constraints.filter { c in
+            let t = c.trimmingCharacters(in: .whitespaces)
+            // `Any == <whatever>` or `any <something> == <whatever>` → drop
+            if t.hasPrefix("Any ==") || t.hasPrefix("any ==") { return false }
+            // `Any: <protocol>` → drop (Any can't be constrained as a type param)
+            if t.hasPrefix("Any:") || t.hasPrefix("any:") { return false }
+            // `Self == <whatever>` → drop
+            if t.hasPrefix("Self ==") { return false }
+            return true
+        }
+
+        if kept.isEmpty {
+            return beforeWhere
+        } else {
+            return beforeWhere + " where " + kept.joined(separator: ", ")
+        }
+    }
+
     // 20. stripAnyGenericApplicationBeforeParen: strips <Any> and <Any, Any> before parenthesis
     func stripAnyGenericApplicationBeforeParen() -> String {
         var result = self
