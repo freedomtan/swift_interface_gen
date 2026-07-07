@@ -5,6 +5,9 @@
 - [x] Implement target-isolated dynamic stub generation directories (`tmp_stubs_{name}`) to prevent dependency-resolution overwrite conflicts.
 - [x] Solve namespace conflicts when nested structures match external module names (e.g. `ModelCatalog.Model.ResourceBundle.TokenGeneration`).
 - [x] Auto-Cleanup Flag: Added a `--clean` command-line option to `orchestrate.py` to automatically remove target-specific temporary stub directories (like `tmp_stubs_{name}`) after successful runs.
+- [x] **Eliminate all ModelCatalog first-pass stubs (was 11, then 10, now 0):**
+  - Constrained extension `ResourceBundleIdentifier<where A==LLMBundle>.serverConfiguration()` fixed via `<A: ResourceBundle>` generic constraint in `Model.swift`.
+  - `fA_` default-argument accessor stubs eliminated by: (a) emitting typed constant defaults (`[]`, `[:]`, `{ false }`, `{ _ in false }`, `_Default_Proto()`) so Swift natively compiles the thunks, and (b) switching `--compare` from `nm -gU` to `nm -U` so locally-scoped thunks are found without assembly stubs.
 
 ## Future Improvements
 

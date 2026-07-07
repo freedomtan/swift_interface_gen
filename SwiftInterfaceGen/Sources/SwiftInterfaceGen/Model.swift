@@ -45,6 +45,12 @@ class TypeNode {
 
     static func getDefaultValue(for type: String) -> String {
         var cleanType = type.trimmingCharacters(in: .whitespaces)
+        // Strip @escaping / @autoclosure / @Sendable attributes
+        while cleanType.hasPrefix("@") {
+            if let spaceIdx = cleanType.firstIndex(of: " ") {
+                cleanType = String(cleanType[cleanType.index(after: spaceIdx)...]).trimmingCharacters(in: .whitespaces)
+            } else { break }
+        }
         if cleanType.hasPrefix("Swift.") {
             cleanType = String(cleanType.dropFirst(6))
         }
@@ -69,6 +75,48 @@ class TypeNode {
         if cleanType.hasPrefix("Set<") {
             return "[]"
         }
+        // Closure types: "(Args) -> ReturnType" or "(Args) throws -> ReturnType"
+        if cleanType.hasPrefix("(") {
+            // Find the matching closing paren for the argument list
+            var depth = 0
+            var closeParenIdx: String.Index? = nil
+            var i = cleanType.startIndex
+            while i < cleanType.endIndex {
+                let ch = cleanType[i]
+                if ch == "(" { depth += 1 }
+                else if ch == ")" {
+                    depth -= 1
+                    if depth == 0 {
+                        closeParenIdx = i
+                        break
+                    }
+                }
+                i = cleanType.index(after: i)
+            }
+            if let closeParen = closeParenIdx {
+                let argsPart = String(cleanType[cleanType.index(after: cleanType.startIndex)..<closeParen])
+                    .trimmingCharacters(in: .whitespaces)
+                let afterParen = String(cleanType[cleanType.index(after: closeParen)...]).trimmingCharacters(in: .whitespaces)
+                // afterParen is "-> ReturnType" or "throws -> ReturnType"
+                var retType = "Void"
+                if let arrowRange = afterParen.range(of: "->") {
+                    retType = String(afterParen[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                }
+                let retDefault = getDefaultValue(for: retType)
+                if argsPart.isEmpty {
+                    return "{ \(retDefault) }"
+                } else {
+                    return "{ _ in \(retDefault) }"
+                }
+            }
+        }
+        // Protocol existential: "any ProtocolName" or "any Module.ProtocolName"
+        // Use a sentinel struct _Default_ProtocolName that will be emitted by postProcess.
+        if cleanType.hasPrefix("any ") {
+            let protoName = String(cleanType.dropFirst(4))
+                .components(separatedBy: ".").last ?? String(cleanType.dropFirst(4))
+            return "_Default_\(protoName)()"
+        }
         return "dummyDefaultValue()"
     }
 
@@ -90,12 +138,21 @@ class TypeNode {
 
     func injectDefaultArguments(signature: String, methodName: String, isStatic: Bool, parser: Parser?) -> String {
         guard let parser = parser else { return signature }
-        guard let openParen = signature.firstIndex(of: "("),
-              let closeParen = signature.lastIndex(of: ")"),
-              openParen < closeParen else {
-            return signature
+        guard let openParen = signature.firstIndex(of: "(") else { return signature }
+        // Find the matching close paren by depth to avoid matching tuple return types
+        var depth = 0
+        var closeParen: String.Index? = nil
+        var idx = openParen
+        while idx < signature.endIndex {
+            if signature[idx] == "(" { depth += 1 }
+            else if signature[idx] == ")" {
+                depth -= 1
+                if depth == 0 { closeParen = idx; break }
+            }
+            idx = signature.index(after: idx)
         }
-        
+        guard let closeParen = closeParen, openParen < closeParen else { return signature }
+
         let paramsStr = String(signature[signature.index(after: openParen)..<closeParen])
         // Split parameters by top-level commas
         let params = parser.splitTopLevelCommas(paramsStr)
@@ -164,15 +221,19 @@ class TypeNode {
     }
 
     static func defaultReturnValue(for type: String) -> String {
-        let t = type.trimmingCharacters(in: .whitespaces)
+        var t = type.trimmingCharacters(in: .whitespaces)
+        if let whereRange = t.range(of: " where ") {
+            t = String(t[..<whereRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+        }
         if t == "Bool" { return "false" }
         if ["Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64"].contains(t) { return "0" }
         if ["Double", "Float", "Float16", "CGFloat"].contains(t) { return "0.0" }
         if t == "String" { return "\"\"" }
         if t == "StaticString" { return "\"\"" }
-        if t.starts(with: "Array<") || t.starts(with: "[") { return "[]" }
-        if t.starts(with: "Dictionary<") || (t.starts(with: "[") && t.contains(":")) { return "[:]" }
         if t.starts(with: "Optional<") || t.hasSuffix("?") { return "nil" }
+        if t.starts(with: "[[") { return "[]" }
+        if t.starts(with: "Dictionary<") || (t.starts(with: "[") && t.contains(":") && !t.starts(with: "[(")) { return "[:]" }
+        if t.starts(with: "Array<") || t.starts(with: "[") { return "[]" }
         if t.starts(with: "Set<") { return "[]" }
         if t == "Void" || t == "()" { return "" }
         if t == "Data" { return "Data()" }
@@ -271,7 +332,7 @@ class TypeNode {
             }
             genericParamsList = "<\(params.joined(separator: ", "))>"
         }
-        let selfReplaceWith = name + (isGeneric ? genericParamsList : "")
+        let selfReplaceWith = isProtocol ? "Self" : name + (isGeneric ? genericParamsList : "")
         for member in members.values {
             if case .associatedType(let code) = member {
                 let parts = code.components(separatedBy: " ")
@@ -416,9 +477,13 @@ class TypeNode {
             inheritsList = inheritsList.filter { !forbiddenProtocols.contains($0) }
         }
         if actualKind == "class" {
-            // Strip Equatable and Hashable — these generate extra conformance descriptors
-            // that the TBD does not export for class types.
-            inheritsList = inheritsList.filter { !["Hashable", "Codable", "Sendable", "Equatable"].contains($0) }
+            // Strip Equatable, Hashable, and Codable — these generate extra conformance descriptors
+            // that the TBD does not export for most class types.
+            // Exception: keep Codable if the TBD actually exports Encodable/Decodable Mc symbols.
+            let hasCodableMc = parser?.conformancesFromTBD.contains(where: { $0.hasPrefix("\(n):") && ($0.hasSuffix(":Encodable") || $0.hasSuffix(":Decodable")) }) == true
+            var toStrip: Set<String> = ["Hashable", "Sendable", "Equatable"]
+            if !hasCodableMc { toStrip.formUnion(["Codable", "Encodable", "Decodable"]) }
+            inheritsList = inheritsList.filter { !toStrip.contains($0) }
             
             var needsUncheckedSendable = false
             for inheritsType in inheritsList {
@@ -445,21 +510,20 @@ class TypeNode {
         var displayTypeName = escapeKeyword(typeName)
         if typeName == "BidirectionalXPCServiceClientConnection" {
             displayTypeName += "<A: XPCService, B: XPCService>"
-            isGeneric = false
             inScope.insert("A")
             inScope.insert("B")
         } else if typeName == "CatalogAsset" {
             displayTypeName += "<A: AssetMetadata, B: AssetContents>"
-            isGeneric = false
             inScope.insert("A")
             inScope.insert("B")
         } else if typeName == "SupportedArgument" {
             displayTypeName += "<A: Equatable>"
-            isGeneric = false
+            inScope.insert("A")
+        } else if typeName == "ResourceBundleIdentifier" {
+            displayTypeName += "<A: ResourceBundle>"
             inScope.insert("A")
         } else if typeName == "XPCServiceClientConnection" {
             displayTypeName += "<A: XPCService>"
-            isGeneric = false
             inScope.insert("A")
         } else if isGeneric && !isProtocol && !displayTypeName.contains("<") {
             var count = 1
@@ -741,7 +805,7 @@ class TypeNode {
                 // Strip the parent's fully qualified prefix from any nested types
                 cleanT = cleanT.stripParentPrefix(parentName: self.name)
 
-                cleanT = cleanT.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith)
+                cleanT = cleanT.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith, defaultModule: parser?.defaultModule ?? "")
                 cleanT = cleanT.replaceWordWithoutGeneric(self.name, with: selfReplaceWith)
 
                 if let brace = cleanT.firstIndex(of: "{") {
@@ -843,7 +907,7 @@ class TypeNode {
                 // Strip the parent's fully qualified prefix from any nested types
                 cleanedSig = cleanedSig.stripParentPrefix(parentName: self.name)
                 
-                cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith)
+                cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith, defaultModule: parser?.defaultModule ?? "")
                 cleanedSig = cleanedSig.replaceWordWithoutGeneric(self.name, with: selfReplaceWith)
                 
                 var shouldReplaceA = true
@@ -1201,7 +1265,8 @@ class TypeNode {
     func generateExtensions(defaultModule: String, parser: Parser? = nil, path: String = "") -> String {
         var output = ""
         let separator = (path.isEmpty || path.hasSuffix("_") || path.hasSuffix(".")) ? "" : "."
-        let currentPath = path.isEmpty ? name : path + separator + name
+        let escapedName = escapeKeyword(name)
+        let currentPath = path.isEmpty ? escapedName : path + separator + escapedName
         
         var inScope = Set<String>()
         let isProtocol = kind == "protocol"
@@ -1284,6 +1349,9 @@ class TypeNode {
             }
 
             var constraintSuffix = constraint != nil ? " " + constraint! : ""
+            if kind != "protocol" && !isGeneric {
+                constraintSuffix = ""
+            }
             if name == "Array" && path == "Swift" {
                 constraintSuffix = constraintSuffix.replaceWord("A", with: "Element")
             } else if name == "Dictionary" && path == "Swift" {
@@ -1353,10 +1421,11 @@ class TypeNode {
                         return res
                     }
                     cleanedSig = localCleanScope(cleanedSig)
+                    let convenienceMod = (kind == "class" || baseClass != nil) ? "convenience " : ""
                     if isObjcExt {
-                        extLines.append("\(extNextIndent)@nonobjc public convenience \(cleanedSig) { fatalError() }")
+                        extLines.append("\(extNextIndent)@nonobjc public \(convenienceMod)\(cleanedSig) { fatalError() }")
                     } else {
-                        extLines.append("\(extNextIndent)public \(cleanedSig) { fatalError() }")
+                        extLines.append("\(extNextIndent)public \(convenienceMod)\(cleanedSig) { fatalError() }")
                     }
                 case .property(let n, let t, let isReadOnly, let isStatic):
                     var cleanT = t
@@ -1470,6 +1539,7 @@ class TypeNode {
                         return res
                     }
                     cleanedSig = methodCleanScope(cleanedSig)
+                    cleanedSig = cleanedSig.removingUnusedMethodGenericParams()
                     
                     let staticMod = isStatic ? "static " : ""
                     var extLifetimeAttr = ""
@@ -1511,6 +1581,8 @@ class TypeNode {
                     finalConstraint = finalConstraint.replacingOccurrences(of: "where A ", with: "where Self ")
                     finalConstraint = finalConstraint.replacingOccurrences(of: ", A:", with: ", Self:")
                     finalConstraint = finalConstraint.replacingOccurrences(of: ", A ", with: ", Self ")
+                    // Replace A.member with Self.member for associated type constraints
+                    finalConstraint = finalConstraint.replaceWord("A", with: "Self")
                 }
                 output += generateOneExtension(membersList: Array(membersMap.values), constraint: finalConstraint)
             }

@@ -58,7 +58,7 @@ def extract_install_name(tbd_path):
                     return val
     return None
 
-def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_library=True, use_exports=True, extra_objects=None):
+def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_library=True, use_exports=True, extra_objects=None, library_evolution=True):
     print(f"--- Compiling {'Stub ' if is_stub else ''}Framework: {name} ---")
     fw_dir = f"LocalFrameworks/{name}.framework"
     mod_dir = f"{fw_dir}/Modules/{name}.swiftmodule"
@@ -108,11 +108,13 @@ def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_
             
         cmd_lib = [
             "swiftc", "-emit-library", "-o", lib_dest_path,
-            swift_source, "-enable-library-evolution", "-module-name", name,
+            swift_source, "-module-name", name,
             "-F", "LocalFrameworks", "-sdk", SDK_ROOT,
             "-language-mode", "6",
             "-Xlinker", "-not_for_dyld_shared_cache"
         ]
+        if library_evolution:
+            cmd_lib.insert(cmd_lib.index("-module-name"), "-enable-library-evolution")
         bridge_h = f"{name}Interface_bridge.h"
         if not is_stub and os.path.exists(bridge_h):
             cmd_lib.extend(["-import-objc-header", bridge_h])
@@ -157,6 +159,7 @@ def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_
 built = set()
 building = set()
 clean_after = False
+keep_stubs = False
 
 def build_framework(name):
     if name in built:
@@ -178,12 +181,20 @@ def build_framework(name):
     # 1. Build swift-interface-gen first
     print("--- Building Generator ---")
     subprocess.check_call([
+        "clang++", "-O3", "-std=c++11", "-c",
+        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.cpp",
+        "-o", "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o"
+    ])
+    subprocess.check_call([
         "swiftc", "-O", "-parse-as-library",
         "SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift",
         "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Parser.swift",
         "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Model.swift",
         "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Config.swift",
         "SwiftInterfaceGen/Sources/SwiftInterfaceGen/String+RegexFree.swift",
+        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/TreeNode.swift",
+        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o",
+        "-lc++",
         "-o", "./swift-interface-gen"
     ])
     
@@ -372,6 +383,8 @@ def build_framework(name):
         for line in lines:
             if "// --- Automatically Generated Self-Alignment Stubs ---" in line:
                 break
+            if "// --- Protocol Default Sentinels (dylib-only, stripped for module emit) ---" in line:
+                break
             if "// --- ObjC Extension (bridge-header required) ---" in line:
                 skip = True
                 continue
@@ -379,14 +392,16 @@ def build_framework(name):
                 skip = False
                 continue
             if not skip:
+                # Strip protocol existential sentinel defaults (= _Default_Foo()) like dummyDefaultValue()
+                import re as _re2
+                line = _re2.sub(r' = _Default_[A-Za-z_][A-Za-z0-9_]*\(\)', '', line)
                 f.write(line)
             
     compile_framework(name, interface_module_src, is_stub=False, emit_module=True, emit_library=False)
     os.remove(interface_module_src)
     
     # Phase B: Compile initial dynamic library (without exports list)
-    # Keep dummyDefaultValue() defaults so the Swift compiler emits fA_ default-argument
-    # accessor symbols natively, reducing the number of assembly stubs needed.
+    # Keep library-evolution enabled to match the final build.
     interface_dylib_src = interface_file
     compile_framework(name, interface_dylib_src, is_stub=False, emit_module=False, emit_library=True, use_exports=False, extra_objects=bridge_extra_objects)
     
@@ -412,10 +427,11 @@ def build_framework(name):
     compile_framework(name, interface_dylib_src, is_stub=False, emit_module=False, emit_library=True, use_exports=True, extra_objects=[stubs_o] + bridge_extra_objects)
 
     # Clean up temp files (interface_dylib_src is now the original interface file, do not delete it)
-    if os.path.exists(stubs_s):
-        os.remove(stubs_s)
-    if os.path.exists(stubs_o):
-        os.remove(stubs_o)
+    if not keep_stubs:
+        if os.path.exists(stubs_s):
+            os.remove(stubs_s)
+        if os.path.exists(stubs_o):
+            os.remove(stubs_o)
         
     # Phase E: Final Symbol Alignment Verification
     print("--- Comparing Symbols (Verification) ---")
@@ -468,9 +484,12 @@ if __name__ == "__main__":
     if "--clean" in sys.argv:
         clean_after = True
         sys.argv.remove("--clean")
-        
+    if "--keep-stubs" in sys.argv:
+        keep_stubs = True
+        sys.argv.remove("--keep-stubs")
+
     if len(sys.argv) < 3:
-        print("Usage: ./orchestrate.py <FrameworkName> <TestFile.swift> [--clean]")
+        print("Usage: ./orchestrate.py <FrameworkName> <TestFile.swift> [--clean] [--keep-stubs]")
         sys.exit(1)
         
     target = sys.argv[1]

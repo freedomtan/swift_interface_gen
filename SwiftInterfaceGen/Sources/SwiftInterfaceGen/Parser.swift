@@ -3,6 +3,7 @@ import Foundation
 class Parser {
     var modules: [String: TypeNode] = [:]
     var defaultModule: String = ""
+    var primaryTargetModule: String = ""
     let swiftKeywords: Set<String> = [
         "associatedtype", "class", "deinit", "enum", "extension", "fileprivate",
         "func", "import", "init", "inout", "internal", "let", "open", "operator",
@@ -40,7 +41,7 @@ class Parser {
     let systemTypes = SystemTypesSet(base: [
         "Bool", "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
         "Double", "Float", "Float16", "CGFloat", "Void", "Any", "Self", "Set", "Array", "Dictionary",
-        "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder",
+        "Optional", "URL", "Data", "Hasher", "Error", "Decoder", "Encoder", "Never",
         // Range types require Comparable constraints — never alias with <Any>
         "Range", "ClosedRange", "PartialRangeFrom", "PartialRangeThrough", "PartialRangeUpTo",
         "UnsafeRawBufferPointer", "UnsafeMutableRawBufferPointer",
@@ -132,6 +133,8 @@ class Parser {
     private var scannedLocalSwiftFiles = false
     var tbdSymbols = Set<String>()
     var nonFinalClasses = Set<String>()
+    // "TypeName:ProtocolName" entries for Mc conformance descriptors found in TBD symbols.
+    var conformancesFromTBD = Set<String>()
     var referencedModules = Set<String>()
     var symbolEscapingMap: [String: [Int: Bool]] = [:]
     // Maps base function mangled symbol → set of parameter indices that have default values
@@ -321,6 +324,29 @@ class Parser {
         return 0
     }
 
+    static func getMangledModule(_ mangled: String) -> String? {
+        var s = mangled
+        if s.hasPrefix("_$s") {
+            s = String(s.dropFirst(3))
+        } else if s.hasPrefix("$s") {
+            s = String(s.dropFirst(2))
+        } else {
+            return nil
+        }
+        var lenStr = ""
+        for c in s {
+            if c.isNumber {
+                lenStr.append(c)
+            } else {
+                break
+            }
+        }
+        guard let len = Int(lenStr) else { return nil }
+        s = String(s.dropFirst(lenStr.count))
+        guard s.count >= len else { return nil }
+        return String(s.prefix(len))
+    }
+
     func parse(mangled: String, demangled: String, currentModule: String) {
         let originalMangled = mangled
         if originalMangled.hasSuffix("Tj") || originalMangled.hasSuffix("Tq") {
@@ -337,6 +363,42 @@ class Parser {
         self.defaultModule = currentModule
         self.currentPrecomputeModule = currentModule
         
+        // Auto-detect ~Copyable constraints to mark protocols as ~Copyable
+        if demangled.contains(" where ") && demangled.contains("~Copyable") {
+            let parts = demangled.components(separatedBy: " where ")
+            if parts.count >= 2 {
+                let whereClause = parts[1]
+                let constraints = whereClause.components(separatedBy: ",")
+                var nonCopyableParams = Set<String>()
+                var paramProtocols = [String: Set<String>]()
+                
+                for c in constraints {
+                    let constraint = c.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if constraint.hasSuffix(": ~Copyable") || constraint.hasSuffix(": any ~Copyable") || constraint.contains("~Copyable") {
+                        let param = constraint.components(separatedBy: ":")[0].trimmingCharacters(in: .whitespaces)
+                        nonCopyableParams.insert(param)
+                    } else if constraint.contains(":") {
+                        let components = constraint.components(separatedBy: ":")
+                        let param = components[0].trimmingCharacters(in: .whitespaces)
+                        let proto = components[1].trimmingCharacters(in: .whitespaces)
+                        paramProtocols[param, default: []].insert(proto)
+                    }
+                }
+                
+                for param in nonCopyableParams {
+                    if let protos = paramProtocols[param] {
+                        for proto in protos {
+                            let cleanProto = proto.replacingOccurrences(of: "any ", with: "").trimmingCharacters(in: .whitespaces)
+                            let node = findOrCreateType(name: cleanProto)
+                            if !node.conformances.contains("~Copyable") {
+                                node.conformances.insert("~Copyable")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
         // Parse default arguments from demangled string
         if demangled.contains("default argument ") {
             let parts = demangled.components(separatedBy: " of ")
@@ -347,6 +409,11 @@ class Parser {
                 let indexStr = defArgPart.replacingOccurrences(of: "default argument ", with: "").trimmingCharacters(in: .whitespaces)
                 if let index = Int(indexStr) {
                     var funcPart = funcPartFull
+                    // Strip "(extension in Module):" prefix from protocol/type extension methods
+                    if funcPart.hasPrefix("(extension in "),
+                       let colonIdx = funcPart.firstIndex(of: ":") {
+                        funcPart = String(funcPart[funcPart.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
+                    }
                     if funcPart.hasPrefix("static ") {
                         funcPart = String(funcPart.dropFirst(7))
                     }
@@ -500,6 +567,10 @@ class Parser {
                         discoveredProtocols.insert(cleanProto)
                         let shortProto = cleanProto.components(separatedBy: ".").last ?? cleanProto
                         discoveredProtocols.insert(shortProto)
+
+                        // Record "TypeName:ProtoName" for class conformance filtering in generateCode
+                        let shortType = cleanType(typePath).components(separatedBy: ".").last ?? cleanType(typePath)
+                        conformancesFromTBD.insert("\(shortType):\(shortProto)")
                     }
                     return
                 }
@@ -906,11 +977,16 @@ class Parser {
                         if !methodWhereClause.isEmpty {
                             initFull += methodWhereClause
                         }
-                        let isExternal = getTopLevelModule(for: node) != defaultModule
+                        let isExternal = getTopLevelModule(for: node) != primaryTargetModule
+                        let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
                         if let constraints = constraints {
-                            node.constrainedExtensions[constraints, default: [:]][initFull] = .initializer(initFull)
+                            if symbolModule == primaryTargetModule {
+                                node.constrainedExtensions[constraints, default: [:]][initFull] = .initializer(initFull)
+                            }
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
-                            node.extensionMembers[initFull] = .initializer(initFull)
+                            if symbolModule == primaryTargetModule {
+                                node.extensionMembers[initFull] = .initializer(initFull)
+                            }
                         } else {
                             node.members[initFull] = .initializer(initFull)
                         }
@@ -920,11 +996,16 @@ class Parser {
                         if !methodWhereClause.isEmpty {
                             fixedSignature += methodWhereClause
                         }
-                        let isExternal = getTopLevelModule(for: node) != defaultModule
+                        let isExternal = getTopLevelModule(for: node) != primaryTargetModule
+                        let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
                         if let constraints = constraints {
-                            node.constrainedExtensions[constraints, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                            if symbolModule == primaryTargetModule {
+                                node.constrainedExtensions[constraints, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                            }
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
-                            node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                            if symbolModule == primaryTargetModule {
+                                node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                            }
                         } else {
                             node.members[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                         }
@@ -937,9 +1018,8 @@ class Parser {
             }
         }
 
-        if cleanD.contains(" : ") {
-            let parts = cleanD.components(separatedBy: " : ")
-            var fullMemberPath = parts[0].trimmingCharacters(in: .whitespaces)
+        if let firstColonRange = cleanD.range(of: " : ") {
+            var fullMemberPath = String(cleanD[..<firstColonRange.lowerBound]).trimmingCharacters(in: .whitespaces)
             
             var isReadOnly = d_orig.contains(" { get }") || !d_orig.contains(" { get set }")
             if fullMemberPath.hasSuffix(".getter") {
@@ -959,7 +1039,7 @@ class Parser {
             let (typeName, memberName) = splitPath(fullMemberPath)
             let parentName = typeName.components(separatedBy: ".").last!
             let isSubscript = memberName == "subscript" || memberName == "`subscript`"
-            var typeVal = parts[1]
+            var typeVal = String(cleanD[firstColonRange.upperBound...]).trimmingCharacters(in: .whitespaces)
             if isSubscript {
                 if typeVal.hasPrefix("<") {
                     let pCount = parentGenericCount(typeName: typeName)
@@ -1083,11 +1163,16 @@ class Parser {
                 } else {
                     storageKey = escapedMemberName
                 }
-                let isExternal = getTopLevelModule(for: node) != defaultModule
+                let isExternal = getTopLevelModule(for: node) != primaryTargetModule
+                let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
                 if let constraints = constraints {
-                    node.constrainedExtensions[constraints, default: [:]][storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                    if symbolModule == primaryTargetModule {
+                        node.constrainedExtensions[constraints, default: [:]][storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                    }
                 } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
-                    node.extensionMembers[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                    if symbolModule == primaryTargetModule {
+                        node.extensionMembers[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                    }
                 } else {
                     node.members[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                 }
@@ -1305,6 +1390,7 @@ class Parser {
         t = t.replacingOccurrences(of: "any (Swift\\.)?AsyncSequence<[^>]+>", with: "any AsyncSequence", options: .regularExpression)
         t = t.replacingOccurrences(of: "\\(extension in [^)]+\\):", with: "", options: .regularExpression)
         
+
         // For each discovered protocol, add 'any' prefix when used as an existential type.
         // Track which ones are "ambiguous" (also have a concrete type with the same short name)
         // so we can preserve their module prefix to avoid Swift shadowing inside nested type bodies.
@@ -1495,6 +1581,15 @@ class Parser {
             t = t.replacingOccurrences(of: "& any ", with: "& ")
         }
 
+        // Parenthesize optional existentials: 'any Protocol?' -> '(any Protocol)?'
+        if t.contains("any ") {
+            t = t.replacingOccurrences(
+                of: #"any\s+([a-zA-Z0-9_.]+)([\?!])"#,
+                with: "(any $1)$2",
+                options: .regularExpression
+            )
+        }
+
         if isMethodSignature {
             return stripLabelsFromMethodSignature(t)
         } else {
@@ -1593,7 +1688,14 @@ class Parser {
             }
 
             let isEsc = escapingMap?[paramIndex] ?? true
-            let escapedType = Parser.escapeClosures(in: typePart, isTopLevelParameter: true, isEscaping: isEsc)
+            var escapedType = Parser.escapeClosures(in: typePart, isTopLevelParameter: true, isEscaping: isEsc)
+            
+            let cleanType = escapedType.trimmingCharacters(in: .whitespaces)
+            let isNoncopyableType = cleanType.contains("Span") || cleanType.contains("Executable") || cleanType.contains("PixelBuffer")
+            let hasOwnership = cleanType.hasPrefix("borrowing ") || cleanType.hasPrefix("consuming ") || cleanType.hasPrefix("inout ") || cleanType.hasPrefix("__shared ") || cleanType.hasPrefix("__owned ")
+            if isNoncopyableType && !hasOwnership {
+                escapedType = "borrowing " + escapedType
+            }
 
             if isSubscript {
                 if hasLabel && labelName != "_" {
@@ -2024,12 +2126,45 @@ class Parser {
         
         // Phase 2: Generate type extensions
         for moduleName in sortedModuleNames {
-            if moduleName != defaultModule && isModuleAvailable(moduleName) && !["Swift", "Foundation", "ObjectiveC", "XPC", "UnifiedAssetFramework", "__C"].contains(moduleName) {
+            guard let module = modules[moduleName] else { continue }
+            // Skip system/standard modules and non-default modules without extension members.
+            // Exception: external private framework modules that have extension members added
+            // by the current defaultModule (e.g. toAIR* properties on IPL enums).
+            let systemAndStandardModules: Set<String> = [
+                "Swift", "Foundation", "ObjectiveC", "XPC", "UnifiedAssetFramework", "__C",
+                "CoreAI", "Dispatch", "os", "Metal", "CoreGraphics", "CoreVideo", "IOSurface",
+                "MetricKit", "Combine", "Synchronization", "CoreMedia"
+            ]
+            if systemAndStandardModules.contains(moduleName) { continue }
+            // For external available modules, only emit extensions when they contain
+            // read-only computed properties (toX converters) — not operators or methods,
+            // which can fail when the external type turns out to be a protocol.
+            let hasReadOnlyPropertyExtensions = module.nestedTypes.values.contains { node in
+                node.extensionMembers.values.contains {
+                    if case .property(_, _, let isReadOnly, _) = $0 { return isReadOnly }
+                    return false
+                }
+            }
+            if moduleName != defaultModule && isModuleAvailable(moduleName) && !hasReadOnlyPropertyExtensions {
                 continue
             }
-            guard let module = modules[moduleName] else { continue }
+            let isExternalAvailable = moduleName != defaultModule && isModuleAvailable(moduleName)
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             for type in sortedTypes {
+                // For external available modules, only emit types that have read-only property extensions
+                if isExternalAvailable {
+                    let hasROP = type.extensionMembers.values.contains {
+                        if case .property(_, _, let isReadOnly, _) = $0 { return isReadOnly }
+                        return false
+                    }
+                    if !hasROP { continue }
+                    // Strip non-property extension members to avoid emitting operators/methods
+                    // that may not compile against the external module's actual type kind.
+                    type.extensionMembers = type.extensionMembers.filter {
+                        if case .property(_, _, let isReadOnly, _) = $0.value { return isReadOnly }
+                        return false
+                    }
+                }
                 let flattenedName = "\(moduleName)_\(type.name)"
                 if !definedTypes.contains(flattenedName) && type.extensionMembers.isEmpty && type.constrainedExtensions.isEmpty { continue }
                 
@@ -2040,6 +2175,10 @@ class Parser {
                     pathPrefix = ""
                 } else if moduleName == defaultModule {
                     pathPrefix = ""
+                } else if isModuleAvailable(moduleName) {
+                    // External available module — use dot-qualified path so extensions are
+                    // emitted as "extension ModuleName.TypeName { ... }"
+                    pathPrefix = moduleName
                 } else {
                     pathPrefix = "\(moduleName)_"
                 }
@@ -2590,15 +2729,15 @@ class Parser {
         if trimmed.hasSuffix("?") || trimmed.hasPrefix("Optional<") || trimmed.hasSuffix("!") {
             if trimmed.hasSuffix("?") {
                 let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
-                return escapeClosures(in: inner, isEscaping: isEscaping) + "?"
+                return escapeClosures(in: inner, isTopLevelParameter: isTopLevelParameter, isEscaping: isEscaping) + "?"
             }
             if trimmed.hasSuffix("!") {
                 let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
-                return escapeClosures(in: inner, isEscaping: isEscaping) + "!"
+                return escapeClosures(in: inner, isTopLevelParameter: isTopLevelParameter, isEscaping: isEscaping) + "!"
             }
             if trimmed.hasPrefix("Optional<") && trimmed.hasSuffix(">") {
                 let inner = String(trimmed.dropFirst(9).dropLast()).trimmingCharacters(in: .whitespaces)
-                return "Optional<" + escapeClosures(in: inner, isEscaping: isEscaping) + ">"
+                return "Optional<" + escapeClosures(in: inner, isTopLevelParameter: isTopLevelParameter, isEscaping: isEscaping) + ">"
             }
         }
         
@@ -2735,7 +2874,12 @@ class Parser {
         } else {
             let escaped = escapeClosures(in: paramsString)
             let isFunc = escaped.contains("->")
-            let isOpt = escaped.hasSuffix("?") || escaped.hasPrefix("Optional<")
+            let isOpt: Bool
+            if isFunc {
+                isOpt = escaped.hasPrefix("Optional<") || escaped.hasSuffix(")?") || escaped.hasSuffix(")?!")
+            } else {
+                isOpt = escaped.hasSuffix("?") || escaped.hasPrefix("Optional<") || escaped.hasSuffix("!")
+            }
             let hasEsc = escaped.contains("@escaping")
             let escPrefix = (isFunc && !isOpt && !hasEsc && isEscaping) ? "@escaping " : ""
             let finalType = attrs + escPrefix + escaped + " " + throwsModifier + "-> " + escapeClosures(in: rightPart)
@@ -2791,7 +2935,12 @@ class Parser {
             let escapedType = escapeClosures(in: type)
             let cleanEscType = escapedType.trimmingCharacters(in: .whitespaces)
             let isFunc = cleanEscType.contains("->")
-            let isOpt = cleanEscType.hasSuffix("?") || cleanEscType.hasPrefix("Optional<")
+            let isOpt: Bool
+            if isFunc {
+                isOpt = cleanEscType.hasPrefix("Optional<") || cleanEscType.hasSuffix(")?") || cleanEscType.hasSuffix(")?!")
+            } else {
+                isOpt = cleanEscType.hasSuffix("?") || cleanEscType.hasPrefix("Optional<") || cleanEscType.hasSuffix("!")
+            }
             let hasEsc = cleanEscType.contains("@escaping")
             
             let finalType: String
@@ -2818,6 +2967,28 @@ class Parser {
             }
         }
         return current
+    }
+
+    func isConcreteTypeNonGeneric(shortName: String) -> Bool {
+        func check(node: TypeNode) -> Bool? {
+            if node.name == shortName {
+                return !node.isGeneric
+            }
+            for child in node.nestedTypes.values {
+                if let res = check(node: child) {
+                    return res
+                }
+            }
+            return nil
+        }
+        for module in modules.values {
+            for type in module.nestedTypes.values {
+                if let res = check(node: type) {
+                    return res
+                }
+            }
+        }
+        return false
     }
 }
 

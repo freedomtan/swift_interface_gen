@@ -61,7 +61,8 @@ fi
 
 echo "--- Building Generator ---"
 cd SwiftInterfaceGen/Sources/SwiftInterfaceGen
-swiftc -O -parse-as-library main.swift Parser.swift Model.swift Config.swift String+RegexFree.swift -o ../../../swift-interface-gen
+clang++ -O3 -std=c++11 -c DemangleWrapper.cpp -o DemangleWrapper.o
+swiftc -O -parse-as-library main.swift Parser.swift Model.swift Config.swift String+RegexFree.swift TreeNode.swift DemangleWrapper.o -lc++ -o ../../../swift-interface-gen
 cd ../../../
 
 echo "--- Building Dependency Stub Frameworks ---"
@@ -208,7 +209,9 @@ mkdir -p "$MODULE_DIR"
 
 echo "--- Emitting Swift Module Interface ---"
 # Strip stubs to prevent duplicate/conflicting symbols during module compilation
-sed -n '/\/\/ --- Automatically Generated Self-Alignment Stubs ---/q;p' "${FRAMEWORK}Interface.swift" > "/tmp/${FRAMEWORK}Interface_module.swift"
+sed -n '/\/\/ --- Automatically Generated Self-Alignment Stubs ---\|\/\/ --- Protocol Default Sentinels/q;p' "${FRAMEWORK}Interface.swift" \
+  | sed 's/ = _Default_[A-Za-z_][A-Za-z0-9_]*()//g' \
+  > "/tmp/${FRAMEWORK}Interface_module.swift"
 
 swiftc -emit-module -module-name "$FRAMEWORK" "/tmp/${FRAMEWORK}Interface_module.swift" \
     -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \

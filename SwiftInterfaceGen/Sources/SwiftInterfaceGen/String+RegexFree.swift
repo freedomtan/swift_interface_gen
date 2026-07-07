@@ -513,7 +513,7 @@ extension String {
                     let lastComponent = components.last ?? ""
                     let prefix = String(result[prefixStartIdx..<dotIdx])
                     
-                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence"]
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence", "EventType", "Stream"]
                     let suffixComponents = Array(components.dropFirst())
                     let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
                     
@@ -622,7 +622,7 @@ extension String {
     // selfPattern1: \b([a-zA-Z0-9_]+\.)+\(self.name)<[^>]+> -> Self
     // selfPattern2: \b([a-zA-Z0-9_]+\.)+\(self.name)\b -> Self
     // prefixPattern: \b([a-zA-Z0-9_]+\.)+\(self.name)\b -> self.name
-    func replaceSelfPattern(parentName: String, enclosingPath: String, replaceWith: String) -> String {
+    func replaceSelfPattern(parentName: String, enclosingPath: String, replaceWith: String, defaultModule: String = "") -> String {
         var result = self
         var startSearch = result.startIndex
         while let range = result.range(of: parentName, range: startSearch..<result.endIndex) {
@@ -673,10 +673,13 @@ extension String {
             }
             
             if isValidPrefix {
-                // If this is a nested type with a non-empty enclosing path, verify the scanned prefix ends with enclosingPath + "."
-                if !enclosingPath.isEmpty {
-                    let scannedPrefix = String(result[prefixStartIdx...beforeDotIdx])
-                    if !scannedPrefix.hasSuffix(enclosingPath + ".") {
+                let scannedPrefix = range.lowerBound > result.startIndex ? String(result[prefixStartIdx..<beforeDotIdx]) : ""
+                if enclosingPath.isEmpty {
+                    if !scannedPrefix.isEmpty && !defaultModule.isEmpty && scannedPrefix != defaultModule {
+                        isValidPrefix = false
+                    }
+                } else {
+                    if scannedPrefix != enclosingPath && (!defaultModule.isEmpty && scannedPrefix != (defaultModule + "." + enclosingPath)) {
                         isValidPrefix = false
                     }
                 }
@@ -984,10 +987,25 @@ extension String {
                     baseType = String(lastComponent[result.index(after: underscoreIdx)...])
                 }
                 
-                let isConcrete = concreteTypes.contains(baseType) || concreteTypes.contains(lastComponent)
+                let components = fullType.components(separatedBy: ".")
+                var isNestedUnderConcrete = false
+                if components.count > 1 {
+                    let first = components[0]
+                    if concreteTypes.contains(first) {
+                        isNestedUnderConcrete = true
+                    } else if components.count > 2 {
+                        let second = components[1]
+                        if concreteTypes.contains(second) {
+                            isNestedUnderConcrete = true
+                        }
+                    }
+                }
+                
+                let isConcrete = concreteTypes.contains(baseType) || concreteTypes.contains(lastComponent) || isNestedUnderConcrete
                 // Don't strip if this type is ALSO a protocol (e.g. ResourceBundle is both a
                 // concrete nested enum AND a top-level protocol — keep 'any' for the protocol usage)
-                let isAlsoProtocol = protocolNames.contains(lastComponent) || protocolNames.contains(baseType)
+                // but if it is nested under a concrete type, it cannot be a protocol in Swift
+                let isAlsoProtocol = !isNestedUnderConcrete && (protocolNames.contains(lastComponent) || protocolNames.contains(baseType))
                 
                 if isConcrete && !isAlsoProtocol {
                     result.replaceSubrange(range, with: "")
@@ -1276,13 +1294,18 @@ extension String {
                             }
                         }
                     }
-                    
                     if !followedByGeneric && !precededByDefinition {
                         var count = 0
                         if let cVal = flatGenerics[word] {
                             count = cVal
                         } else if let cVal = shortGenerics[word] {
-                            count = cVal
+                            var isPrecededByDot = false
+                            if start > 0 && chars[start - 1] == "." {
+                                isPrecededByDot = true
+                            }
+                            if !isPrecededByDot {
+                                count = cVal
+                            }
                         }
                         
                         if count > 0 {
@@ -1982,32 +2005,70 @@ extension String {
         // The function body is everything from `(` onward
         let funcBody = String(self[openParen...])
         
+        var checkBody = funcBody
+        var whereClause = ""
+        if let whereRange = funcBody.range(of: " where ") {
+            checkBody = String(funcBody[..<whereRange.lowerBound])
+            whereClause = String(funcBody[whereRange.upperBound...])
+        } else if let whereRange = funcBody.range(of: "where ") {
+            checkBody = String(funcBody[..<whereRange.lowerBound])
+            whereClause = String(funcBody[whereRange.upperBound...])
+        }
+        
         // Parse generic params (split on comma, handling nested brackets)
         let rawParams = bracketContent.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         
         var keptParams = [String]()
+        var prunedParams = Set<String>()
         for param in rawParams {
             if param.isEmpty { continue }
-            // Check if the param name (whole-word) appears in the function body
-            let used = funcBody.replaceWord(param, with: "").count < funcBody.count
-            if used {
+            // Check if the param name (whole-word) appears in the signature (excluding where clause)
+            let usedInSig = checkBody.replaceWord(param, with: "").count < checkBody.count
+            if usedInSig {
                 keptParams.append(param)
+            } else {
+                prunedParams.insert(param)
             }
-            // Also keep params that aren't GenericX — if it was declared without Generic prefix
-            // it is a real type constraint we should preserve.
-            else if !param.hasPrefix("Generic") {
-                keptParams.append(param)
+        }
+        
+        // Clean up the where clause: remove constraints referencing pruned parameters
+        // and also any constraints containing ~Copyable.
+        var finalWhere = ""
+        if !whereClause.isEmpty {
+            let constraints = whereClause.components(separatedBy: ",")
+            var keptConstraints = [String]()
+            for constraint in constraints {
+                let trimmed = constraint.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty { continue }
+                if trimmed.contains("~Copyable") || trimmed.contains("~ Copyable") {
+                    continue
+                }
+                var mentionsPruned = false
+                for pruned in prunedParams {
+                    if trimmed.replaceWord(pruned, with: "").count < trimmed.count {
+                        mentionsPruned = true
+                        break
+                    }
+                }
+                if !mentionsPruned {
+                    keptConstraints.append(trimmed)
+                }
             }
-            // If it IS a GenericX param and NOT used, skip it (prune it).
+            if !keptConstraints.isEmpty {
+                finalWhere = " where " + keptConstraints.joined(separator: ", ")
+            }
         }
         
         let prefix = String(self[..<openAngle])
         let suffix = String(self[self.index(after: ca)...])
         
+        // If we removed the where clause from funcBody, we must replace it in the returned string
+        let baseSig = suffix.range(of: " where ") != nil ? String(suffix[..<suffix.range(of: " where ")!.lowerBound]) : (suffix.range(of: "where ") != nil ? String(suffix[..<suffix.range(of: "where ")!.lowerBound]) : suffix)
+        
         if keptParams.isEmpty {
-            return prefix + suffix
+            return prefix + baseSig + finalWhere
         } else {
-            return prefix + "<" + keptParams.joined(separator: ", ") + ">" + suffix
+            return prefix + "<" + keptParams.joined(separator: ", ") + ">" + baseSig + finalWhere
         }
     }
 
@@ -2051,5 +2112,60 @@ extension String {
             startIdx = result.index(range.lowerBound, offsetBy: flatSubPath.count)
         }
         return result
+    }
+
+    // Replaces `any Self` inside protocol bodies with `any <ProtocolName>`.
+    // The demangler sometimes produces `[any Self]` for protocol requirements whose
+    // real Swift source uses the protocol name (e.g. `[any AppleIntelligenceError]`).
+    // Leaving `[any Self]` causes conforming types that implement `[any Proto]` to
+    // fail with "does not conform to protocol".
+    func replaceAnySelfInProtocolBodies() -> String {
+        let lines = self.components(separatedBy: "\n")
+        var result = [String]()
+        // Stack of (protocolName, minDepthToRemain): pop when globalDepth < minDepthToRemain
+        var protocolStack: [(name: String, minDepth: Int)] = []
+        var depth = 0
+
+        for line in lines {
+            let opens = line.filter { $0 == "{" }.count
+            let closes = line.filter { $0 == "}" }.count
+            let net = opens - closes
+
+            // Detect `protocol Name` opening on this line
+            if opens > 0 {
+                var searchStart = line.startIndex
+                while let kRange = line.range(of: "protocol ", range: searchStart..<line.endIndex) {
+                    let afterKeyword = kRange.upperBound
+                    // Read the protocol name (alphanumeric + _)
+                    var nameEnd = afterKeyword
+                    while nameEnd < line.endIndex && (line[nameEnd].isLetter || line[nameEnd].isNumber || line[nameEnd] == "_") {
+                        nameEnd = line.index(after: nameEnd)
+                    }
+                    if nameEnd > afterKeyword {
+                        let protocolName = String(line[afterKeyword..<nameEnd])
+                        // minDepth = depth after processing this line
+                        protocolStack.append((name: protocolName, minDepth: depth + net))
+                    }
+                    searchStart = kRange.upperBound
+                }
+            }
+
+            // Replace `any Self` if inside a protocol body
+            var processedLine = line
+            if let current = protocolStack.last {
+                processedLine = processedLine.replacingOccurrences(of: "any Self", with: "any \(current.name)")
+            }
+
+            depth += net
+
+            // Pop protocols whose body has been closed
+            while let top = protocolStack.last, depth < top.minDepth {
+                protocolStack.removeLast()
+            }
+
+            result.append(processedLine)
+        }
+
+        return result.joined(separator: "\n")
     }
 }
