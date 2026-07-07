@@ -385,6 +385,15 @@ struct SwiftInterfaceGen {
     static func registerObjcClasses(from content: String, parser: Parser, module: String) {
         let objcClasses = extractObjcClasses(from: content)
         
+        // NSUnit subclasses: Measurement<T> requires T: Unit. Map NSUnit* classes to NSUnit base.
+        let nsUnitSubclasses: Set<String> = [
+            "NSUnitAcceleration", "NSUnitAngle", "NSUnitArea", "NSUnitConcentrationMass",
+            "NSUnitDispersion", "NSUnitDuration", "NSUnitElectricCharge", "NSUnitElectricCurrent",
+            "NSUnitElectricPotentialDifference", "NSUnitElectricResistance", "NSUnitEnergy",
+            "NSUnitFrequency", "NSUnitFuelEfficiency", "NSUnitIlluminance",
+            "NSUnitInformationStorage", "NSUnitLength", "NSUnitMass", "NSUnitPower", "NSUnitPressure",
+            "NSUnitSpeed", "NSUnitTemperature", "NSUnitVolume",
+        ]
         for objcClass in objcClasses {
             if objcClass.hasPrefix("_Tt") {
                 continue
@@ -392,7 +401,7 @@ struct SwiftInterfaceGen {
             let node = parser.findOrCreateDiscoveredTypePath(module: module, path: [objcClass])
             if node.kind == "unknown" {
                 parser.setKind("class", for: node)
-                node.baseClass = "NSObject"
+                node.baseClass = nsUnitSubclasses.contains(objcClass) ? "NSUnit" : "NSObject"
             }
             node.isObjcBridged = true
         }
@@ -736,6 +745,37 @@ struct SwiftInterfaceGen {
                 in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "$1")
         }
 
+        // Fix: Category B — `Predicate<Pack {` / `<Pack{...}>` parameter pack truncation.
+        // Swift parameter packs produce `Pack{T...}` in the demangled output which we can't
+        // fully reconstruct; replace with `Any` as an existential fallback.
+        // Closed form: `<Pack{...}>` → `<Any>`
+        if let regex = try? NSRegularExpression(
+            pattern: "<Pack\\s*\\{[^}]*\\}>", options: []) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "<Any>")
+        }
+        // Truncated form `<Pack ` or `<Pack\n` (trailing brace is actually the getter body):
+        // replace `TypeName<Pack ` with `TypeName<Any> ` on each line
+        var packLines = c.components(separatedBy: "\n")
+        packLines = packLines.map { line in
+            guard line.contains("<Pack") else { return line }
+            if let r = line.range(of: "<Pack") {
+                let suffix = line[r.upperBound...]
+                if suffix.hasPrefix("{") || suffix.hasPrefix(" {") || suffix.hasPrefix("\n") || suffix.isEmpty {
+                    return line.replacingCharacters(in: r, with: "<Any>")
+                }
+            }
+            return line
+        }
+        c = packLines.joined(separator: "\n")
+
+        // Fix: `NSBundle` was renamed to `Bundle` in Swift; use the modern name.
+        c = c.replacingOccurrences(of: "NSBundle", with: "Bundle")
+        // Fix: `OS_os_log` is the internal ObjC name; the Swift name is `OSLog`.
+        c = c.replacingOccurrences(of: "OS_os_log", with: "OSLog")
+        // Fix: `NSUnitConverter` renamed to `UnitConverter` in Swift.
+        c = c.replacingOccurrences(of: "NSUnitConverter", with: "UnitConverter")
+
         // Fix: `var $foo` — `$` prefix is reserved for projected values of property wrappers.
         // The real symbol is the projected value (e.g. Published<T>.Publisher). Rename to avoid
         // the reserved-name error while still emitting the symbol.
@@ -800,9 +840,35 @@ struct SwiftInterfaceGen {
         }
         
         // Fix `Any<T>` — `Any` followed by generic args is invalid, strip the generic.
-        if let regex = try? NSRegularExpression(pattern: "\\bAny<[^>]*>", options: []) {
-            c = regex.stringByReplacingMatches(
-                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "Any")
+        // Use depth-aware loop to correctly handle nested generics like `Any<Any<T>>`.
+        var anyGenChanged = true
+        while anyGenChanged {
+            anyGenChanged = false
+            var anySearch = c.startIndex
+            while let anyRange = c.range(of: "Any<", range: anySearch..<c.endIndex) {
+                // Check word boundary before `Any`
+                var isWordBefore = false
+                if anyRange.lowerBound > c.startIndex {
+                    let prev = c[c.index(before: anyRange.lowerBound)]
+                    isWordBefore = prev.isLetter || prev.isNumber || prev == "_"
+                }
+                if isWordBefore { anySearch = anyRange.upperBound; continue }
+                // Find matching `>` by depth
+                let lt = c.index(before: anyRange.upperBound)  // position of `<`
+                var depth = 0; var j = lt; var gt: String.Index? = nil
+                while j < c.endIndex {
+                    if c[j] == "<" { depth += 1 }
+                    else if c[j] == ">" { depth -= 1; if depth == 0 { gt = j; break } }
+                    j = c.index(after: j)
+                }
+                if let g = gt {
+                    c.replaceSubrange(lt...g, with: "")  // strip `<...>` leaving just `Any`
+                    anyGenChanged = true
+                    anySearch = anyRange.lowerBound
+                } else {
+                    anySearch = anyRange.upperBound
+                }
+            }
         }
 
         // Replace `any Self` inside protocol bodies with `any <ProtocolName>`.
