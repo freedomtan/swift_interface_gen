@@ -645,14 +645,7 @@ class TypeNode {
             }
         }
         
-        if !isProtocol {
-            let sortedNested = nestedTypes.values.sorted(by: { $0.name < $1.name })
-            for nested in sortedNested {
-                lines.append(nested.generateCode(indent: nextIndent, parser: parser))
-            }
-        }
-        
-        let sortedMembers = members.values.sorted(by: { 
+        let sortedMembers = members.values.sorted(by: {
             switch ($0, $1) {
             case (.enumCase(let n1, _, _), .enumCase(let n2, _, _)): return n1 < n2
             case (.enumCase(_, _, _), _): return true
@@ -1138,7 +1131,15 @@ class TypeNode {
                 lines.append("\(nextIndent)// \(desc)")
             }
         }
-        
+
+        // Render nested types after members (enum cases must come before nested types in enums)
+        if !isProtocol {
+            let sortedNested = nestedTypes.values.sorted(by: { $0.name < $1.name })
+            for nested in sortedNested {
+                lines.append(nested.generateCode(indent: nextIndent, parser: parser))
+            }
+        }
+
         // Associated type fallbacks for common run() patterns
         if typeName == "Untyped" || typeName == "UntypedStreamable" {
              lines.append("\(nextIndent)public typealias Content = Any")

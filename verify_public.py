@@ -247,7 +247,8 @@ def test_framework(name, tbd, swiftinterface_path, work_dir):
         ]
         r = run(compile_cmd)
         if r.returncode != 0 or not os.path.exists(first_pass_dylib):
-            result["error"] = f"first-pass compile failed: {r.stderr[:300]}"
+            first_err = next((l for l in r.stderr.splitlines() if 'error:' in l and 'note:' not in l), r.stderr[:200])
+            result["error"] = f"first-pass compile failed: {first_err[:200]}"
             return result
 
         # 3. Count first-pass missing symbols

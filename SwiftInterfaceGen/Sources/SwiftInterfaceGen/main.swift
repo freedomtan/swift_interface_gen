@@ -281,7 +281,13 @@ struct SwiftInterfaceGen {
                 }
                 let token = String(chars[start..<i])
                 if token.hasPrefix("_$s") || token.hasPrefix("_OBJC_CLASS_$_") {
-                    symbols.insert(token)
+                    // Skip symbols embedded inside `$ld$previous$...` linker metadata lines.
+                    // These appear as `_$s<mangled>` inside a `$ld$previous$/path/$...$` string
+                    // and represent old ABI-compatibility symbols, not current exports.
+                    let isPreviousSymbol = start > 0 && chars[start - 1] == "$"
+                    if !isPreviousSymbol {
+                        symbols.insert(token)
+                    }
                 }
             } else {
                 i += 1
@@ -870,6 +876,13 @@ struct SwiftInterfaceGen {
                 }
             }
         }
+
+        // Fix: Category J — IndexingIterator needs IteratorProtocol conformance so that
+        // `Sequence` conformances using `makeIterator() -> IndexingIterator<T>` type-check.
+        // Use `Any` element type since this is a stub (the real type is T.Element).
+        c = c.replacingOccurrences(
+            of: "public struct IndexingIterator<T>: Hashable, Codable, Sendable {}",
+            with: "public struct IndexingIterator<T>: IteratorProtocol { public typealias Element = Any; public mutating func next() -> Any? { nil } }")
 
         // Replace `any Self` inside protocol bodies with `any <ProtocolName>`.
         // The demangler produces `[any Self]` for some protocol requirements, but conforming
