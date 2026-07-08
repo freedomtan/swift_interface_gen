@@ -807,10 +807,34 @@ class TypeNode {
                 cleanT = cleanT.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith, defaultModule: parser?.defaultModule ?? "")
                 cleanT = cleanT.replaceWordWithoutGeneric(self.name, with: selfReplaceWith)
 
-                if let brace = cleanT.firstIndex(of: "{") {
+                // Find the first `{` outside any `<...>` generic clause.
+                // Preserve `Pack{A}` braces inside `<...>` for the Pack-fix regex in postProcess.
+                var propBrace: String.Index? = nil
+                var propAngleDepth = 0
+                for propIdx in cleanT.indices {
+                    switch cleanT[propIdx] {
+                    case "<": propAngleDepth += 1
+                    case ">": if propAngleDepth > 0 { propAngleDepth -= 1 }
+                    case "{": if propAngleDepth == 0 { propBrace = propIdx; break }
+                    default: break
+                    }
+                    if propBrace != nil { break }
+                }
+                if let brace = propBrace {
                     cleanT = String(cleanT[..<brace]).trimmingCharacters(in: .whitespaces)
                 }
-                cleanT = cleanT.replacingOccurrences(of: "}", with: "")
+                // Remove `}` outside `<...>` only.
+                var propCleaned = ""
+                var propAdepth = 0
+                for ch in cleanT {
+                    switch ch {
+                    case "<": propAdepth += 1; propCleaned.append(ch)
+                    case ">": if propAdepth > 0 { propAdepth -= 1 }; propCleaned.append(ch)
+                    case "}": if propAdepth > 0 { propCleaned.append(ch) }
+                    default: propCleaned.append(ch)
+                    }
+                }
+                cleanT = propCleaned
 
                 if isProtocol {
                     cleanT = cleanT.replacePlaceholderDotsWithSelf()

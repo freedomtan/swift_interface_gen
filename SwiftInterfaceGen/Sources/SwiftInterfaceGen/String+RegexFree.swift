@@ -1086,9 +1086,10 @@ extension String {
                 changed = false
                 for opener in badOpeners {
                     guard let r = out.range(of: opener) else { continue }
-                    // Verify this `<` is a generic-param opener, i.e. the char before it is an
-                    // identifier char (method name) — not itself inside a `<...>` type argument.
                     let lt = r.lowerBound
+                    // Only strip a `<...>` clause if it is in the GENERIC PARAMETER position:
+                    // i.e. before the first `(` on the line. Inside `(...)` it is a type argument.
+                    if let firstParen = out.firstIndex(of: "("), lt > firstParen { continue }
                     // Find matching `>` by depth from `lt`
                     var depth = 0
                     var j = lt
@@ -1172,6 +1173,53 @@ extension String {
             }
         }
         return s
+    }
+
+    // 20c. stripConstrainedExistentialGenerics: removes `<...>` from `any Protocol<X == Y>`.
+    // Constrained existentials with same-type constraints in `<>` are invalid Swift syntax.
+    // E.g. `any Subject<Self.Failure == Any, Self.Output>` → `any Subject`
+    func stripConstrainedExistentialGenerics() -> String {
+        var result = self
+        var startSearch = result.startIndex
+        while let anyRange = result.range(of: "any ", range: startSearch..<result.endIndex) {
+            // Check word boundary before 'any'
+            if anyRange.lowerBound > result.startIndex {
+                let prev = result[result.index(before: anyRange.lowerBound)]
+                if prev.isLetter || prev.isNumber || prev == "_" {
+                    startSearch = anyRange.upperBound
+                    continue
+                }
+            }
+            // Scan the protocol name
+            var nameEnd = anyRange.upperBound
+            while nameEnd < result.endIndex && (result[nameEnd].isLetter || result[nameEnd].isNumber || result[nameEnd] == "_" || result[nameEnd] == ".") {
+                nameEnd = result.index(after: nameEnd)
+            }
+            // Check if followed by `<`
+            guard nameEnd < result.endIndex && result[nameEnd] == "<" else {
+                startSearch = nameEnd
+                continue
+            }
+            // Find matching `>` with depth tracking
+            let lt = nameEnd
+            var depth = 0; var j = lt; var gt: String.Index? = nil
+            while j < result.endIndex {
+                if result[j] == "<" { depth += 1 }
+                else if result[j] == ">" { depth -= 1; if depth == 0 { gt = j; break } }
+                j = result.index(after: j)
+            }
+            guard let g = gt else { startSearch = nameEnd; continue }
+            // Check if the content contains `==` (same-type constraint syntax)
+            let inner = String(result[result.index(after: lt)..<g])
+            if inner.contains("==") {
+                // Strip `<...>` from `any Protocol<...>`
+                result.removeSubrange(lt...g)
+                startSearch = lt
+            } else {
+                startSearch = result.index(after: g)
+            }
+        }
+        return result
     }
 
     // 20b. cleanAnyWhereConstraints: on declaration lines, removes where-clause same-type

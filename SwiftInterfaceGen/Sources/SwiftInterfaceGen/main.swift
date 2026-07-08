@@ -754,11 +754,13 @@ struct SwiftInterfaceGen {
         // Fix: Category B — `Predicate<Pack {` / `<Pack{...}>` parameter pack truncation.
         // Swift parameter packs produce `Pack{T...}` in the demangled output which we can't
         // fully reconstruct; replace with `Any` as an existential fallback.
-        // Closed form: `<Pack{...}>` → `<Any>`
+        // `Pack{...}` may appear at any position inside a generic arg list, e.g.:
+        //   `Predicate<Pack{A}>` → `Predicate<Any>`
+        //   `Configuration<A, Pack{repeat B}>` → `Configuration<A, Any>`
         if let regex = try? NSRegularExpression(
-            pattern: "<Pack\\s*\\{[^}]*\\}>", options: []) {
+            pattern: "Pack\\s*\\{[^}]*\\}", options: []) {
             c = regex.stringByReplacingMatches(
-                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "<Any>")
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "Any")
         }
         // Truncated form `<Pack ` or `<Pack\n` (trailing brace is actually the getter body):
         // replace `TypeName<Pack ` with `TypeName<Any> ` on each line
@@ -994,6 +996,12 @@ struct SwiftInterfaceGen {
                 }
             }
         }
+
+        // Fix: `any Protocol<X == Y, ...>` — constrained existential with same-type constraints
+        // inside `<>` is not valid Swift. Strip the `<...>` clause entirely since we can't express
+        // the constraint without primary associated type syntax.
+        // Pattern: `any Identifier<...==...>` where the <...> contains `==`.
+        c = c.stripConstrainedExistentialGenerics()
 
         if parser.defaultModule == "AppleIntelligenceReporting" {
             c = c.replacingOccurrences(

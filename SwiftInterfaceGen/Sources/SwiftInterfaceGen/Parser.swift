@@ -1572,10 +1572,36 @@ class Parser {
         if t.contains("set {") {
             t = String(t.components(separatedBy: "set {").first!).trimmingCharacters(in: .whitespaces)
         }
-        if let brace = t.firstIndex(of: "{") {
+        // Find the first `{` that is NOT inside a `<...>` generic clause.
+        // `Pack{A}` is a parameter pack type where `{A}` is inside `<Pack{A}>` —
+        // truncating there would corrupt the signature.
+        var braceOutsideGeneric: String.Index? = nil
+        var angleDepth = 0
+        for idx in t.indices {
+            switch t[idx] {
+            case "<": angleDepth += 1
+            case ">": if angleDepth > 0 { angleDepth -= 1 }
+            case "{": if angleDepth == 0 { braceOutsideGeneric = idx; break }
+            default: break
+            }
+            if braceOutsideGeneric != nil { break }
+        }
+        if let brace = braceOutsideGeneric {
             t = String(t[..<brace]).trimmingCharacters(in: .whitespaces)
         }
-        t = t.replacingOccurrences(of: "}", with: "")
+        // Remove `}` that are NOT inside `<...>` generics (e.g. stray braces from body fragments).
+        // `Pack{A}` braces inside `<...>` must be preserved for the Pack-fix regex in postProcess.
+        var cleaned = ""
+        var adepth = 0
+        for ch in t {
+            switch ch {
+            case "<": adepth += 1; cleaned.append(ch)
+            case ">": if adepth > 0 { adepth -= 1 }; cleaned.append(ch)
+            case "}": if adepth > 0 { cleaned.append(ch) } // inside <...>: keep; outside: drop
+            default: cleaned.append(ch)
+            }
+        }
+        t = cleaned
 
         if t.contains("& any ") {
             t = t.replacingOccurrences(of: "& any ", with: "& ")
