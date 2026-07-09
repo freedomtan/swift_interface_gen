@@ -979,12 +979,13 @@ class Parser {
                         }
                         let isExternal = getTopLevelModule(for: node) != primaryTargetModule
                         let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
+                        let isPrimary = symbolModule == primaryTargetModule || mangled.contains("\(primaryTargetModule.count)\(primaryTargetModule)E")
                         if let constraints = constraints {
-                            if symbolModule == primaryTargetModule {
+                            if isPrimary {
                                 node.constrainedExtensions[constraints, default: [:]][initFull] = .initializer(initFull)
                             }
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
-                            if symbolModule == primaryTargetModule {
+                            if isPrimary {
                                 node.extensionMembers[initFull] = .initializer(initFull)
                             }
                         } else {
@@ -998,12 +999,13 @@ class Parser {
                         }
                         let isExternal = getTopLevelModule(for: node) != primaryTargetModule
                         let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
+                        let isPrimary = symbolModule == primaryTargetModule || mangled.contains("\(primaryTargetModule.count)\(primaryTargetModule)E")
                         if let constraints = constraints {
-                            if symbolModule == primaryTargetModule {
+                            if isPrimary {
                                 node.constrainedExtensions[constraints, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                             }
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
-                            if symbolModule == primaryTargetModule {
+                            if isPrimary {
                                 node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                             }
                         } else {
@@ -1165,12 +1167,13 @@ class Parser {
                 }
                 let isExternal = getTopLevelModule(for: node) != primaryTargetModule
                 let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
+                let isPrimary = symbolModule == primaryTargetModule || mangled.contains("\(primaryTargetModule.count)\(primaryTargetModule)E")
                 if let constraints = constraints {
-                    if symbolModule == primaryTargetModule {
+                    if isPrimary {
                         node.constrainedExtensions[constraints, default: [:]][storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                     }
                 } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
-                    if symbolModule == primaryTargetModule {
+                    if isPrimary {
                         node.extensionMembers[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                     }
                 } else {
@@ -1761,6 +1764,52 @@ class Parser {
         return false
     }
 
+    func isSystemModule(_ name: String) -> Bool {
+        let localPath = "LocalFrameworks/\(name).framework"
+        if FileManager.default.fileExists(atPath: localPath) {
+            return false
+        }
+        if name == "OS" { return true }
+        if ["Swift", "Foundation", "ObjectiveC"].contains(name) { return true }
+        let sdkRoot = ConfigManager.sdkRoot
+        
+        let swiftLibPaths = [
+            "\(sdkRoot)/usr/lib/swift/\(name).swiftmodule",
+            "\(sdkRoot)/usr/lib/swift/libswift\(name).tbd"
+        ]
+        for path in swiftLibPaths {
+            if FileManager.default.fileExists(atPath: path) {
+                return true
+            }
+        }
+        
+        let frameworkPaths = [
+            "\(sdkRoot)/System/Library/Frameworks/\(name).framework",
+            "\(sdkRoot)/System/Library/PrivateFrameworks/\(name).framework",
+            "\(sdkRoot)/System/Library/SubFrameworks/\(name).framework"
+        ]
+        for fwPath in frameworkPaths {
+            let modulesPath = "\(fwPath)/Modules"
+            let tbdPath = "\(fwPath)/\(name).tbd"
+            let tbdPathA = "\(fwPath)/Versions/A/\(name).tbd"
+            let tbdPathCurrent = "\(fwPath)/Versions/Current/\(name).tbd"
+            if FileManager.default.fileExists(atPath: modulesPath) ||
+               FileManager.default.fileExists(atPath: tbdPath) ||
+               FileManager.default.fileExists(atPath: tbdPathA) ||
+               FileManager.default.fileExists(atPath: tbdPathCurrent) {
+                return true
+            }
+        }
+        
+        let system = ["Swift", "Foundation", "CoreFoundation", "UniformTypeIdentifiers", "os", "ObjectiveC", "CoreVideo", "CoreMedia", "IOSurface", "__C"]
+        if system.contains(name) {
+            return true
+        }
+        
+        return false
+    }
+
+
     func genericParamsString(for node: TypeNode) -> String {
         if !node.isGeneric { return "" }
         var count = 1
@@ -2136,23 +2185,24 @@ class Parser {
                 "MetricKit", "Combine", "Synchronization", "CoreMedia"
             ]
             if systemAndStandardModules.contains(moduleName) { continue }
-            // For external available modules, only emit extensions when they contain
+            // For external available system modules, only emit extensions when they contain
             // read-only computed properties (toX converters) — not operators or methods,
             // which can fail when the external type turns out to be a protocol.
+            let isSystem = isSystemModule(moduleName)
             let hasReadOnlyPropertyExtensions = module.nestedTypes.values.contains { node in
                 node.extensionMembers.values.contains {
                     if case .property(_, _, let isReadOnly, _) = $0 { return isReadOnly }
                     return false
                 }
             }
-            if moduleName != defaultModule && isModuleAvailable(moduleName) && !hasReadOnlyPropertyExtensions {
+            if moduleName != defaultModule && isModuleAvailable(moduleName) && isSystem && !hasReadOnlyPropertyExtensions {
                 continue
             }
             let isExternalAvailable = moduleName != defaultModule && isModuleAvailable(moduleName)
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             for type in sortedTypes {
-                // For external available modules, only emit types that have read-only property extensions
-                if isExternalAvailable {
+                // For external available system modules, only emit types that have read-only property extensions
+                if isExternalAvailable && isSystem {
                     let hasROP = type.extensionMembers.values.contains {
                         if case .property(_, _, let isReadOnly, _) = $0 { return isReadOnly }
                         return false
