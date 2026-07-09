@@ -438,6 +438,9 @@ class TypeNode {
         
         var inheritsList = inherits.map { t in
             var clean = t.trimmingCharacters(in: .whitespaces)
+            if clean == "Error" || clean == "Swift.Error" {
+                return "Swift.Error"
+            }
             var changed = true
             while changed {
                 changed = false
@@ -457,6 +460,9 @@ class TypeNode {
                    baseName.hasSuffix("_P") {
                     clean = baseName
                 }
+            }
+            if clean == "Error" {
+                return "Swift.Error"
             }
             return clean
         }

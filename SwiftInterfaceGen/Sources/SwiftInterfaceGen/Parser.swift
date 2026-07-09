@@ -2341,7 +2341,30 @@ class Parser {
 
     private func scanLocalSwiftFiles(currentModule: String) {
         let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(atPath: fm.currentDirectoryPath) else { return }
+        var filesToScan = [String]()
+        
+        // 1. Scan tmp_stubs_<currentModule> if it exists
+        let stubsDir = "tmp_stubs_\(currentModule)"
+        if let subFiles = try? fm.contentsOfDirectory(atPath: stubsDir) {
+            for sf in subFiles {
+                if sf.hasSuffix(".swift") {
+                    filesToScan.append("\(stubsDir)/\(sf)")
+                }
+            }
+        }
+        
+        // 2. Scan root directory files starting with test_<currentModule>
+        if let rootFiles = try? fm.contentsOfDirectory(atPath: fm.currentDirectoryPath) {
+            for rf in rootFiles {
+                if rf.hasSuffix(".swift") && !rf.hasSuffix("Interface.swift") {
+                    let lowerRF = rf.lowercased()
+                    let lowerMod = currentModule.lowercased()
+                    if lowerRF.contains(lowerMod) || lowerRF == "main.swift" {
+                        filesToScan.append(rf)
+                    }
+                }
+            }
+        }
         
         func countTopLevelCommas(in s: String) -> Int {
             var commas = 0
@@ -2361,26 +2384,24 @@ class Parser {
             return commas + 1
         }
         
-        for file in files {
-            if file.hasSuffix(".swift") && !file.hasSuffix("Interface.swift") {
-                guard let content = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
+        for file in filesToScan {
+            guard let content = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
+            
+            let genericTypes = content.scanGenericTypeApplications()
+            for (typeName, params) in genericTypes {
+                let shortName = typeName.components(separatedBy: ".").last!
+                guard let firstChar = shortName.first, firstChar.isUppercase else { continue }
                 
-                let genericTypes = content.scanGenericTypeApplications()
-                for (typeName, params) in genericTypes {
-                    let shortName = typeName.components(separatedBy: ".").last!
-                    guard let firstChar = shortName.first, firstChar.isUppercase else { continue }
-                    
-                    if ["Optional", "Array", "Dictionary", "Set", "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer"].contains(shortName) {
-                        continue
-                    }
-                    
-                    let count = countTopLevelCommas(in: params)
-                    let fullPath = currentModule + "." + typeName
-                    let currentMax = discoveredGenerics[fullPath] ?? 0
-                    discoveredGenerics[fullPath] = max(currentMax, count)
-                    let currentShortMax = discoveredGenerics[typeName] ?? 0
-                    discoveredGenerics[typeName] = max(currentShortMax, count)
+                if ["Optional", "Array", "Dictionary", "Set", "UnsafePointer", "UnsafeMutablePointer", "UnsafeRawPointer", "UnsafeMutableRawPointer"].contains(shortName) {
+                    continue
                 }
+                
+                let count = countTopLevelCommas(in: params)
+                let fullPath = currentModule + "." + typeName
+                let currentMax = discoveredGenerics[fullPath] ?? 0
+                discoveredGenerics[fullPath] = max(currentMax, count)
+                let currentShortMax = discoveredGenerics[typeName] ?? 0
+                discoveredGenerics[typeName] = max(currentShortMax, count)
             }
         }
     }

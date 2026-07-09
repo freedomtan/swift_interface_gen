@@ -696,8 +696,7 @@ struct SwiftInterfaceGen {
         c = c.replaceWordDot("Foundation", with: "")
         c = c.replacingOccurrences(of: "___FOUNDATION___", with: "Foundation.")
         
-        // Strip Swift. from types unless there is a collision
-        var standardShadowedTypes = ["Float", "Double", "Int", "String", "Bool"].filter { parser.discoveredConcreteTypes.contains($0) }
+        var standardShadowedTypes = ["Float", "Double", "Int", "String", "Bool", "Error"].filter { parser.discoveredConcreteTypes.contains($0) }
         standardShadowedTypes.append(contentsOf: ["Decoder", "Encoder"])
         for type in standardShadowedTypes {
             c = c.replacingOccurrences(of: "Swift.\(type)", with: "___SWIFT_SHIELDED_\(type)___")

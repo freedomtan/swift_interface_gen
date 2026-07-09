@@ -1295,6 +1295,41 @@ extension String {
                         }
                     }
                     if !followedByGeneric && !precededByDefinition {
+                        // Scan backward to build fullPath in the code (e.g. Publishers.Buffer)
+                        var fullPath = word
+                        var pIdx = start - 1
+                        while pIdx >= 0 {
+                            var wsIdx = pIdx
+                            while wsIdx >= 0 && chars[wsIdx].isWhitespace {
+                                wsIdx -= 1
+                            }
+                            if wsIdx >= 0 && chars[wsIdx] == "." {
+                                var wordEnd = wsIdx - 1
+                                while wordEnd >= 0 && chars[wordEnd].isWhitespace {
+                                    wordEnd -= 1
+                                }
+                                if wordEnd >= 0 && (chars[wordEnd].isLetter || chars[wordEnd].isNumber || chars[wordEnd] == "_" || chars[wordEnd] == "$") {
+                                    var wordStart = wordEnd
+                                    while wordStart >= 0 && (chars[wordStart].isLetter || chars[wordStart].isNumber || chars[wordStart] == "_" || chars[wordStart] == "$") {
+                                        wordStart -= 1
+                                    }
+                                    let prefixWord = String(chars[(wordStart + 1)...wordEnd])
+                                    fullPath = prefixWord + "." + fullPath
+                                    pIdx = wordStart
+                                        
+                                    // Security check: if the prefix is self/Self/Any/etc., stop building
+                                    if prefixWord == "Self" || prefixWord == "Any" || prefixWord.count == 1 {
+                                        break
+                                    }
+                                } else {
+                                    break
+                                }
+                            } else {
+                                break
+                            }
+                        }
+                        
+                        // Find generic count matching this fullPath
                         var count = 0
                         if let cVal = flatGenerics[word] {
                             count = cVal
