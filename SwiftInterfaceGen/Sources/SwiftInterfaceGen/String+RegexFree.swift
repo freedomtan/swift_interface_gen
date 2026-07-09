@@ -1112,6 +1112,7 @@ extension String {
             out = out.replacingOccurrences(of: "(Any) {", with: "(_ arg1: Any) {")
             out = out.replacingOccurrences(of: "(Any) throws", with: "(_ arg1: Any) throws")
             out = out.replacingOccurrences(of: "(Any) async", with: "(_ arg1: Any) async")
+            out = out.replacingOccurrences(of: "(Any) where", with: "(_ arg1: Any) where")
             return out
         }
         return fixed.joined(separator: "\n")

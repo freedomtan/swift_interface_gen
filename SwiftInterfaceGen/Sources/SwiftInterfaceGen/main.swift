@@ -46,8 +46,10 @@ struct SwiftInterfaceGen {
             }
         }
         
-        registerObjcClasses(from: content, parser: parser, module: currentModule)
+        // Process Swift symbols first so enum/struct kinds are established before
+        // ObjC class registration, preventing ObjC from overriding Swift-known kinds.
         processSymbols(symbols, parser: parser, module: currentModule, depth: 0)
+        registerObjcClasses(from: content, parser: parser, module: currentModule)
 
         let startGen = Date()
         let allCode = parser.generateAll()
@@ -777,12 +779,44 @@ struct SwiftInterfaceGen {
         }
         c = packLines.joined(separator: "\n")
 
-        // Fix: `NSBundle` was renamed to `Bundle` in Swift; use the modern name.
+        // Fix: ObjC→Swift type renames.
         c = c.replacingOccurrences(of: "NSBundle", with: "Bundle")
-        // Fix: `OS_os_log` is the internal ObjC name; the Swift name is `OSLog`.
         c = c.replacingOccurrences(of: "OS_os_log", with: "OSLog")
-        // Fix: `NSUnitConverter` renamed to `UnitConverter` in Swift.
         c = c.replacingOccurrences(of: "NSUnitConverter", with: "UnitConverter")
+        c = c.replaceWord("NSDecimal", with: "Decimal")
+        c = c.replaceWord("CGImageRef", with: "CGImage")
+        c = c.replaceWord("CGMutablePathRef", with: "CGMutablePath")
+        c = c.replaceWord("CGPathRef", with: "CGPath")
+        c = c.replaceWord("CGColorRef", with: "CGColor")
+        c = c.replaceWord("CFStringRef", with: "CFString")
+        // NSUnit* subclasses were renamed to Unit* in Swift; remove any locally-emitted
+        // stub declarations for them BEFORE renaming (they shadow Foundation's real Unit subclasses).
+        for nsUnitType in ["NSUnitAcceleration", "NSUnitAngle", "NSUnitArea", "NSUnitConcentrationMass",
+                           "NSUnitDispersion", "NSUnitDuration", "NSUnitElectricCharge", "NSUnitElectricCurrent",
+                           "NSUnitElectricPotentialDifference", "NSUnitElectricResistance", "NSUnitEnergy",
+                           "NSUnitFrequency", "NSUnitFuelEfficiency", "NSUnitIlluminance", "NSUnitInformationStorage",
+                           "NSUnitLength", "NSUnitMass", "NSUnitPower", "NSUnitPressure", "NSUnitSpeed",
+                           "NSUnitTemperature", "NSUnitVolume"] {
+            c = c.replacingOccurrences(of: "public class \(nsUnitType):", with: "// Foundation type: \(nsUnitType):")
+            c = c.replacingOccurrences(of: "public struct \(nsUnitType):", with: "// Foundation type: \(nsUnitType):")
+        }
+
+        // NSUnit* subclasses were renamed to Unit* in Swift.
+        for (old, new) in [
+            ("NSUnitAcceleration", "UnitAcceleration"), ("NSUnitAngle", "UnitAngle"),
+            ("NSUnitArea", "UnitArea"), ("NSUnitConcentrationMass", "UnitConcentrationMass"),
+            ("NSUnitDispersion", "UnitDispersion"), ("NSUnitDuration", "UnitDuration"),
+            ("NSUnitElectricCharge", "UnitElectricCharge"), ("NSUnitElectricCurrent", "UnitElectricCurrent"),
+            ("NSUnitElectricPotentialDifference", "UnitElectricPotentialDifference"),
+            ("NSUnitElectricResistance", "UnitElectricResistance"), ("NSUnitEnergy", "UnitEnergy"),
+            ("NSUnitFrequency", "UnitFrequency"), ("NSUnitFuelEfficiency", "UnitFuelEfficiency"),
+            ("NSUnitIlluminance", "UnitIlluminance"), ("NSUnitInformationStorage", "UnitInformationStorage"),
+            ("NSUnitLength", "UnitLength"), ("NSUnitMass", "UnitMass"), ("NSUnitPower", "UnitPower"),
+            ("NSUnitPressure", "UnitPressure"), ("NSUnitSpeed", "UnitSpeed"),
+            ("NSUnitTemperature", "UnitTemperature"), ("NSUnitVolume", "UnitVolume"),
+        ] as [(String, String)] {
+            c = c.replaceWord(old, with: new)
+        }
 
         // Fix: `var $foo` — `$` prefix is reserved for projected values of property wrappers.
         // The real symbol is the projected value (e.g. Published<T>.Publisher). Rename to avoid
@@ -886,6 +920,15 @@ struct SwiftInterfaceGen {
             of: "public struct IndexingIterator<T>: Hashable, Codable, Sendable {}",
             with: "public struct IndexingIterator<T>: IteratorProtocol { public typealias Element = Any; public mutating func next() -> Any? { nil } }")
 
+        // Fix: `func init(` — `init` cannot be used as a function name; render as initializer.
+        c = c.replacingOccurrences(of: "func init(", with: "init(")
+        c = c.replacingOccurrences(of: "func init?(", with: "init?(")
+        c = c.replacingOccurrences(of: "func init!(", with: "init!(")
+
+        // Fix stray double-`>>` before `(` in subscript/func generic clause:
+        // `subscript<A1>>(` → `subscript<A1>(` (extra `>` from stripped second param).
+        c = c.replacingOccurrences(of: ">>(", with: ">(")
+
         // Replace `any Self` inside protocol bodies with `any <ProtocolName>`.
         // The demangler produces `[any Self]` for some protocol requirements, but conforming
         // types implement them with the explicit protocol name (e.g. `[any AppleIntelligenceError]`).
@@ -938,6 +981,13 @@ struct SwiftInterfaceGen {
             pattern: "(associatedtype\\s+[A-Za-z_][A-Za-z0-9_]*)<[^>]*>", options: []) {
             c = regex.stringByReplacingMatches(
                 in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "$1")
+        }
+        // Fix: `Self.Result<Any, Error>` — applyDiscoveredGenerics adds `<Any, Error>` to `Result`
+        // in use-site positions like `Self.Result<Any, Error>`. Associated types can't be specialized.
+        if let regex = try? NSRegularExpression(
+            pattern: "Self\\.([A-Z][A-Za-z0-9_]*)<[^>]*>", options: []) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "Self.$1")
         }
         // Also re-apply removeInvalidAnyGenericClauses for any new `<Any:>` that may appear.
         c = c.removeInvalidAnyGenericClauses()
