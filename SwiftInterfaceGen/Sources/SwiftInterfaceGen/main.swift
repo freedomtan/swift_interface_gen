@@ -149,6 +149,10 @@ struct SwiftInterfaceGen {
         if code.contains("DispatchQueue") { imports.insert("Dispatch") }
         if code.contains("OS_xpc_object") { imports.insert("XPC") }
         if code.contains("NSWindow") || code.contains("NSView") || code.contains("NSViewController") || code.contains("NSResponder") { imports.insert("AppKit") }
+        if code.contains("Combine.") && currentModule != "Combine" { imports.insert("Combine") }
+        if code.contains("SwiftUI.") && currentModule != "SwiftUI" { imports.insert("SwiftUI") }
+        if code.contains("AVFoundation.") || code.contains("AVAudio") || code.contains("AVVideo") { imports.insert("AVFoundation") }
+        if code.contains("CoreLocation.") || code.contains("CLLocation") { imports.insert("CoreLocation") }
         if code.contains("UAF") && currentModule != "UnifiedAssetFramework" { imports.insert("UnifiedAssetFramework") }
         
         for mod in parser.discoveredNamespaces {
@@ -924,6 +928,35 @@ struct SwiftInterfaceGen {
         c = c.replacingOccurrences(of: "func init(", with: "init(")
         c = c.replacingOccurrences(of: "func init?(", with: "init?(")
         c = c.replacingOccurrences(of: "func init!(", with: "init!(")
+
+        // Fix: subscript `{ get set }` in extension context — extensions need implementation
+        // bodies, not protocol-style accessor declarations. This is applied line-by-line,
+        // checking that we're NOT inside a `protocol` declaration (only inside extensions/structs).
+        c = c.fixSubscriptGetSetInExtensions()
+
+        // Fix: `where Any == ConcreteType` — same-type constraints with `Any` on LHS are invalid.
+        // Remove `, Any == <anything>` and `Any == <anything>,` from where clauses.
+        // Use regex to avoid consuming the function body.
+        if let regex = try? NSRegularExpression(pattern: ",\\s*Any\\s*==\\s*[^,{}>)]+", options: []) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
+        }
+        if let regex = try? NSRegularExpression(pattern: "\\bAny\\s*==\\s*[^,{}>)]+,\\s*", options: []) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
+        }
+
+        // Fix: `where T: any Protocol` — `any` in conformance constraints is invalid;
+        // remove `any` from constraint positions in where clauses.
+        if let regex = try? NSRegularExpression(pattern: "(where\\s[^{]*?:\\s*)any\\s+", options: []) {
+            var replaced = true
+            while replaced {
+                let before = c
+                c = regex.stringByReplacingMatches(
+                    in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "$1")
+                replaced = c.count != before.count
+            }
+        }
 
         // Fix stray double-`>>` before `(` in subscript/func generic clause:
         // `subscript<A1>>(` → `subscript<A1>(` (extra `>` from stripped second param).

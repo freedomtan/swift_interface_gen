@@ -1176,6 +1176,59 @@ extension String {
         return s
     }
 
+    // 20c-sub. fixSubscriptGetSetInExtensions: converts `subscript ... { get set }` to
+    // `subscript ... { get { fatalError() } set {} }` when outside protocol declarations.
+    // Protocol subscripts use `{ get }` / `{ get set }` syntax; extensions need implementations.
+    func fixSubscriptGetSetInExtensions() -> String {
+        let lines = self.components(separatedBy: "\n")
+        var inProtocol = false
+        var depth = 0
+        var protocolEntryDepth = 0
+        var result = [String]()
+
+        for line in lines {
+            let opens = line.filter { $0 == "{" }.count
+            let closes = line.filter { $0 == "}" }.count
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Detect protocol declaration entry
+            if opens > 0 {
+                let protocolPattern = ["public protocol ", "internal protocol ", "protocol "]
+                for pat in protocolPattern {
+                    if trimmed.contains(pat) && !trimmed.hasPrefix("//") {
+                        inProtocol = true
+                        protocolEntryDepth = depth
+                        break
+                    }
+                }
+            }
+
+            // Only convert if NOT inside a protocol
+            var processedLine = line
+            if !inProtocol && trimmed.contains("subscript") {
+                // `{ get set }` → `{ get { fatalError() } set {} }`
+                processedLine = processedLine.replacingOccurrences(
+                    of: "{ get set }", with: "{ get { fatalError() } set {} }")
+                processedLine = processedLine.replacingOccurrences(
+                    of: "{ get set}", with: "{ get { fatalError() } set {} }")
+                // `{ get }` → `{ get { fatalError() } }` (only when no existing body)
+                if processedLine.contains("{ get }") {
+                    processedLine = processedLine.replacingOccurrences(
+                        of: "{ get }", with: "{ get { fatalError() } }")
+                }
+            }
+
+            result.append(processedLine)
+            depth += opens - closes
+
+            // Exit protocol scope
+            if inProtocol && depth <= protocolEntryDepth {
+                inProtocol = false
+            }
+        }
+        return result.joined(separator: "\n")
+    }
+
     // 20c. stripConstrainedExistentialGenerics: removes `<...>` from `any Protocol<X == Y>`.
     // Constrained existentials with same-type constraints in `<>` are invalid Swift syntax.
     // E.g. `any Subject<Self.Failure == Any, Self.Output>` → `any Subject`

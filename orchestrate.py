@@ -466,19 +466,19 @@ def build_framework_stub(name, swift_source):
 def compile_test(target_name, test_file):
     print(f"--- Compiling Test Program for {target_name} ---")
     test_run = f"{target_name}_test_run"
+    local_fw_abs = os.path.abspath("LocalFrameworks")
     subprocess.check_call([
         "swiftc", "-F", "LocalFrameworks", test_file,
         "-enable-experimental-feature", "NonescapableTypes",
         "-enable-experimental-feature", "Lifetimes",
         "-sdk", SDK_ROOT, "-language-mode", "6",
+        "-Xlinker", "-rpath", "-Xlinker", local_fw_abs,
         "-o", test_run
     ])
     print("--- Codesigning ---")
     subprocess.check_call(["codesign", "--force", "-s", "-", test_run])
     print("--- Running Test ---")
-    env = os.environ.copy()
-    env["DYLD_FRAMEWORK_PATH"] = "LocalFrameworks"
-    subprocess.check_call([f"./{test_run}"], env=env)
+    subprocess.check_call([f"./{test_run}"])
 
 if __name__ == "__main__":
     if "--clean" in sys.argv:
