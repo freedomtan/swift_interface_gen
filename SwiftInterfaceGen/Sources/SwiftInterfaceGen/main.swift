@@ -1060,6 +1060,25 @@ struct SwiftInterfaceGen {
             }
         }
 
+        // Fix: MetricKit `AverageStatistics<A>` and `Histogram<A>` require `A: Unit`
+        // (they wrap Measurement<A> which has that constraint). The generic structs are
+        // emitted without the constraint because it's not visible from the TBD alone.
+        if parser.defaultModule == "MetricKit" {
+            // AverageStatistics<DimensionType> and Histogram<DimensionType> both require
+            // DimensionType: Foundation.Dimension (all MetricKit unit types are Dimension subclasses).
+            c = c.replacingOccurrences(of: "public struct AverageStatistics<A>:",
+                                        with: "public struct AverageStatistics<A: Foundation.Dimension>:")
+            c = c.replacingOccurrences(of: "public struct Histogram<A>:",
+                                        with: "public struct Histogram<A: Foundation.Dimension>:")
+            // SignalBars is a Dimension subclass — override the NSObject base class with Dimension.
+            if let regex = try? NSRegularExpression(
+                pattern: "(?:public |open |@_fixed_layout )*(?:class|open class) SignalBars:\\s*NSObject", options: []) {
+                c = regex.stringByReplacingMatches(
+                    in: c, range: NSRange(c.startIndex..<c.endIndex, in: c),
+                    withTemplate: "open class SignalBars: Foundation.Dimension")
+            }
+        }
+
         // Note: UnsafeArrayPointer/UnsafeMutableArrayPointer family are kept generic —
         // their ABI exports use <A> throughout (properties, subscripts, inits).
         // The pMV property descriptor stubs are handled by the assembly stub mechanism.
@@ -1142,6 +1161,37 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
         // Emit sentinel structs for any protocol existential defaults (_Default_ProtocolName)
         // so that "= _Default_Foo()" compiles and produces a stable fA_ symbol.
         let defaultSentinelPattern = "_Default_([A-Za-z_][A-Za-z0-9_]*)\\(\\)"
+        // Emit empty stubs for undeclared underscore-prefixed types referenced in signatures.
+        // These are SPI/internal types (e.g. `_AxisContentOutputs` in Charts) that appear as
+        // parameter or return types but whose definitions aren't in the public TBD.
+        var declaredTypes = Set<String>()
+        let declPattern = "(?:public\\s+(?:struct|class|enum|protocol|typealias)|typealias)\\s+(_[A-Za-z][A-Za-z0-9_]*)"
+        if let declRegex = try? NSRegularExpression(pattern: declPattern, options: []) {
+            let nsRange = NSRange(c.startIndex..<c.endIndex, in: c)
+            for m in declRegex.matches(in: c, options: [], range: nsRange) {
+                if let r = Range(m.range(at: 1), in: c) { declaredTypes.insert(String(c[r])) }
+            }
+        }
+        var underscoreStubs = ""
+        let refPattern = "\\b(_[A-Z][A-Za-z0-9_]+)\\b"
+        if let refRegex = try? NSRegularExpression(pattern: refPattern, options: []) {
+            let nsRange = NSRange(c.startIndex..<c.endIndex, in: c)
+            var seen = Set<String>()
+            for m in refRegex.matches(in: c, options: [], range: nsRange) {
+                if let r = Range(m.range(at: 1), in: c) {
+                    let t = String(c[r])
+                    if !seen.contains(t) && !declaredTypes.contains(t) {
+                        seen.insert(t)
+                        underscoreStubs += "public struct \(t): Hashable, Sendable {}\n"
+                    }
+                }
+            }
+        }
+        if !underscoreStubs.isEmpty {
+            c += "\n// --- Auto-generated stubs for undeclared SPI types ---\n"
+            c += underscoreStubs
+        }
+
         var sentinelProtocols = [String]()
         var searchRange = c.startIndex..<c.endIndex
         while let matchRange = c.range(of: defaultSentinelPattern, options: .regularExpression, range: searchRange) {

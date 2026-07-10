@@ -213,6 +213,28 @@ def test_framework(name, tbd, swiftinterface_path, work_dir):
     def run(cmd, **kwargs):
         return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
+    def emit_empty_stub(mod_name):
+        """Emit a minimal Swift stub framework so `import ModName` resolves."""
+        fw = os.path.join(local_fw, f"{mod_name}.framework")
+        mod_dir = os.path.join(fw, "Modules", f"{mod_name}.swiftmodule")
+        os.makedirs(mod_dir, exist_ok=True)
+        src = os.path.join(work_dir, f"_stub_{mod_name}.swift")
+        with open(src, "w") as f:
+            f.write(f"// empty stub for {mod_name}\n")
+        lib = os.path.join(fw, mod_name)
+        iface = os.path.join(mod_dir, "arm64-apple-macos.swiftinterface")
+        mod = os.path.join(mod_dir, "arm64-apple-macos.swiftmodule")
+        run(["swiftc", "-emit-module", "-module-name", mod_name, src,
+             "-enable-library-evolution", "-language-mode", "6",
+             "-sdk", SDK_ROOT,
+             "-emit-module-interface-path", iface, "-o", mod])
+        run(["swiftc", "-emit-library", "-o", lib, src,
+             "-enable-library-evolution", "-module-name", mod_name,
+             "-sdk", SDK_ROOT, "-language-mode", "6",
+             "-Xlinker", "-install_name",
+             "-Xlinker", f"/System/Library/Frameworks/{mod_name}.framework/{mod_name}",
+             "-Xlinker", "-not_for_dyld_shared_cache"])
+
     try:
         # 1. Generate interface from TBD
         r = run([str(SCRIPT_DIR / "swift-interface-gen"), tbd])
@@ -232,6 +254,27 @@ def test_framework(name, tbd, swiftinterface_path, work_dir):
             result["error"] = "no exports file generated"
             return result
 
+        # 1b. Emit empty stubs for private modules imported by the generated interface
+        #     (Cat E: FeatureFlags, AudioAnalytics, StateReporting, etc.)
+        iface_text = open(gen_iface).read()
+        for line in iface_text.splitlines():
+            if not line.startswith("import "): continue
+            mod = line[len("import "):].strip()
+            if mod in SYSTEM_MODULES: continue
+            # Skip if available as a real framework in the SDK
+            sdk_fw = os.path.join(SDK_ROOT, "System", "Library", "Frameworks",
+                                   f"{mod}.framework")
+            if os.path.exists(sdk_fw): continue
+            stub_fw = os.path.join(local_fw, f"{mod}.framework")
+            if not os.path.exists(stub_fw):
+                emit_empty_stub(mod)
+
+        # 1c. Pass ObjC bridge header if generated alongside the interface (Cat F)
+        bridge_h = str(SCRIPT_DIR / f"{name}Interface_bridge.h")
+        extra_compile_flags = []
+        if os.path.exists(bridge_h):
+            extra_compile_flags = ["-import-objc-header", bridge_h]
+
         # 2. Compile first-pass dylib (no exports list, undefined=dynamic_lookup)
         compile_cmd = [
             "swiftc", "-emit-library", "-o", first_pass_dylib,
@@ -244,7 +287,7 @@ def test_framework(name, tbd, swiftinterface_path, work_dir):
             "-Xlinker", "-install_name", "-Xlinker", install_name,
             "-enable-experimental-feature", "NonescapableTypes",
             "-enable-experimental-feature", "Lifetimes",
-        ]
+        ] + extra_compile_flags
         r = run(compile_cmd)
         if r.returncode != 0 or not os.path.exists(first_pass_dylib):
             first_err = next((l for l in r.stderr.splitlines() if 'error:' in l and 'note:' not in l), r.stderr[:200])
@@ -290,7 +333,7 @@ def test_framework(name, tbd, swiftinterface_path, work_dir):
             "-Xlinker", "-exported_symbols_list", "-Xlinker", exports_file,
             "-enable-experimental-feature", "NonescapableTypes",
             "-enable-experimental-feature", "Lifetimes",
-        ] + extra_objs
+        ] + extra_objs + extra_compile_flags
         r = run(final_cmd)
         if r.returncode != 0 or not os.path.exists(final_dylib):
             result["error"] = f"final compile failed: {r.stderr[:300]}"
