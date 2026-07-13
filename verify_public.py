@@ -290,8 +290,10 @@ def test_framework(name, tbd, swiftinterface_path, work_dir):
         ] + extra_compile_flags
         r = run(compile_cmd)
         if r.returncode != 0 or not os.path.exists(first_pass_dylib):
-            first_err = next((l for l in r.stderr.splitlines() if 'error:' in l and 'note:' not in l), r.stderr[:200])
-            result["error"] = f"first-pass compile failed: {first_err[:200]}"
+            print(f"\n--- Compilation failed for {name} ---")
+            print(r.stderr)
+            first_err = next((l for l in r.stderr.splitlines() if 'error:' in l and 'note:' not in l), r.stderr)
+            result["error"] = f"first-pass compile failed: {first_err}"
             return result
 
         # 3. Count first-pass missing symbols
@@ -432,7 +434,12 @@ def main():
             mc_str = f"{mc}%" if mc >= 0 else "?"
             print(f"  {name:<28} {tbd:>9} {fp_str:>9} {fin_str:>7} {tc_str:>7} {mc_str:>8}  {status}")
             if err:
-                print(f"    ↳ {err[:120]}")
+                # Strip leading file path from compile errors for readability
+                err_display = err
+                if "error:" in err:
+                    parts = err.split("error:", 1)
+                    err_display = "error:" + parts[1] if len(parts) > 1 else err
+                print(f"    ↳ {err_display[:160]}")
 
     # Sort results by framework name
     results.sort(key=lambda r: r["framework"])
@@ -485,8 +492,8 @@ def main():
             print("No regressions vs baseline.")
 
     # Cleanup temp work dir
-    shutil.rmtree(work_root, ignore_errors=True)
-
+    # shutil.rmtree(work_root, ignore_errors=True)
+    print(f"\nTemp files preserved in: {work_root}")
     return 0 if (missing == 0 and errors == 0) else 1
 
 if __name__ == "__main__":

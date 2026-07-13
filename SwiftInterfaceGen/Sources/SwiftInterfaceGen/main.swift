@@ -50,11 +50,16 @@ struct SwiftInterfaceGen {
         // ObjC class registration, preventing ObjC from overriding Swift-known kinds.
         processSymbols(symbols, parser: parser, module: currentModule, depth: 0)
         registerObjcClasses(from: content, parser: parser, module: currentModule)
+        
+        if let dict = try? JSONSerialization.data(withJSONObject: parser.discoveredGenerics, options: [.prettyPrinted]),
+           let str = String(data: dict, encoding: .utf8) {
+            try? str.write(toFile: "discovered_generics.json", atomically: true, encoding: .utf8)
+        }
 
         let startGen = Date()
         let allCode = parser.generateAll()
         print("generateAll took: \(Date().timeIntervalSince(startGen))s", to: &Self.standardError)
-        
+
         let startPost = Date()
         let finalCode = postProcess(allCode, parser: parser)
         print("postProcess took: \(Date().timeIntervalSince(startPost))s", to: &Self.standardError)
@@ -723,7 +728,12 @@ struct SwiftInterfaceGen {
         c = c.replacingOccurrences(of: "___FOUNDATION___", with: "Foundation.")
         
         var standardShadowedTypes = ["Float", "Double", "Int", "String", "Bool", "Error"].filter { parser.discoveredConcreteTypes.contains($0) }
-        standardShadowedTypes.append(contentsOf: ["Decoder", "Encoder"])
+        // Decoder/Encoder are always shielded since generated code always references them by
+        // full name. Sequence is shielded too: Combine declares its own nested type also named
+        // "Sequence" (Publishers.Sequence), which shadows Swift.Sequence — without shielding,
+        // the blanket `Swift.` prefix strip below turns a `Swift.Sequence` constraint bound into
+        // a bare, self-referential `Sequence` bound.
+        standardShadowedTypes.append(contentsOf: ["Decoder", "Encoder", "Sequence"])
         for type in standardShadowedTypes {
             c = c.replacingOccurrences(of: "Swift.\(type)", with: "___SWIFT_SHIELDED_\(type)___")
         }
@@ -936,12 +946,15 @@ struct SwiftInterfaceGen {
 
         // Fix: `where Any == ConcreteType` — same-type constraints with `Any` on LHS are invalid.
         // Remove `, Any == <anything>` and `Any == <anything>,` from where clauses.
-        // Use regex to avoid consuming the function body.
-        if let regex = try? NSRegularExpression(pattern: ",\\s*Any\\s*==\\s*[^,{}>)]+", options: []) {
+        // Use regex to avoid consuming the function body. The excluded-character class must
+        // also exclude newlines — without it, a same-type constraint with no trailing comma
+        // (the last constraint in a where clause) greedily consumes past the end of the line,
+        // deleting unrelated declarations until the next `,{}>)` appears, possibly lines later.
+        if let regex = try? NSRegularExpression(pattern: ",\\s*Any\\s*==\\s*[^,{}>)\\n]+", options: []) {
             c = regex.stringByReplacingMatches(
                 in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
         }
-        if let regex = try? NSRegularExpression(pattern: "\\bAny\\s*==\\s*[^,{}>)]+,\\s*", options: []) {
+        if let regex = try? NSRegularExpression(pattern: "\\bAny\\s*==\\s*[^,{}>)\\n]+,\\s*", options: []) {
             c = regex.stringByReplacingMatches(
                 in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
         }
@@ -1034,19 +1047,11 @@ struct SwiftInterfaceGen {
         // Clean up invalid nested generic applications
         c = c.stripGenericFromView()
         
-
-        
         if !parser.defaultModule.isEmpty {
             c = c.replacingOccurrences(of: "___SHIELDED_\(parser.defaultModule)___", with: parser.defaultModule)
         }
 
         // De-genericise types whose real binary exports use non-generic ABI mangling.
-        // For Tensor/TensorRequirements: strip ALL <Any>/<A>/<T> since these types are
-        // fully non-generic in the real binary ABI.
-        // For UnsafeArrayPointer family: strip declaration <A> and own-type <A>/<Any>/<T>
-        // references, but also strip <GenericA>/<GenericB> which are method-level params
-        // that appear in closures passed to `withUnsafeArrayPointer(of:_:)`.
-        // De-genericise Tensor/TensorRequirements — fully non-generic in real ABI.
         for (typeName, placeholders) in [
             ("Tensor",           ["A", "Any", "T"]),
             ("TensorRequirements", ["A", "Any", "T"]),

@@ -324,6 +324,17 @@ class Parser {
         return 0
     }
 
+    func parentGenericDepth(typeName: String) -> Int {
+        // Returns the sum of generic params of ALL ANCESTORS of the type (excluding itself).
+        // This is used for method-level generic param selection: a method param at
+        // "depth d" (suffix digit) >= parentGenericDepth means it's a method-own param.
+        // For a top-level `Float4<A>` (ODIE.Float4), parentGenericCount is 1 (the struct itself),
+        // and we use that to mean "depth >= 1 are method-own".
+        // The naming is misleading — this is actually `parentGenericCount` of the type itself
+        // used as a threshold for depth-based param selection.
+        return parentGenericCount(typeName: typeName)
+    }
+
     static func getMangledModule(_ mangled: String) -> String? {
         var s = mangled
         if s.hasPrefix("_$s") {
@@ -812,7 +823,19 @@ class Parser {
             }
         }
 
-        if isRealMethod, let openParenIndex = cleanD.firstIndex(of: "(") {
+        var openParenIndexOpt: String.Index? = nil
+        var angleDepth = 0
+        var idx = cleanD.startIndex
+        while idx < cleanD.endIndex {
+            if cleanD[idx] == "<" { angleDepth += 1 }
+            else if cleanD[idx] == ">" { angleDepth -= 1 }
+            else if cleanD[idx] == "(" && angleDepth == 0 {
+                openParenIndexOpt = idx
+                break
+            }
+            idx = cleanD.index(after: idx)
+        }
+        if isRealMethod, let openParenIndex = openParenIndexOpt {
             let prefix = String(cleanD[..<openParenIndex])
             if !prefix.hasSuffix("<") && cleanD.contains(" -> ") {
                 var fullMemberPath = prefix.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " :", with: "")
@@ -834,7 +857,7 @@ class Parser {
                         
                         let tempTypePath = typePath
                         let (tempTypeName, _) = splitPath(tempTypePath)
-                        let pCount = parentGenericCount(typeName: tempTypeName)
+                        let pCount = parentGenericDepth(typeName: tempTypeName)
                         
                         var cleanGenericPart = genericPart.replacingOccurrences(of: "Swift.Error", with: "Error")
                         
@@ -912,15 +935,19 @@ class Parser {
                                 allPlaceholders.insert(p)
                             }
                             
+                            // Swift's mangler suffixes a generic placeholder with "1" whenever it
+                            // belongs to the method's own generic context (depth 1), regardless of
+                            // how many generic params the owning type itself has (pCount). So the
+                            // threshold is always depth >= 1, not depth >= pCount.
                             var methodOnlyParams = [String]()
                             for p in allPlaceholders.sorted() {
-                                if getDepth(p) >= pCount {
+                                if getDepth(p) >= 1 {
                                     methodOnlyParams.append(p)
                                 }
                             }
                             existingParams = methodOnlyParams
                         }
-                        
+
                         if !existingParams.isEmpty {
                             cleanGenericPart = "<" + existingParams.joined(separator: ", ") + ">"
                         } else {
@@ -1042,7 +1069,7 @@ class Parser {
             var typeVal = String(cleanD[firstColonRange.upperBound...]).trimmingCharacters(in: .whitespaces)
             if isSubscript {
                 if typeVal.hasPrefix("<") {
-                    let pCount = parentGenericCount(typeName: typeName)
+                    let pCount = parentGenericDepth(typeName: typeName)
                     if let closeAngleIndex = typeVal.firstIndex(of: ">") {
                         var genericPart = String(typeVal[..<typeVal.index(after: closeAngleIndex)])
                         var signatureRaw = String(typeVal[typeVal.index(after: closeAngleIndex)...])
@@ -1124,7 +1151,7 @@ class Parser {
                             
                             var methodOnlyParams = [String]()
                             for p in allPlaceholders.sorted() {
-                                if getDepth(p) >= pCount {
+                                if getDepth(p) >= 1 {
                                     methodOnlyParams.append(p)
                                 }
                             }

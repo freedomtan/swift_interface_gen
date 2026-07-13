@@ -43,6 +43,40 @@ class TypeNode {
                conformances.contains("any Swift.\(proto)")
     }
 
+    func getGenericCount(parser: Parser?) -> Int {
+        // A non-generic type has 0 generic params — used as the base case when walking
+        // up the parent chain (e.g. a top-level type's "parent" is the module, which is
+        // never generic). Only fall back to the historical default of 1 when the type
+        // IS marked generic but we can't find a discovered count for it.
+        guard isGeneric else { return 0 }
+        guard let parser = parser else { return 1 }
+        let enclosing = getEnclosingPath()
+        let relativeName = enclosing.isEmpty ? name : enclosing + "." + name
+        let fullPath1 = parser.defaultModule + "." + relativeName
+        let fullPath2 = relativeName
+        if let inferredCount = parser.discoveredGenerics[fullPath1] {
+            return inferredCount
+        } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
+            return inferredCount
+        }
+        return 1
+    }
+
+    func getOwnGenericCount(parser: Parser?) -> Int {
+        let total = getGenericCount(parser: parser)
+        if let parentNode = parent {
+            return max(0, total - parentNode.getGenericCount(parser: parser))
+        }
+        return total
+    }
+
+    func getParentGenericCount(parser: Parser?) -> Int {
+        if let parentNode = parent {
+            return parentNode.getGenericCount(parser: parser)
+        }
+        return 0
+    }
+
     static func getDefaultValue(for type: String) -> String {
         var cleanType = type.trimmingCharacters(in: .whitespaces)
         // Strip @escaping / @autoclosure / @Sendable attributes
@@ -230,6 +264,12 @@ class TypeNode {
         if ["Double", "Float", "Float16", "CGFloat"].contains(t) { return "0.0" }
         if t == "String" { return "\"\"" }
         if t == "StaticString" { return "\"\"" }
+        if t.contains("->") {
+            if t.starts(with: "Optional<") || t.hasSuffix(")?") {
+                return "nil"
+            }
+            return "fatalError()"
+        }
         if t.starts(with: "Optional<") || t.hasSuffix("?") { return "nil" }
         if t.starts(with: "[[") { return "[]" }
         if t.starts(with: "Dictionary<") || (t.starts(with: "[") && t.contains(":") && !t.starts(with: "[(")) { return "[:]" }
@@ -240,6 +280,104 @@ class TypeNode {
         if t.hasPrefix("AnySequence") { return "AnySequence([])" }
         return "fatalError()"
     }
+
+    static let systemAssociatedTypes: [String: [String]] = [
+        "Publisher": ["Output", "Failure"],
+        "Subscriber": ["Input", "Failure"],
+        "Subject": ["Output", "Failure"],
+        "Scheduler": ["SchedulerTimeType", "SchedulerOptions"],
+        "Collection": ["Element", "Index", "Iterator", "SubSequence"],
+        "Sequence": ["Element", "Iterator"],
+        "IteratorProtocol": ["Element"],
+        "AsyncSequence": ["Element", "AsyncIterator"],
+        "AsyncIteratorProtocol": ["Element"],
+        "RawRepresentable": ["RawValue"],
+        "Identifiable": ["ID"]
+    ]
+
+    func getAllAssociatedTypes(parser: Parser?) -> Set<String> {
+        var result = Set<String>()
+        let shortName = name.components(separatedBy: ".").last ?? name
+        if let systemTypes = TypeNode.systemAssociatedTypes[shortName] {
+            result.formUnion(systemTypes)
+        }
+        
+        for member in members.values {
+            if case .associatedType(let code) = member {
+                let parts = code.components(separatedBy: " ")
+                if parts.count >= 2 {
+                    let name = parts[1].replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces)
+                    result.insert(name)
+                }
+            }
+        }
+        
+        for conf in conformances {
+            let cleanConf = conf.components(separatedBy: ".").last ?? conf
+            if let systemTypes = TypeNode.systemAssociatedTypes[cleanConf] {
+                result.formUnion(systemTypes)
+            }
+            if let parser = parser, let parentNode = parser.modules[parser.defaultModule]?.nestedTypes[cleanConf] {
+                result.formUnion(parentNode.getAllAssociatedTypes(parser: parser))
+            }
+        }
+        return result
+    }
+
+    func pruneInvalidSelfConstraints(from sig: String, parser: Parser?) -> String {
+        guard sig.contains("Self.") else { return sig }
+        
+        let validAssoc = getAllAssociatedTypes(parser: parser)
+        
+        var baseSig = sig
+        var whereClause = ""
+        if let range = sig.range(of: " where ") {
+            baseSig = String(sig[..<range.lowerBound])
+            whereClause = String(sig[range.upperBound...])
+        } else if let range = sig.range(of: "where ") {
+            baseSig = String(sig[..<range.lowerBound])
+            whereClause = String(sig[range.upperBound...])
+        }
+        
+        guard !whereClause.isEmpty else { return sig }
+        
+        let constraints = whereClause.components(separatedBy: ",")
+        var keptConstraints = [String]()
+        for constraint in constraints {
+            let trimmed = constraint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
+            
+            var hasInvalidSelf = false
+            var searchRange = trimmed.startIndex..<trimmed.endIndex
+            while let selfRange = trimmed.range(of: "Self.", options: [], range: searchRange) {
+                let afterSelf = String(trimmed[selfRange.upperBound...])
+                var assocName = ""
+                for char in afterSelf {
+                    if char.isLetter || char.isNumber || char == "_" {
+                        assocName.append(char)
+                    } else {
+                        break
+                    }
+                }
+                if !assocName.isEmpty && !validAssoc.contains(assocName) {
+                    hasInvalidSelf = true
+                    break
+                }
+                searchRange = selfRange.upperBound..<trimmed.endIndex
+            }
+            
+            if !hasInvalidSelf {
+                keptConstraints.append(trimmed)
+            }
+        }
+        
+        if keptConstraints.isEmpty {
+            return baseSig
+        } else {
+            return baseSig + " where " + keptConstraints.joined(separator: ", ")
+        }
+    }
+
 
     func generateCode(indent: String = "", nameOverride: String? = nil, parser: Parser? = nil) -> String {
         let n = nameOverride ?? name
@@ -313,24 +451,18 @@ class TypeNode {
         var inScope = Set<String>()
         var genericParamsList = ""
         if isGeneric {
-            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
-            var count = 1
-            if let parser = parser {
-                let fullPath1 = parser.defaultModule + "." + name
-                let fullPath2 = name
-                if let inferredCount = parser.discoveredGenerics[fullPath1] {
-                    count = inferredCount
-                } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
-                    count = inferredCount
+            let placeholders = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
+            let ownCount = getOwnGenericCount(parser: parser)
+            let parentCount = getParentGenericCount(parser: parser)
+            if ownCount > 0 {
+                var params = [String]()
+                for i in 0..<ownCount {
+                    let p = placeholders[parentCount + i]
+                    inScope.insert(p)
+                    params.append(p)
                 }
+                genericParamsList = "<\(params.joined(separator: ", "))>"
             }
-            var params = [String]()
-            for i in 0..<count {
-                let p = i < placeholders.count ? placeholders[i] : "A\(i)"
-                inScope.insert(p)
-                params.append(p)
-            }
-            genericParamsList = "<\(params.joined(separator: ", "))>"
         }
         let selfReplaceWith = isProtocol ? "Self" : name + (isGeneric ? genericParamsList : "")
         for member in members.values {
@@ -485,9 +617,13 @@ class TypeNode {
         if actualKind == "class" {
             // Strip Equatable, Hashable, and Codable — these generate extra conformance descriptors
             // that the TBD does not export for most class types.
-            // Exception: keep Codable if the TBD actually exports Encodable/Decodable Mc symbols.
+            // Exception: keep them if the TBD actually exports the conformance Mc symbols.
             let hasCodableMc = parser?.conformancesFromTBD.contains(where: { $0.hasPrefix("\(n):") && ($0.hasSuffix(":Encodable") || $0.hasSuffix(":Decodable")) }) == true
-            var toStrip: Set<String> = ["Hashable", "Sendable", "Equatable"]
+            let hasHashableMc = parser?.conformancesFromTBD.contains(where: { $0 == "\(n):Hashable" }) == true
+            let hasEquatableMc = parser?.conformancesFromTBD.contains(where: { $0 == "\(n):Equatable" }) == true
+            var toStrip: Set<String> = ["Sendable"]
+            if !hasHashableMc { toStrip.insert("Hashable") }
+            if !hasEquatableMc { toStrip.insert("Equatable") }
             if !hasCodableMc { toStrip.formUnion(["Codable", "Encodable", "Decodable"]) }
             inheritsList = inheritsList.filter { !toStrip.contains($0) }
             
@@ -531,17 +667,44 @@ class TypeNode {
         } else if typeName == "XPCServiceClientConnection" {
             displayTypeName += "<A: XPCService>"
             inScope.insert("A")
-        } else if isGeneric && !isProtocol && !displayTypeName.contains("<") {
-            var count = 1
-            if let parser = parser {
-                let fullPath1 = parser.defaultModule + "." + name
-                let fullPath2 = name
-                if let inferredCount = parser.discoveredGenerics[fullPath1] {
-                    count = inferredCount
-                } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
-                    count = inferredCount
+        } else if parser?.defaultModule == "Combine" && isGeneric && (typeName.contains("Sink") || typeName.contains("Record") || typeName.contains("Zip") || typeName.contains("CombineLatest") || typeName.contains("Merge") || typeName.contains("Sequence")) {
+            let short = typeName.components(separatedBy: ".").last ?? typeName
+            if short == "Sink" {
+                displayTypeName += "<A, B: Error>"
+                inScope.insert("A"); inScope.insert("B")
+            } else if short == "Record" {
+                displayTypeName += "<A, B: Error>"
+                inScope.insert("A"); inScope.insert("B")
+            } else if short.starts(with: "Zip") || short.starts(with: "CombineLatest") || short.starts(with: "Merge") {
+                let count = getGenericCount(parser: parser)
+                let placeholders = ["A", "B", "C", "D", "E", "F", "G", "H"]
+                var params = [String]()
+                for i in 0..<min(count, placeholders.count) {
+                    let p = placeholders[i]
+                    params.append("\(p): Publisher")
+                    inScope.insert(p)
                 }
+                displayTypeName += "<\(params.joined(separator: ", "))>"
+            } else if short == "Sequence" {
+                // Qualified as Swift.Sequence (not bare "Sequence") so applyDiscoveredGenerics'
+                // bare-word scanner — which sees a same-named struct declared elsewhere in the
+                // generated code and treats every bare "Sequence" occurrence as a use site
+                // needing <Any> args — skips this one (its dot-preceded-word guard).
+                displayTypeName += "<A: Swift.Sequence, B: Error>"
+                inScope.insert("A"); inScope.insert("B")
+            } else {
+                let count = getGenericCount(parser: parser)
+                let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                var params = [String]()
+                for i in 0..<min(count, placeholders.count) {
+                    let p = placeholders[i]
+                    params.append(p)
+                    inScope.insert(p)
+                }
+                displayTypeName += "<\(params.joined(separator: ", "))>"
             }
+        } else if isGeneric && !isProtocol && !displayTypeName.contains("<") {
+            let count = getGenericCount(parser: parser)
             
             var assocTypes = [String]()
             for member in members.values {
@@ -628,16 +791,7 @@ class TypeNode {
         let nextIndent = indent + "    "
         
         if isProtocol && isGeneric {
-            var count = 1
-            if let parser = parser {
-                let fullPath1 = parser.defaultModule + "." + name
-                let fullPath2 = name
-                if let inferredCount = parser.discoveredGenerics[fullPath1] {
-                    count = inferredCount
-                } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
-                    count = inferredCount
-                }
-            }
+            let count = getGenericCount(parser: parser)
             let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
             for i in 0..<count {
                 let paramName = i < placeholders.count ? placeholders[i] : "A\(i)"
@@ -744,7 +898,7 @@ class TypeNode {
                 let effectiveScope = inScope.union(initGenericInScope)
 
                 if isProtocol {
-                    cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
+                    cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf(validAssoc: getAllAssociatedTypes(parser: parser))
                     cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                     cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
                 } else {
@@ -837,7 +991,7 @@ class TypeNode {
                 cleanT = propCleaned
 
                 if isProtocol {
-                    cleanT = cleanT.replacePlaceholderDotsWithSelf()
+                    cleanT = cleanT.replacePlaceholderDotsWithSelf(validAssoc: getAllAssociatedTypes(parser: parser))
                     cleanT = cleanT.replaceWord("A", with: "Self")
                     cleanT = cleanT.replaceMultiSegmentSelfPathsWithAny()
                 } else if !isSubscriptMember {
@@ -938,7 +1092,7 @@ class TypeNode {
                     shouldReplaceA = false
                 }
                 if isProtocol {
-                    cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
+                    cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf(validAssoc: getAllAssociatedTypes(parser: parser))
                     if shouldReplaceA {
                         cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                     }
@@ -970,13 +1124,11 @@ class TypeNode {
                 // Extract method-level generic params (e.g. <A> in withLock<A>) and add to local scope
                 // so cleanScope doesn't erase them to Any.
                 var methodGenericInScope = Set<String>()
-                if let openAngle = cleanedSig.firstIndex(of: "<"),
-                   let openParen = cleanedSig.firstIndex(of: "("),
-                   openAngle < openParen {
+                if let openAngle = cleanedSig.firstIndex(of: "<") {
                     var depth = 0
                     var closeAngle: String.Index? = nil
                     var i = openAngle
-                    while i < openParen {
+                    while i < cleanedSig.endIndex {
                         if cleanedSig[i] == "<" { depth += 1 }
                         else if cleanedSig[i] == ">" {
                             depth -= 1
@@ -986,7 +1138,13 @@ class TypeNode {
                     }
                     if let ca = closeAngle {
                         let inside = String(cleanedSig[cleanedSig.index(after: openAngle)..<ca])
-                        for param in inside.components(separatedBy: ",") {
+                        let beforeWhere: String
+                        if let whereRange = inside.range(of: " where ") {
+                            beforeWhere = String(inside[..<whereRange.lowerBound])
+                        } else {
+                            beforeWhere = inside
+                        }
+                        for param in beforeWhere.components(separatedBy: ",") {
                             let p = param.trimmingCharacters(in: .whitespaces)
                             if !p.isEmpty { methodGenericInScope.insert(p) }
                         }
@@ -1137,9 +1295,10 @@ class TypeNode {
                 
                 let staticMod = isStatic ? "static " : ""
                 let finalMod = (!isStatic && self.kind == "class" && self.finalMembers.contains(sig)) ? "final " : ""
-                if isProtocol { 
-                    lines.append("\(nextIndent)\(lifetimeAttr)\(staticMod)\(funcModifier)func \(cleanedSig)") 
-                } else { 
+                if isProtocol {
+                    let prunedSig = pruneInvalidSelfConstraints(from: cleanedSig, parser: parser)
+                    lines.append("\(nextIndent)\(lifetimeAttr)\(staticMod)\(funcModifier)func \(prunedSig)")
+                } else {
                     var returnType = "Void"
                     if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
                         returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
@@ -1203,22 +1362,18 @@ class TypeNode {
             } else if typeName == "XPCServiceClientConnection" {
                 genericParamsList = "<A>"
             } else if isGeneric {
-                var count = 1
-                if let parser = parser {
-                    let fullPath1 = parser.defaultModule + "." + name
-                    let fullPath2 = name
-                    if let inferredCount = parser.discoveredGenerics[fullPath1] {
-                        count = inferredCount
-                    } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
-                        count = inferredCount
+                let ownCount = getOwnGenericCount(parser: parser)
+                let parentCount = getParentGenericCount(parser: parser)
+                if ownCount > 0 {
+                    let placeholders = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
+                    var params = [String]()
+                    for i in 0..<ownCount {
+                        params.append(placeholders[parentCount + i])
                     }
+                    genericParamsList = "<\(params.joined(separator: ", "))>"
+                } else {
+                    genericParamsList = ""
                 }
-                let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
-                var params = [String]()
-                for i in 0..<count {
-                    params.append(i < placeholders.count ? placeholders[i] : "A\(i)")
-                }
-                genericParamsList = "<\(params.joined(separator: ", "))>"
             } else {
                 genericParamsList = ""
             }
@@ -1230,6 +1385,23 @@ class TypeNode {
                 let rightType = escapeKeyword(n) + genericParamsList
                 lines.append("\(nextIndent)public static func ==(_ lhs: \(leftType), _ rhs: \(rightType)) -> Bool { fatalError() }")
             }
+            // RawRepresentable: enums without a primitive raw type need explicit rawValue.
+            // If the enum conforms to RawRepresentable but has no rawType (like NS-bridged enums
+            // with init(rawValue: String)), emit a rawValue property so the conformance compiles.
+            if isEnum && hasConformance("RawRepresentable") && rawType == nil {
+                let hasRawValueProp = members.values.contains {
+                    if case .property(let pname, _, _, _) = $0, pname == "rawValue" { return true }
+                    return false
+                }
+                let hasRawValueInit = members.values.contains {
+                    if case .initializer(let s) = $0, s.contains("rawValue") { return true }
+                    return false
+                }
+                if !hasRawValueProp && hasRawValueInit {
+                    lines.append("\(nextIndent)public var rawValue: String { get { fatalError() } }")
+                }
+            }
+
             if hasConformance("Comparable") && !hasLessThanOperator() {
                 let leftType = escapeKeyword(n) + genericParamsList
                 let rightType = escapeKeyword(n) + genericParamsList
@@ -1254,6 +1426,203 @@ class TypeNode {
             }
             if actualKind == "struct" && hasConformance("~Copyable") {
                 lines.append("\(nextIndent)deinit {}")
+            }
+
+            if typeName == "Record" {
+                if !self.members.keys.contains("Output") && !self.members.keys.contains("typealias Output") {
+                    lines.append("\(nextIndent)public typealias Output = A")
+                }
+                if !self.members.keys.contains("Failure") && !self.members.keys.contains("typealias Failure") {
+                    lines.append("\(nextIndent)public typealias Failure = B")
+                }
+            }
+
+            // Synthesize missing protocol requirements to guarantee conformance
+            for conf in self.conformances {
+                let confBase = conf.stripGenericAngles()
+                
+                // Fallbacks for common external/system protocols
+                if confBase == "View" || confBase == "SwiftUI.View" {
+                    if !self.members.keys.contains("Body") && !self.members.keys.contains("typealias Body") {
+                        lines.append("\(nextIndent)public typealias Body = SwiftUI.EmptyView")
+                    }
+                    let hasBody = self.members.values.contains {
+                        if case .property(let name, _, _, _) = $0 { return name == "body" }
+                        return false
+                    }
+                    if !hasBody {
+                        lines.append("\(nextIndent)public var body: SwiftUI.EmptyView { get { fatalError() } }")
+                    }
+                }
+                if confBase == "Scene" || confBase == "SwiftUI.Scene" {
+                    if !self.members.keys.contains("Body") && !self.members.keys.contains("typealias Body") {
+                        lines.append("\(nextIndent)public typealias Body = SwiftUI.EmptyScene")
+                    }
+                    let hasBody = self.members.values.contains {
+                        if case .property(let name, _, _, _) = $0 { return name == "body" }
+                        return false
+                    }
+                    if !hasBody {
+                        lines.append("\(nextIndent)public var body: SwiftUI.EmptyScene { get { fatalError() } }")
+                    }
+                }
+                if confBase == "Widget" || confBase == "WidgetKit.Widget" {
+                    if !self.members.keys.contains("Body") && !self.members.keys.contains("typealias Body") {
+                        lines.append("\(nextIndent)public typealias Body = Never")
+                    }
+                    let hasBody = self.members.values.contains {
+                        if case .property(let name, _, _, _) = $0 { return name == "body" }
+                        return false
+                    }
+                    if !hasBody {
+                        lines.append("\(nextIndent)public var body: Never { get { fatalError() } }")
+                    }
+                }
+                
+                // Look up internal/custom protocols defined in the module
+                // NOTE: Protocol synthesis disabled — associated-type fallback always synthesizes
+                // `Any`, which fails when the associated type has its own conformance constraint
+                // (e.g. `CatalogAssetType: CatalogAssetProtocol`). Needs further refinement.
+                if false, let parser = parser {
+                    var protoNode: TypeNode? = parser.findTypeNode(module: parser.defaultModule, path: [confBase])
+                    if protoNode == nil {
+                        let matching = parser.discoveredProtocols.first { $0.hasSuffix("." + confBase) }
+                        if let m = matching {
+                            let parts = m.components(separatedBy: ".").dropFirst()
+                            protoNode = parser.findTypeNode(module: parser.defaultModule, path: Array(parts))
+                        }
+                    }
+
+                    if let pn = protoNode, pn.kind == "protocol" {
+                        // 1. Synthesize missing associated types
+                        var hasAllMethods = true
+                        var hasAnyProtoMethods = false
+                        for (_, mKind) in pn.members {
+                            if case .method(let name, _, _) = mKind {
+                                hasAnyProtoMethods = true
+                                let hasMethodInMembers = self.members.values.contains {
+                                    if case .method(let n, _, _) = $0 { return n == name }
+                                    return false
+                                }
+                                let hasMethodInExt = self.extensionMembers.values.contains {
+                                    if case .method(let n, _, _) = $0 { return n == name }
+                                    return false
+                                }
+                                if !hasMethodInMembers && !hasMethodInExt {
+                                    hasAllMethods = false
+                                }
+                            }
+                        }
+                        let skipAssociatedTypes = hasAnyProtoMethods && hasAllMethods
+
+                        if !skipAssociatedTypes {
+                            for (mName, mKind) in pn.members {
+                                if case .associatedType = mKind {
+                                    if !self.members.keys.contains(mName) && !self.members.keys.contains("typealias " + mName) {
+                                        var val = "Any"
+                                        if mName == "Body" {
+                                            if hasConformance("ChartContent") {
+                                                val = "AnyChartContent"
+                                            } else if hasConformance("View") {
+                                                val = "SwiftUI.EmptyView"
+                                            } else if hasConformance("Scene") {
+                                                val = "SwiftUI.EmptyScene"
+                                            } else {
+                                                val = "Never"
+                                            }
+                                        }
+                                        lines.append("\(nextIndent)public typealias \(mName) = \(val)")
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // 2. Synthesize missing methods/properties
+                        for (mName, mKind) in pn.members {
+                            switch mKind {
+                            case .method(let name, let sig, let isStatic):
+                                let hasMethodInMembers = self.members.values.contains {
+                                    if case .method(let n, _, _) = $0 { return n == name }
+                                    return false
+                                }
+                                let hasMethodInExt = self.extensionMembers.values.contains {
+                                    if case .method(let n, _, _) = $0 { return n == name }
+                                    return false
+                                }
+                                let hasMethod = hasMethodInMembers || hasMethodInExt
+                                // Skip synthesis if the signature uses associated type paths (e.g.
+                                // `A.CatalogAssetType`) that can't be resolved when A = Any.
+                                let hasAssocTypePath = sig.range(of: "[A-Z]\\.[A-Z][a-zA-Z]+",
+                                    options: .regularExpression) != nil
+                                if !hasMethod && !hasAssocTypePath {
+                                    var cleanSig = sig.trimmingCharacters(in: .whitespaces)
+                                    if cleanSig.hasPrefix("static ") {
+                                        cleanSig = String(cleanSig.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+                                    }
+                                    cleanSig = cleanSig.replacingOccurrences(of: "Self", with: self.name)
+                                    let staticPrefix = isStatic ? "static " : ""
+                                    
+                                    var retVal = ""
+                                    if let arrowRange = cleanSig.range(of: "->") {
+                                        let retType = String(cleanSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                                        let def = TypeNode.defaultReturnValue(for: retType)
+                                        if def == "fatalError()" {
+                                            retVal = "{ fatalError() }"
+                                        } else if def.isEmpty {
+                                            retVal = "{}"
+                                        } else {
+                                            retVal = "{ return \(def) }"
+                                        }
+                                    } else {
+                                        retVal = "{}"
+                                    }
+                                    lines.append("\(nextIndent)public \(staticPrefix)func \(cleanSig) \(retVal)")
+                                }
+                            case .property(let pName, let pType, let isReadOnly, let isStatic):
+                                let hasPropInMembers = self.members.values.contains {
+                                    if case .property(let name, _, _, _) = $0 {
+                                        return name == pName
+                                    }
+                                    return false
+                                }
+                                let hasPropInExt = self.extensionMembers.values.contains {
+                                    if case .property(let name, _, _, _) = $0 {
+                                        return name == pName
+                                    }
+                                    return false
+                                }
+                                let hasProp = hasPropInMembers || hasPropInExt
+                                let propHasAssocTypePath = pType.range(of: "[A-Z]\\.[A-Z][a-zA-Z]+",
+                                    options: .regularExpression) != nil
+                                if !hasProp && !propHasAssocTypePath {
+                                    var cleanType = pType.trimmingCharacters(in: .whitespaces)
+                                    cleanType = cleanType.replacingOccurrences(of: "Self", with: self.name)
+                                    let staticPrefix = isStatic ? "static " : ""
+                                    
+                                    var finalType = cleanType
+                                    if pName == "body" {
+                                        if hasConformance("ChartContent") {
+                                            finalType = "AnyChartContent"
+                                        } else if hasConformance("View") {
+                                            finalType = "SwiftUI.EmptyView"
+                                        } else if hasConformance("Scene") {
+                                            finalType = "SwiftUI.EmptyScene"
+                                        } else {
+                                            finalType = "Never"
+                                        }
+                                    }
+                                    
+                                    let def = TypeNode.defaultReturnValue(for: finalType)
+                                    let getter = def == "fatalError()" ? "{ fatalError() }" : (def.isEmpty ? "{}" : "{ return \(def) }")
+                                    let suffix = isReadOnly ? "{ get \(getter) }" : "{ get \(getter) set {} }"
+                                    lines.append("\(nextIndent)public \(staticPrefix)var \(pName): \(finalType) \(suffix)")
+                                }
+                            default:
+                                break
+                            }
+                        }
+                    }
+                }
             }
         }
         
@@ -1316,16 +1685,7 @@ class TypeNode {
 
         if isGeneric {
             let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
-            var count = 1
-            if let parser = parser {
-                let fullPath1 = defaultModule + "." + name
-                let fullPath2 = name
-                if let inferredCount = parser.discoveredGenerics[fullPath1] {
-                    count = inferredCount
-                } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
-                    count = inferredCount
-                }
-            }
+            let count = getGenericCount(parser: parser)
             for i in 0..<count {
                 if isProtocol {
                     if i < sortedAssoc.count {
@@ -1463,7 +1823,7 @@ class TypeNode {
                     cleanT = cleanT.stripParentPrefix(parentName: self.name)
                     if isProtocol {
                         cleanT = cleanT.replaceWord("A", with: "Self")
-                        cleanT = cleanT.replacePlaceholderDotsWithSelf()
+                        cleanT = cleanT.replacePlaceholderDotsWithSelf(validAssoc: getAllAssociatedTypes(parser: parser))
                         cleanT = cleanT.replaceMultiSegmentSelfPathsWithAny()
                     } else {
                         cleanT = cleanT.replaceGenericPlaceholderPathsWithAny(inScope: extInScope)
@@ -1500,12 +1860,12 @@ class TypeNode {
                         shouldReplaceA = false
                     }
                     if isProtocol {
-                        cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf()
+                        cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf(validAssoc: getAllAssociatedTypes(parser: parser))
                         if shouldReplaceA {
                             cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                         }
                         cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
-                        
+
                         // Remove "A" and "Self" from the method generic parameter list (it represents Self)
                         if let openIdx = cleanedSig.firstIndex(of: "<"),
                            let parenIdx = cleanedSig.firstIndex(of: "("),
@@ -1626,22 +1986,16 @@ class TypeNode {
              }
         }
 
-        if kind == "class" && baseClass != "NSObject" && !hasConformance("NSObject") && hasConformance("Equatable") {
+        // Emit Equatable extension only for classes where Equatable was stripped from the header
+        // (i.e., not exported by the TBD). If it's in the header already, no extension needed.
+        let equatableWasKeptInHeader = parser?.conformancesFromTBD.contains(where: { $0 == "\(name):Equatable" }) == true
+        if kind == "class" && baseClass != "NSObject" && !hasConformance("NSObject") && hasConformance("Equatable") && !equatableWasKeptInHeader {
              if hasEqualityOperator() {
                  output += "extension \(currentPath): Equatable {}\n"
              } else {
                  var genericType = currentPath
                  if isGeneric {
-                     var count = 1
-                     if let parser = parser {
-                         let fullPath1 = defaultModule + "." + name
-                         let fullPath2 = name
-                         if let inferredCount = parser.discoveredGenerics[fullPath1] {
-                             count = inferredCount
-                         } else if let inferredCount = parser.discoveredGenerics[fullPath2] {
-                             count = inferredCount
-                         }
-                     }
+                     let count = getGenericCount(parser: parser)
                      let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
                      var params = [String]()
                      for i in 0..<count {

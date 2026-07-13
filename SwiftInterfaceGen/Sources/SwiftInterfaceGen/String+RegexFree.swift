@@ -302,55 +302,45 @@ extension String {
         return result
     }
 
-    // 11. replacePlaceholderDotsWithSelf: replaces `\b[A-Z][0-9]?\.` with `"Self."`.
-    func replacePlaceholderDotsWithSelf() -> String {
+    // 11. replacePlaceholderDotsWithSelf: replaces `\b[A-Z][0-9]?\.` with `"Self."` or `"Any"` depending on validAssoc.
+    // A path like `A.LocalService.Interface` refers to a genuine associated type (`LocalService`) followed
+    // by one of ITS members (`Interface`) — only the `A` head should become `Self`, leaving `.Interface` as-is.
+    // A path like `A.AssetBackedResource.CatalogAssetType` is instead a self-referential repeat of the
+    // conforming type's own name before the real associated type — here the whole path collapses using the
+    // LAST segment, since the first segment isn't a real associated type and can't be kept dangling.
+    func replacePlaceholderDotsWithSelf(validAssoc: Set<String>? = nil) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "\\b(A|Self)((?:\\.[A-Za-z0-9_]+)+)\\b", options: []) else {
+            return self
+        }
+
+        let nsString = self as NSString
+        let matches = regex.matches(in: self, options: [], range: NSRange(location: 0, length: nsString.length))
+
         var result = self
-        var startSearch = result.startIndex
-        while startSearch < result.endIndex {
-            guard let dotIdx = result[startSearch...].firstIndex(of: ".") else { break }
-            
-            let checkIdx = dotIdx
-            var matched = false
-            if checkIdx > result.startIndex {
-                let prevIdx = result.index(before: checkIdx)
-                let prevChar = result[prevIdx]
-                if prevChar.isNumber {
-                    if prevIdx > result.startIndex {
-                        let prevPrevIdx = result.index(before: prevIdx)
-                        let prevPrevChar = result[prevPrevIdx]
-                        if prevPrevChar.isUppercase {
-                            let isWordCharBefore: Bool
-                            if prevPrevIdx > result.startIndex {
-                                let beforeChar = result[result.index(before: prevPrevIdx)]
-                                isWordCharBefore = beforeChar.isLetter || beforeChar.isNumber || beforeChar == "_" || beforeChar == "$"
-                            } else {
-                                isWordCharBefore = false
-                            }
-                            if !isWordCharBefore {
-                                result.replaceSubrange(prevPrevIdx...dotIdx, with: "Self.")
-                                matched = true
-                                startSearch = result.index(prevPrevIdx, offsetBy: 5)
-                            }
-                        }
-                    }
-                } else if prevChar.isUppercase {
-                    let isWordCharBefore: Bool
-                    if prevIdx > result.startIndex {
-                        let beforeChar = result[result.index(before: prevIdx)]
-                        isWordCharBefore = beforeChar.isLetter || beforeChar.isNumber || beforeChar == "_" || beforeChar == "$"
-                    } else {
-                        isWordCharBefore = false
-                    }
-                    if !isWordCharBefore {
-                        result.replaceSubrange(prevIdx...dotIdx, with: "Self.")
-                        matched = true
-                        startSearch = result.index(prevIdx, offsetBy: 5)
-                    }
+        for match in matches.reversed() {
+            let pathRange = match.range(at: 2)
+            let fullRange = match.range
+
+            let path = nsString.substring(with: pathRange)
+            let segments = path.split(separator: ".").map(String.init)
+            let firstSegment = segments.first ?? ""
+            let lastSegment = segments.last ?? ""
+
+            let replacement: String
+            if let valid = validAssoc {
+                if valid.contains(firstSegment) {
+                    replacement = "Self" + path
+                } else if valid.contains(lastSegment) {
+                    replacement = "Self." + lastSegment
+                } else {
+                    replacement = "Any"
                 }
+            } else {
+                replacement = "Self" + path
             }
-            
-            if !matched {
-                startSearch = result.index(after: dotIdx)
+
+            if let r = Range(fullRange, in: result) {
+                result.replaceSubrange(r, with: replacement)
             }
         }
         return result
@@ -513,7 +503,7 @@ extension String {
                     let lastComponent = components.last ?? ""
                     let prefix = String(result[prefixStartIdx..<dotIdx])
                     
-                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence", "EventType", "Stream"]
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence", "EventType", "Stream", "Failure", "Output", "Input"]
                     let suffixComponents = Array(components.dropFirst())
                     let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
                     
@@ -1328,37 +1318,20 @@ extension String {
 
     // 20. stripAnyGenericApplicationBeforeParen: strips <Any> and <Any, Any> before parenthesis
     func stripAnyGenericApplicationBeforeParen() -> String {
+        guard let regex = try? NSRegularExpression(pattern: "<(?:\\s*Any\\s*,)*\\s*Any\\s*>\\(", options: []) else {
+            return self
+        }
+        let nsString = self as NSString
+        let matches = regex.matches(in: self, options: [], range: NSRange(location: 0, length: nsString.length))
+        
         var result = self
-        var startSearch = result.startIndex
-        while let range = result.range(of: "<Any", range: startSearch..<result.endIndex) {
-            var scanIdx = range.upperBound
-            var onlyAny = true
-            while scanIdx < result.endIndex {
-                let char = result[scanIdx]
-                if char == ">" {
-                    let nextIdx = result.index(after: scanIdx)
-                    if nextIdx < result.endIndex && result[nextIdx] == "(" {
-                        let replaceRange = range.lowerBound...scanIdx
-                        result.replaceSubrange(replaceRange, with: "")
-                        scanIdx = range.lowerBound
-                    }
-                    break
-                } else if char == "," || char.isWhitespace {
-                    scanIdx = result.index(after: scanIdx)
-                } else {
-                    let nextRange = result.index(scanIdx, offsetBy: 3, limitedBy: result.endIndex)
-                    if let endAnyIdx = nextRange, result[scanIdx..<endAnyIdx] == "Any" {
-                        scanIdx = endAnyIdx
-                    } else {
-                        onlyAny = false
-                        break
-                    }
+        for match in matches.reversed() {
+            let matchRange = match.range
+            if matchRange.length > 1 {
+                let replaceRange = NSRange(location: matchRange.location, length: matchRange.length - 1)
+                if let r = Range(replaceRange, in: result) {
+                    result.replaceSubrange(r, with: "")
                 }
-            }
-            if onlyAny {
-                startSearch = scanIdx
-            } else {
-                startSearch = range.upperBound
             }
         }
         return result
@@ -1752,14 +1725,22 @@ extension String {
                         
                         // Find generic count matching this fullPath
                         var count = 0
-                        if let cVal = flatGenerics[word] {
-                            count = cVal
-                        } else if let cVal = shortGenerics[word] {
-                            var isPrecededByDot = false
-                            if start > 0 && chars[start - 1] == "." {
-                                isPrecededByDot = true
-                            }
-                            if !isPrecededByDot {
+                        let firstComponent = fullPath.components(separatedBy: ".").first ?? ""
+                        let isGenericPrefix = firstComponent.hasPrefix("Generic") || firstComponent.count == 1 || firstComponent == "Self"
+                        
+                        // A word immediately preceded by a dot (e.g. `A1.Output`) is a member
+                        // access — most often an associated-type reference — not a bare type
+                        // name, so it must never get generic args appended, regardless of
+                        // whether `word` also happens to match a same-named generic struct
+                        // (e.g. `Combine.Publishers.Output<A>`) elsewhere in the module.
+                        var isPrecededByDot = false
+                        if start > 0 && chars[start - 1] == "." {
+                            isPrecededByDot = true
+                        }
+                        if !isGenericPrefix && !isPrecededByDot {
+                            if let cVal = flatGenerics[word] {
+                                count = cVal
+                            } else if let cVal = shortGenerics[word] {
                                 count = cVal
                             }
                         }
@@ -1791,103 +1772,29 @@ extension String {
 
     // 23. stripGenericFromTypealias: removes `<Any, Any>` from LHS of public typealias declarations
     func stripGenericFromTypealias() -> String {
-        var result = self
-        var startSearch = result.startIndex
-        while let range = result.range(of: "public typealias ", range: startSearch..<result.endIndex) {
-            let afterAliasIdx = range.upperBound
-            if let eqRange = result[afterAliasIdx...].range(of: "=") {
-                let leftHandSide = String(result[afterAliasIdx..<eqRange.lowerBound]).trimmingCharacters(in: .whitespaces)
-                if let openBracket = leftHandSide.firstIndex(of: "<"),
-                   let closeBracket = leftHandSide.firstIndex(of: ">"),
-                   openBracket < closeBracket {
-                    let aliasName = String(leftHandSide[..<openBracket]).trimmingCharacters(in: .whitespaces)
-                    let genericPart = String(leftHandSide[openBracket...closeBracket])
-                    let cleanedGen = genericPart.replacingOccurrences(of: "<", with: "")
-                                                .replacingOccurrences(of: ">", with: "")
-                                                .replacingOccurrences(of: "Any", with: "")
-                                                .replacingOccurrences(of: ",", with: "")
-                                                .trimmingCharacters(in: .whitespaces)
-                    if cleanedGen.isEmpty {
-                        let replaceRange = afterAliasIdx..<eqRange.lowerBound
-                        result.replaceSubrange(replaceRange, with: aliasName + " ")
-                        startSearch = result.index(afterAliasIdx, offsetBy: aliasName.count + 1, limitedBy: result.endIndex) ?? result.endIndex
-                        continue
-                    }
-                }
-            }
-            startSearch = range.upperBound
+        guard let regex = try? NSRegularExpression(pattern: "(public\\s+typealias\\s+[A-Za-z0-9_]+)<(?:\\s*Any\\s*,)*\\s*Any\\s*>(\\s*=)", options: []) else {
+            return self
         }
-        return result
+        let nsString = self as NSString
+        return regex.stringByReplacingMatches(in: self, options: [], range: NSRange(location: 0, length: nsString.length), withTemplate: "$1$2")
     }
 
     // 24. stripGenericFromProtocol: removes `<Any, Any>` from LHS of protocol declarations
     func stripGenericFromProtocol() -> String {
-        var result = self
-        var startSearch = result.startIndex
-        while let range = result.range(of: "protocol ", range: startSearch..<result.endIndex) {
-            let afterProtoIdx = range.upperBound
-            if let openBracket = result[afterProtoIdx...].firstIndex(of: "<") {
-                let prefix = String(result[afterProtoIdx..<openBracket]).trimmingCharacters(in: .whitespaces)
-                if !prefix.isEmpty && !prefix.contains(":") && !prefix.contains("{") {
-                    var scanIdx = result.index(after: openBracket)
-                    var onlyAny = true
-                    while scanIdx < result.endIndex {
-                        let char = result[scanIdx]
-                        if char == ">" {
-                            break
-                        } else if char == "," || char.isWhitespace {
-                            scanIdx = result.index(after: scanIdx)
-                        } else {
-                            let nextRange = result.index(scanIdx, offsetBy: 3, limitedBy: result.endIndex)
-                            if let endAnyIdx = nextRange, result[scanIdx..<endAnyIdx] == "Any" {
-                                scanIdx = endAnyIdx
-                            } else {
-                                onlyAny = false
-                                break
-                            }
-                        }
-                    }
-                    if onlyAny && scanIdx < result.endIndex && result[scanIdx] == ">" {
-                        result.replaceSubrange(openBracket...scanIdx, with: "")
-                        startSearch = openBracket
-                        continue
-                    }
-                }
-            }
-            startSearch = range.upperBound
+        guard let regex = try? NSRegularExpression(pattern: "(protocol\\s+[A-Za-z0-9_]+)<(?:\\s*Any\\s*,)*\\s*Any\\s*>", options: []) else {
+            return self
         }
-        return result
+        let nsString = self as NSString
+        return regex.stringByReplacingMatches(in: self, options: [], range: NSRange(location: 0, length: nsString.length), withTemplate: "$1")
     }
 
     // 25. stripGenericFromView: replaces `.View<...>` with `.View`
     func stripGenericFromView() -> String {
-        var result = self
-        var startSearch = result.startIndex
-        while let range = result.range(of: ".View<", range: startSearch..<result.endIndex) {
-            let isTensorView: Bool
-            if range.lowerBound >= result.index(result.startIndex, offsetBy: 6) {
-                let checkRange = result.index(range.lowerBound, offsetBy: -6)..<range.lowerBound
-                isTensorView = result[checkRange] == "Tensor"
-            } else {
-                isTensorView = false
-            }
-            
-            var scanIdx = range.upperBound
-            while scanIdx < result.endIndex && result[scanIdx] != ">" {
-                scanIdx = result.index(after: scanIdx)
-            }
-            if scanIdx < result.endIndex && result[scanIdx] == ">" {
-                if !isTensorView {
-                    result.replaceSubrange(range.lowerBound...scanIdx, with: ".View")
-                    startSearch = result.index(range.lowerBound, offsetBy: 5)
-                } else {
-                    startSearch = result.index(after: scanIdx)
-                }
-            } else {
-                break
-            }
+        guard let regex = try? NSRegularExpression(pattern: "(?<!Tensor)\\.View<[^>]+>", options: []) else {
+            return self
         }
-        return result
+        let nsString = self as NSString
+        return regex.stringByReplacingMatches(in: self, options: [], range: NSRange(location: 0, length: nsString.length), withTemplate: ".View")
     }
 
     // 26. replaceMissingNestedTypes: handles fallbacks for missing nested types
@@ -2017,10 +1924,11 @@ extension String {
                                 j += 1
                             }
                             if depth == 0 {
-                                let params = String(chars[(i + 1)..<(j - 1)])
-                                if !params.contains("where ") {
-                                    results.append((name: name, params: params))
+                                var params = String(chars[(i + 1)..<(j - 1)])
+                                if let whereRange = params.range(of: " where ") {
+                                    params = String(params[..<whereRange.lowerBound])
                                 }
+                                results.append((name: name, params: params))
                             }
                         }
                     }
