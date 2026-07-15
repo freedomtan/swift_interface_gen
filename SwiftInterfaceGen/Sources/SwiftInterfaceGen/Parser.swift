@@ -858,7 +858,16 @@ class Parser {
                         let tempTypePath = typePath
                         let (tempTypeName, _) = splitPath(tempTypePath)
                         let pCount = parentGenericDepth(typeName: tempTypeName)
-                        
+                        // Protocols aren't tracked in discoveredGenerics, so pCount is always 0
+                        // for them — but a depth-0 placeholder like "A" in a protocol requirement's
+                        // where-clause already means Self, distinct from the method's own generic
+                        // (mangled with a depth suffix, e.g. "A1"). Stripping that suffix (the
+                        // pCount==0 branch below) would collapse two distinct type variables into
+                        // one, corrupting constraints like `A.Failure == A1.Failure` into a
+                        // self-referential `Self.Failure == Self.Failure`.
+                        let isKnownProtocol = discoveredProtocols.contains(tempTypeName) ||
+                            discoveredProtocols.contains(where: { $0.hasSuffix("." + tempTypeName) })
+
                         var cleanGenericPart = genericPart.replacingOccurrences(of: "Swift.Error", with: "Error")
                         
                         if let whereRange = cleanGenericPart.range(of: " where ") {
@@ -909,7 +918,7 @@ class Parser {
                             return 0
                         }
                         
-                        if pCount == 0 {
+                        if pCount == 0 && !isKnownProtocol {
                             let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
                             for p in placeholders {
                                 let target = "\(p)1"
@@ -1070,6 +1079,8 @@ class Parser {
             if isSubscript {
                 if typeVal.hasPrefix("<") {
                     let pCount = parentGenericDepth(typeName: typeName)
+                    let isKnownProtocol = discoveredProtocols.contains(typeName) ||
+                        discoveredProtocols.contains(where: { $0.hasSuffix("." + typeName) })
                     if let closeAngleIndex = typeVal.firstIndex(of: ">") {
                         var genericPart = String(typeVal[..<typeVal.index(after: closeAngleIndex)])
                         var signatureRaw = String(typeVal[typeVal.index(after: closeAngleIndex)...])
@@ -1123,7 +1134,7 @@ class Parser {
                             return 0
                         }
                         
-                        if pCount == 0 {
+                        if pCount == 0 && !isKnownProtocol {
                             let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
                             for p in placeholders {
                                 let target = "\(p)1"

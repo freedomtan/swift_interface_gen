@@ -37,10 +37,14 @@ class TypeNode {
     }
 
     func hasConformance(_ proto: String) -> Bool {
-        return conformances.contains(proto) || 
-               conformances.contains("Swift.\(proto)") || 
-               conformances.contains("any \(proto)") || 
-               conformances.contains("any Swift.\(proto)")
+        return conformances.contains(proto) ||
+               conformances.contains("Swift.\(proto)") ||
+               conformances.contains("any \(proto)") ||
+               conformances.contains("any Swift.\(proto)") ||
+               // During generateCode (before postProcess's shield substitution runs), the
+               // current module's own name may still be wrapped as ___SHIELDED_<Module>___,
+               // e.g. "___SHIELDED_Combine___.Publisher" instead of "Combine.Publisher".
+               conformances.contains(where: { $0.hasSuffix(".\(proto)") && $0.contains("___SHIELDED_") })
     }
 
     func getGenericCount(parser: Parser?) -> Int {
@@ -319,6 +323,53 @@ class TypeNode {
             }
             if let parser = parser, let parentNode = parser.modules[parser.defaultModule]?.nestedTypes[cleanConf] {
                 result.formUnion(parentNode.getAllAssociatedTypes(parser: parser))
+            }
+        }
+        return result
+    }
+
+    // Infers a generic Publisher/Subscriber conformance's associated-type aliases (Output,
+    // Failure, Input) from the same-type constraints already present on its own `receive`
+    // method's where-clause — e.g. `receive<S>(subscriber: S) where S: Subscriber,
+    // A.Failure == S.Failure, A.Output == S.Input` tells us `Output = A.Output` and
+    // `Failure = A.Failure`. This generalizes the old Record-only hardcode to every Combine
+    // Publisher/Subscriber type without needing a per-type-name table.
+    func inferReceiveAssociatedTypes() -> [String: String] {
+        var result = [String: String]()
+        for member in members.values {
+            guard case .method(let mName, let sig, _) = member, mName == "receive" || mName.hasPrefix("receive<"),
+                  sig.contains("subscriber:"), let whereRange = sig.range(of: " where ") else { continue }
+            let paramsEnd = sig.range(of: ")", options: .backwards)?.upperBound ?? sig.startIndex
+            guard whereRange.lowerBound >= paramsEnd else { continue }
+
+            // The receive<X>(subscriber: X) generic param name (e.g. "GenericA" post-cleanup,
+            // "A1" pre-cleanup) is whatever follows "subscriber: " up to the next non-identifier char.
+            guard let subRange = sig.range(of: "subscriber: ") else { continue }
+            var subParam = ""
+            for ch in sig[subRange.upperBound...] {
+                if ch.isLetter || ch.isNumber || ch == "_" { subParam.append(ch) } else { break }
+            }
+            guard !subParam.isEmpty else { continue }
+
+            let whereClause = String(sig[whereRange.upperBound...])
+            for rawConstraint in whereClause.components(separatedBy: ",") {
+                let constraint = rawConstraint.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let eqRange = constraint.range(of: " == ") else { continue }
+                let lhs = String(constraint[..<eqRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+                let rhs = String(constraint[eqRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                // Only same-type constraints that pin down the subscriber's own Input/Failure
+                // associated type tell us something about *our* Output/Failure.
+                for (assoc, other) in [(lhs, rhs), (rhs, lhs)] {
+                    guard assoc.hasPrefix("\(subParam).") else { continue }
+                    let subscriberAssoc = String(assoc.dropFirst(subParam.count + 1))
+                    guard subscriberAssoc == "Input" || subscriberAssoc == "Failure" else { continue }
+                    // Map Subscriber.Input -> our Output, Subscriber.Failure -> our Failure.
+                    let ourAssoc = subscriberAssoc == "Input" ? "Output" : "Failure"
+                    if result[ourAssoc] == nil, !other.isEmpty, other != subParam,
+                       !other.contains(subParam) {
+                        result[ourAssoc] = other
+                    }
+                }
             }
         }
         return result
@@ -705,7 +756,7 @@ class TypeNode {
             }
         } else if isGeneric && !isProtocol && !displayTypeName.contains("<") {
             let count = getGenericCount(parser: parser)
-            
+
             var assocTypes = [String]()
             for member in members.values {
                 if case .associatedType(let code) = member {
@@ -717,7 +768,39 @@ class TypeNode {
                 }
             }
             let sortedAssoc = assocTypes.sorted()
-            
+
+            // A generic param used elsewhere in this type's own (raw, pre-cleanup) member
+            // signatures as `<param>.Output` or `<param>.Failure` must itself conform to
+            // Publisher for those associated-type accesses to resolve — this is how Combine's
+            // publisher-wrapping types (RemoveDuplicates<A>, ReplaceEmpty<A>, Reduce<A, B>, ...)
+            // constrain their upstream generic params without a per-type-name table.
+            var placeholdersNeedingPublisher = Set<String>()
+            // A generic param inferred as this type's own Failure (e.g. `B` in AnyPublisher<A, B>,
+            // via inferReceiveAssociatedTypes below) must conform to Error — Publisher.Failure
+            // requires it, and a bare placeholder has no constraint otherwise.
+            var placeholdersNeedingError = Set<String>()
+            if hasConformance("Publisher") || hasConformance("Subscriber") {
+                let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                for member in members.values {
+                    let rawSig: String
+                    switch member {
+                    case .method(_, let sig, _): rawSig = sig
+                    case .property(_, let t, _, _): rawSig = t
+                    case .initializer(let sig): rawSig = sig
+                    default: continue
+                    }
+                    for p in placeholders {
+                        if rawSig.contains("\(p).Output") || rawSig.contains("\(p).Failure") {
+                            placeholdersNeedingPublisher.insert(p)
+                        }
+                    }
+                }
+                let inferred = inferReceiveAssociatedTypes()
+                if let failure = inferred["Failure"], placeholders.contains(failure) {
+                    placeholdersNeedingError.insert(failure)
+                }
+            }
+
             let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
             var params = [String]()
             for i in 0..<count {
@@ -729,7 +812,14 @@ class TypeNode {
                     }
                 } else {
                     if i < placeholders.count {
-                        params.append(placeholders[i])
+                        let p = placeholders[i]
+                        if placeholdersNeedingPublisher.contains(p) {
+                            params.append("\(p): Publisher")
+                        } else if placeholdersNeedingError.contains(p) {
+                            params.append("\(p): Error")
+                        } else {
+                            params.append(p)
+                        }
                     } else {
                         params.append("A\(i)")
                     }
@@ -1428,13 +1518,20 @@ class TypeNode {
                 lines.append("\(nextIndent)deinit {}")
             }
 
-            if typeName == "Record" {
-                if !self.members.keys.contains("Output") && !self.members.keys.contains("typealias Output") {
-                    lines.append("\(nextIndent)public typealias Output = A")
+            if hasConformance("Publisher") {
+                let inferred = inferReceiveAssociatedTypes()
+                if let output = inferred["Output"],
+                   !self.members.keys.contains("Output") && !self.members.keys.contains("typealias Output") {
+                    lines.append("\(nextIndent)public typealias Output = \(output)")
                 }
-                if !self.members.keys.contains("Failure") && !self.members.keys.contains("typealias Failure") {
-                    lines.append("\(nextIndent)public typealias Failure = B")
+                if let failure = inferred["Failure"],
+                   !self.members.keys.contains("Failure") && !self.members.keys.contains("typealias Failure") {
+                    lines.append("\(nextIndent)public typealias Failure = \(failure)")
                 }
+            }
+            if hasConformance("CustomCombineIdentifierConvertible") &&
+               !self.members.keys.contains("combineIdentifier") {
+                lines.append("\(nextIndent)public \(actualKind == "class" ? "final " : "")var combineIdentifier: CombineIdentifier { get { CombineIdentifier() } }")
             }
 
             // Synthesize missing protocol requirements to guarantee conformance
