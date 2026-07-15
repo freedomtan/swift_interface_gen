@@ -160,13 +160,46 @@ built = set()
 building = set()
 clean_after = False
 keep_stubs = False
+skip_built_deps = True
 
-def build_framework(name):
+def is_framework_fully_built(name):
+    """Check whether name's framework is already present in LocalFrameworks from a prior
+    run, so build_framework can skip rebuilding it. A Swift framework needs its dylib +
+    swiftmodule; a pure-ObjC framework (see is_pure_objc in build_framework) only ever gets
+    a module.modulemap, never a swiftmodule, so that alone is accepted as "has a Swift side"."""
+    fw_dir = f"LocalFrameworks/{name}.framework"
+    mod_path = f"{fw_dir}/Modules/{name}.swiftmodule/arm64-apple-macos.swiftmodule"
+    modulemap_path = f"{fw_dir}/Modules/module.modulemap"
+    if not os.path.exists(mod_path) and not os.path.exists(modulemap_path):
+        return False
+
+    direct = f"{fw_dir}/{name}"
+    if os.path.exists(direct) or os.path.islink(direct):
+        return True
+
+    # The dylib may live under a different subpath (e.g. Versions/A/Name) per the TBD's
+    # install-name, with `name` only present as a symlink to it.
+    tbd_path = locate_tbd(name)
+    install_name = extract_install_name(tbd_path) if tbd_path else None
+    if install_name:
+        framework_marker = f"/{name}.framework/"
+        if framework_marker in install_name:
+            subpath = install_name.split(framework_marker)[1]
+            if os.path.exists(f"{fw_dir}/{subpath}"):
+                return True
+    return False
+
+def build_framework(name, is_target=False):
     if name in built:
         return
     if name in building:
         raise Exception(f"Circular dependency detected: {name} in {building}")
-    
+
+    if skip_built_deps and not is_target and is_framework_fully_built(name):
+        print(f"--- Skipping {name}: already built in LocalFrameworks (use --force-rebuild-deps to rebuild) ---")
+        built.add(name)
+        return
+
     building.add(name)
     
     # Target framework
@@ -487,16 +520,19 @@ if __name__ == "__main__":
     if "--keep-stubs" in sys.argv:
         keep_stubs = True
         sys.argv.remove("--keep-stubs")
+    if "--force-rebuild-deps" in sys.argv:
+        skip_built_deps = False
+        sys.argv.remove("--force-rebuild-deps")
 
     if len(sys.argv) < 3:
-        print("Usage: ./orchestrate.py <FrameworkName> <TestFile.swift> [--clean] [--keep-stubs]")
+        print("Usage: ./orchestrate.py <FrameworkName> <TestFile.swift> [--clean] [--keep-stubs] [--force-rebuild-deps]")
         sys.exit(1)
         
     target = sys.argv[1]
     test_file = sys.argv[2]
     
     try:
-        build_framework(target)
+        build_framework(target, is_target=True)
         compile_test(target, test_file)
         print(f"\nSUCCESS: {target} fully compiled, aligned, and verified passing!")
     except Exception as e:
