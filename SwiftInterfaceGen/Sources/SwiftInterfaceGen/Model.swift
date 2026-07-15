@@ -773,35 +773,41 @@ class TypeNode {
             // signatures as `<param>.Output` or `<param>.Failure` must itself conform to
             // Publisher for those associated-type accesses to resolve — this is how Combine's
             // publisher-wrapping types (RemoveDuplicates<A>, ReplaceEmpty<A>, Reduce<A, B>, ...)
-            // constrain their upstream generic params without a per-type-name table.
+            // constrain their upstream generic params without a per-type-name table. Likewise
+            // `<param>.Input` implies Subscriber. This applies even to internal helper types
+            // that don't themselves declare a Publisher/Subscriber conformance (e.g.
+            // AnySubscriberBox<A> uses A.Input/A.Failure without conforming to anything).
             var placeholdersNeedingPublisher = Set<String>()
+            var placeholdersNeedingSubscriber = Set<String>()
+            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+            for member in members.values {
+                let rawSig: String
+                switch member {
+                case .method(_, let sig, _): rawSig = sig
+                case .property(_, let t, _, _): rawSig = t
+                case .initializer(let sig): rawSig = sig
+                default: continue
+                }
+                for p in placeholders {
+                    if rawSig.contains("\(p).Output") || rawSig.contains("\(p).Failure") {
+                        placeholdersNeedingPublisher.insert(p)
+                    }
+                    if rawSig.contains("\(p).Input") {
+                        placeholdersNeedingSubscriber.insert(p)
+                    }
+                }
+            }
             // A generic param inferred as this type's own Failure (e.g. `B` in AnyPublisher<A, B>,
             // via inferReceiveAssociatedTypes below) must conform to Error — Publisher.Failure
             // requires it, and a bare placeholder has no constraint otherwise.
             var placeholdersNeedingError = Set<String>()
             if hasConformance("Publisher") || hasConformance("Subscriber") {
-                let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
-                for member in members.values {
-                    let rawSig: String
-                    switch member {
-                    case .method(_, let sig, _): rawSig = sig
-                    case .property(_, let t, _, _): rawSig = t
-                    case .initializer(let sig): rawSig = sig
-                    default: continue
-                    }
-                    for p in placeholders {
-                        if rawSig.contains("\(p).Output") || rawSig.contains("\(p).Failure") {
-                            placeholdersNeedingPublisher.insert(p)
-                        }
-                    }
-                }
                 let inferred = inferReceiveAssociatedTypes()
                 if let failure = inferred["Failure"], placeholders.contains(failure) {
                     placeholdersNeedingError.insert(failure)
                 }
             }
 
-            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
             var params = [String]()
             for i in 0..<count {
                 if isProtocol {
@@ -815,6 +821,8 @@ class TypeNode {
                         let p = placeholders[i]
                         if placeholdersNeedingPublisher.contains(p) {
                             params.append("\(p): Publisher")
+                        } else if placeholdersNeedingSubscriber.contains(p) {
+                            params.append("\(p): Subscriber")
                         } else if placeholdersNeedingError.contains(p) {
                             params.append("\(p): Error")
                         } else {
@@ -1049,7 +1057,7 @@ class TypeNode {
                 cleanT = cleanT.stripParentPrefix(parentName: self.name)
 
                 cleanT = cleanT.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith, defaultModule: parser?.defaultModule ?? "")
-                cleanT = cleanT.replaceWordWithoutGeneric(self.name, with: selfReplaceWith)
+                cleanT = cleanT.replaceWordWithoutGeneric(self.name, with: selfReplaceWith, allowPrecededByDot: false)
 
                 // Find the first `{` outside any `<...>` generic clause.
                 // Preserve `Pack{A}` braces inside `<...>` for the Pack-fix regex in postProcess.
@@ -1175,7 +1183,7 @@ class TypeNode {
                 cleanedSig = cleanedSig.stripParentPrefix(parentName: self.name)
                 
                 cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith, defaultModule: parser?.defaultModule ?? "")
-                cleanedSig = cleanedSig.replaceWordWithoutGeneric(self.name, with: selfReplaceWith)
+                cleanedSig = cleanedSig.replaceWordWithoutGeneric(self.name, with: selfReplaceWith, allowPrecededByDot: false)
                 
                 var shouldReplaceA = true
                 if cleanedSig.hasGenericPlaceholderInBrackets(p: "A") || cleanedSig.hasGenericPlaceholderInBrackets(p: "A1") {

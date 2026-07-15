@@ -123,14 +123,14 @@ extension String {
     }
 
     // 5. replaceWordWithoutGeneric: replaces `\bword\b(?!<)` or `(?![<])` with `replacement`.
-    func replaceWordWithoutGeneric(_ word: String, with replacement: String) -> String {
+    func replaceWordWithoutGeneric(_ word: String, with replacement: String, allowPrecededByDot: Bool = true) -> String {
         var result = self
         var startSearch = result.startIndex
         while let range = result.range(of: word, range: startSearch..<result.endIndex) {
             let isWordCharBefore: Bool
             if range.lowerBound > result.startIndex {
                 let prevChar = result[result.index(before: range.lowerBound)]
-                isWordCharBefore = prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$"
+                isWordCharBefore = prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$" || (!allowPrecededByDot && prevChar == ".")
             } else {
                 isWordCharBefore = false
             }
@@ -2182,7 +2182,12 @@ extension String {
         return results
     }
 
-    // 32. stripGenericFromSequence: replaces Sequence<...> with Sequence
+    // 32. stripGenericFromSequence: replaces bare Sequence<...> (the stdlib protocol used as a
+    // primary-associated-type existential, e.g. `any Sequence<Element>`) with Sequence, since
+    // that constrained-existential syntax can't be expressed generically here. Does NOT touch
+    // module-qualified or dot-nested occurrences like `Publishers.Sequence<A, B>` or
+    // `Swift.Sequence<A>` — those name a real concrete/nested generic type (e.g. Combine's own
+    // Publishers.Sequence), not the bare existential this function targets.
     func stripGenericFromSequence() -> String {
         var result = self
         var startSearch = result.startIndex
@@ -2190,7 +2195,7 @@ extension String {
             if range.lowerBound > result.startIndex {
                 let prevIdx = result.index(before: range.lowerBound)
                 let prevChar = result[prevIdx]
-                if prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$" {
+                if prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$" || prevChar == "." {
                     startSearch = range.upperBound
                     continue
                 }
