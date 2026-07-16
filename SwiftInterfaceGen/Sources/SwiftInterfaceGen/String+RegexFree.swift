@@ -2607,7 +2607,45 @@ extension String {
             
             searchStart = result.index(after: start)
         }
-        
+
         return result
+    }
+
+    // Drops declarations that reference a private, underscore-prefixed ObjC type via
+    // "__C._Foo" (e.g. Translation's `_LTTextSessionDelegate`, HealthKit's
+    // `_HKQuantityDistributionStyle`). These types have real ABI symbols but no declaration in
+    // the framework's public header, so `import-underlying-module`/`__C` can never resolve
+    // them — Apple's own .swiftinterface simply omits the member entirely. Drops the whole
+    // member's line(s) for properties/methods, and the whole block for `extension __C._Foo { }`.
+    func removePrivateObjCTypeReferences() -> String {
+        let lines = self.components(separatedBy: "\n")
+        var result = [String]()
+        var skipDepth = 0
+        var i = 0
+        while i < lines.count {
+            let line = lines[i]
+            if skipDepth > 0 {
+                skipDepth += line.filter { $0 == "{" }.count
+                skipDepth -= line.filter { $0 == "}" }.count
+                i += 1
+                continue
+            }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("extension __C._"), trimmed.contains("{") {
+                skipDepth = 1 + line.filter { $0 == "{" }.count - 1
+                i += 1
+                continue
+            }
+            if line.contains("__C._") {
+                // A one-line member (property/method/init with a body on the same line) is
+                // simply dropped; a multi-line opening brace would need block-skip, but every
+                // member emitted by generateCode is single-line, so this is sufficient.
+                i += 1
+                continue
+            }
+            result.append(line)
+            i += 1
+        }
+        return result.joined(separator: "\n")
     }
 }

@@ -1285,6 +1285,7 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c += sentinelSource
         }
         c = c.fixResultAndEmptyFailureTypes()
+        c = c.removePrivateObjCTypeReferences()
         return c
     }
 
