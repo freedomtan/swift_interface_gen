@@ -1059,7 +1059,7 @@ class Parser {
                             node.members[initFull] = .initializer(initFull)
                         }
                     } else {
-                        let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true)
+                        let signature = simplifyType(signatureRaw, parentName: parentName, isMethodSignature: true, memberName: memberName)
                         var fixedSignature = Parser.fixUnnamedParameters(escapedMemberName + signature, escapingMap: symbolEscapingMap[originalMangled] ?? symbolEscapingMap[mangled], defaultArgs: defaultArgMap[mangled])
                         if !methodWhereClause.isEmpty {
                             fixedSignature += methodWhereClause
@@ -1211,7 +1211,7 @@ class Parser {
                     }
                 }
             }
-            let type = simplifyType(typeVal, parentName: parentName, isMethodSignature: isSubscript)
+            let type = simplifyType(typeVal, parentName: parentName, isMethodSignature: isSubscript, memberName: memberName)
             
             if !typeName.isEmpty && !memberName.isEmpty {
                 let node = findOrCreateType(name: cleanType(typeName))
@@ -1469,7 +1469,7 @@ class Parser {
         return result
     }
 
-    func simplifyType(_ type: String, parentName: String? = nil, isMethodSignature: Bool = false) -> String {
+    func simplifyType(_ type: String, parentName: String? = nil, isMethodSignature: Bool = false, memberName: String? = nil) -> String {
         var t = Parser.fixInlineArrayValGenerics(type)
         t = t.replacingOccurrences(of: "CVBufferRef", with: "CVBuffer")
         t = t.replaceWord("Decoder", with: "Swift.Decoder", allowPrecededByDot: false)
@@ -1653,7 +1653,15 @@ class Parser {
             t = t.replacingOccurrences(of: "== A>", with: ">")
         }
         if t.contains("some") {
-            t = t.replaceWord("some", with: "some Sendable")
+            // `some` opaque-return types demangle with no reconstructable underlying-protocol
+            // info, so this can only ever be a heuristic fallback. `body`/`makeBody` are the
+            // SwiftUI View-protocol requirement names (View.body, ViewModifier/ViewStyle-family
+            // .makeBody(configuration:)) — using the generic `Sendable` fallback there produces
+            // a type that satisfies Sendable but not the actual `Body: View` associated-type
+            // bound the conforming type is required to satisfy.
+            let shortMemberName = memberName?.components(separatedBy: "(").first
+            let replacement = (shortMemberName == "body" || shortMemberName == "makeBody") ? "some SwiftUI.View" : "some Sendable"
+            t = t.replaceWord("some", with: replacement)
         }
         
         if t.contains("set {") {
