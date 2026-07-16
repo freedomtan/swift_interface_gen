@@ -1113,7 +1113,26 @@ class Parser {
                     let pCount = parentGenericDepth(typeName: typeName)
                     let isKnownProtocol = discoveredProtocols.contains(typeName) ||
                         discoveredProtocols.contains(where: { $0.hasSuffix("." + typeName) })
-                    if let closeAngleIndex = typeVal.firstIndex(of: ">") {
+                    // Find the ">" that actually closes this generic-parameter-list's OUTER
+                    // "<", not the first ">" in the string — the list can itself contain a
+                    // nested generic (e.g. "<A1 where A1.Element == Swift.Range<Swift.Int>>"),
+                    // whose own closing ">" would otherwise be matched first, truncating the
+                    // clause early and leaving the true close (plus anything after it, like the
+                    // subscript's own "-> ReturnType") glued onto the wrong side of the split.
+                    let findMatchingCloseAngle: (String) -> String.Index? = { s in
+                        var depth = 0
+                        var idx = s.startIndex
+                        while idx < s.endIndex {
+                            if s[idx] == "<" { depth += 1 }
+                            else if s[idx] == ">" {
+                                depth -= 1
+                                if depth == 0 { return idx }
+                            }
+                            idx = s.index(after: idx)
+                        }
+                        return nil
+                    }
+                    if let closeAngleIndex = findMatchingCloseAngle(typeVal) {
                         var genericPart = String(typeVal[..<typeVal.index(after: closeAngleIndex)])
                         var signatureRaw = String(typeVal[typeVal.index(after: closeAngleIndex)...])
                         
