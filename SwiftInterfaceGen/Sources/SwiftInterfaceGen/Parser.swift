@@ -19,6 +19,25 @@ class Parser {
     var discoveredProtocols = Set<String>() // [DottedType]
     var discoveredNamespaces = Set<String>()
     var discoveredConcreteTypes = Set<String>()
+    // [InternalNodeName: (ExtendedTypeModule, StdlibTypeName, DisplayName)] — types like
+    // "Publisher" that are declared inside a "(extension in <currentModule>)" on some other
+    // module's type (e.g. Swift.Optional, or TokenGeneration.Prompt / PromptKit.Prompt). The
+    // internal node name is disambiguated per (module, type) pair (e.g. both Optional and
+    // Result gain a same-named "Publisher", and unrelated modules can each have their own
+    // same-named "Prompt") so it never collides in the nestedTypes dictionary; DisplayName is
+    // the real bare name to render at emission time.
+    // Populated by discoverNominalTypes; used by generateAll to emit
+    // `extension <Module>.<StdlibType> { struct <DisplayName> { ... } }` instead of a plain
+    // top-level declaration, and by findOrCreateType to route a member's parent type to the
+    // same node.
+    var stdlibTypeExtensions = [String: (module: String, stdlibType: String, displayName: String)]()
+    // Full dotted paths (e.g. "TokenGeneration.Prompt.RenderedPromptFragment") of types the
+    // CURRENT module declares via extension on another module's type — these are emitted as
+    // part of the current module's own output (see stdlibTypeExtensions above), so they must
+    // NOT be re-declared as stub members of that other module when generating dependency stubs
+    // (main.swift's generateStubs), which would create a genuine ambiguous-lookup conflict
+    // between the real stub and our own extension-injected declaration.
+    var selfDeclaredExternalExtensionPaths = Set<String>()
     var processedModules = Set<String>()
     var currentPrecomputeModule = "ModelCatalog"
     var frameworkInterfaceCache: [String: String] = [:]
@@ -51,7 +70,7 @@ class Parser {
         "URLResponse",
         "URLSession", "HTTPURLResponse", "String", "Character", "ClosedRange", "Range", "Selector",
         "NSObject", "Sendable", "Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Identifiable", "BitwiseCopyable", "Copyable", "Escapable",
-        "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable",
+        "AnyObject", "Comparable", "Sequence", "IteratorProtocol", "CaseIterable", "RawRepresentable", "RangeExpression",
         "Result", "KeyValuePairs", "Locale", "TimeZone", "Calendar", "Notification", "NotificationCenter",
         "Bundle", "RunLoop", "ProcessInfo", "Process", "LanguageCode", "StaticString",
         "AnySequence", "FloatingPointRoundingRule", "Task", "Mutex", "CustomStringConvertible", "CustomDebugStringConvertible", "CodingKey",
@@ -284,10 +303,13 @@ class Parser {
         return name
     }
 
-    func setKind(_ kind: String, for node: TypeNode) {
-        if node.kind == "unknown" || node.kind == "struct" {
+    func setKind(_ kind: String, for node: TypeNode, force: Bool = false) {
+        if force {
+            if node.kind != kind {
+                node.kind = kind
+            }
+        } else if node.kind == "unknown" || node.kind == "struct" {
              if kind == "class" || kind == "enum" || kind == "protocol" {
-                 fputs("TypeKindSet: \(node.name) -> \(kind)\n", stderr)
                  node.kind = kind
              }
         }
@@ -318,10 +340,20 @@ class Parser {
 
     func parentGenericCount(typeName: String) -> Int {
         let clean = cleanType(typeName)
-        let fullPath1 = defaultModule + "." + clean
-        if let count = discoveredGenerics[fullPath1] { return count }
-        if let count = discoveredGenerics[clean] { return count }
-        return 0
+        let parts = clean.components(separatedBy: ".")
+        var total = 0
+        var currentPath = ""
+        for i in 0..<parts.count {
+            if !currentPath.isEmpty { currentPath += "." }
+            currentPath += parts[i]
+            let fullPath1 = defaultModule + "." + currentPath
+            if let count = discoveredGenerics[fullPath1] {
+                total += count
+            } else if let count = discoveredGenerics[currentPath] {
+                total += count
+            }
+        }
+        return total
     }
 
     func parentGenericDepth(typeName: String) -> Int {
@@ -479,7 +511,7 @@ class Parser {
             let (typeName, assocName) = splitPath(fullPath)
             if !typeName.isEmpty && !assocName.isEmpty {
                 let node = findOrCreateType(name: cleanType(typeName))
-                setKind("protocol", for: node)
+                setKind("protocol", for: node, force: true)
                 if node.members[assocName] == nil {
                     node.members[assocName] = .associatedType("associatedtype \(assocName)")
                 }
@@ -501,7 +533,8 @@ class Parser {
             "value witness table for ",
             "protocol conformance descriptor for ",
             "base conformance descriptor for ",
-            "associated conformance descriptor for "
+            "associated conformance descriptor for ",
+            "property descriptor for "
         ]
         
         var forcedKind: String? = nil
@@ -538,7 +571,7 @@ class Parser {
                             }
                             
                             let node = findOrCreateType(name: cleanType(typePath))
-                            setKind("protocol", for: node)
+                            setKind("protocol", for: node, force: true)
                             let simplifiedProto = simplifyType(protoPath)
                             fputs("Parsed assoc conformance: \(typePath).\(assocName) -> \(simplifiedProto)\n", stderr)
                             
@@ -568,7 +601,7 @@ class Parser {
 
                         let node = findOrCreateType(name: cleanType(typePath))
                         if desc.contains("base conformance") {
-                            setKind("protocol", for: node)
+                            setKind("protocol", for: node, force: true)
                         }
 
                         let simplifiedProto = simplifyType(protoPath)
@@ -632,10 +665,10 @@ class Parser {
                 if !cleaned.isEmpty {
                     let node = findOrCreateType(name: cleaned)
                     if originalMangled.contains("VfD") {
-                        setKind("struct", for: node)
+                        setKind("struct", for: node, force: true)
                         node.conformances.insert("~Copyable")
                     } else {
-                        setKind("class", for: node)
+                        setKind("class", for: node, force: true)
                     }
                 }
             }
@@ -719,7 +752,6 @@ class Parser {
                 }
             }
         }
-
         if d.contains("dispatch thunk of ") {
             d = d.replacingOccurrences(of: "dispatch thunk of ", with: "")
         } else if d.contains("method descriptor for ") {
@@ -731,7 +763,7 @@ class Parser {
                 let (typeName, caseName) = splitPath(fullPath)
                 if !typeName.isEmpty && !caseName.isEmpty {
                     let node = findOrCreateType(name: cleanType(typeName))
-                    setKind("enum", for: node)
+                    setKind("enum", for: node, force: true)
                     
                     var payload: String? = nil
                     let parts = d.components(separatedBy: " -> ")
@@ -975,9 +1007,9 @@ class Parser {
  
                     let parentName = typeName.components(separatedBy: ".").last!
                     let node = findOrCreateType(name: cleanType(typeName))
-                    if let k = forcedKind { setKind(k, for: node) }
+                    if let k = forcedKind { setKind(k, for: node, force: true) }
                     if d_orig.contains(".__allocating_init") {
-                        setKind("class", for: node)
+                        setKind("class", for: node, force: true)
                     }
                     
                     let escapedMemberName = escapeKeyword(memberName) + methodGenericsPart
@@ -1183,7 +1215,7 @@ class Parser {
             
             if !typeName.isEmpty && !memberName.isEmpty {
                 let node = findOrCreateType(name: cleanType(typeName))
-                if let k = forcedKind { setKind(k, for: node) }
+                if let k = forcedKind { setKind(k, for: node, force: true) }
                 
                 if memberName == "rawValue" && (node.kind == "enum" || node.kind == "unknown") {
                     node.kind = "enum"
@@ -1232,13 +1264,17 @@ class Parser {
             }
 
             let node = findOrCreateType(name: typeName)
-            if let k = forcedKind { setKind(k, for: node) }
+            if let k = forcedKind { setKind(k, for: node, force: true) }
             
-            if node.kind == "unknown" || node.kind == "struct" {
-                if mangled.hasSuffix("V") || mangled.hasSuffix("VMn") { setKind("struct", for: node) }
-                else if mangled.hasSuffix("C") || mangled.hasSuffix("CMn") { setKind("class", for: node) }
-                else if mangled.hasSuffix("O") || mangled.hasSuffix("OMn") { setKind("enum", for: node) }
-                else if mangled.hasSuffix("P") || mangled.hasSuffix("Mp") { setKind("protocol", for: node) }
+            if mangled.hasSuffix("VMn") { setKind("struct", for: node, force: true) }
+            else if mangled.hasSuffix("CMn") { setKind("class", for: node, force: true) }
+            else if mangled.hasSuffix("OMn") { setKind("enum", for: node, force: true) }
+            else if mangled.hasSuffix("Mp") { setKind("protocol", for: node, force: true) }
+            else if node.kind == "unknown" || node.kind == "struct" {
+                if mangled.hasSuffix("V") { setKind("struct", for: node) }
+                else if mangled.hasSuffix("C") { setKind("class", for: node) }
+                else if mangled.hasSuffix("O") { setKind("enum", for: node) }
+                else if mangled.hasSuffix("P") { setKind("protocol", for: node) }
             }
             
             if node.kind != "protocol" && node.kind != "class" {
@@ -1253,6 +1289,19 @@ class Parser {
     private func findOrCreateType(name: String) -> TypeNode {
         if name.contains("<") { fputs("findOrCreateType with <: \(name)\n", stderr) }
         var parts = name.components(separatedBy: ".")
+        // Members of a type like "Publisher" that discoverNominalTypes recognized as declared
+        // inside a "(extension in <defaultModule>)" on some other module's type (e.g.
+        // Swift.Optional, or TokenGeneration.Prompt) route here as
+        // "<Module>.<Type>.Publisher.<member>" — redirect to the same disambiguated internal
+        // node name discoverNominalTypes registered the extension declaration under (see
+        // stdlibTypeExtensions), so the type's members land on that same node.
+        if parts.count >= 3 {
+            let nestedPath = parts.dropFirst(2).joined(separator: ".")
+            let candidateInternalName = "__StdlibExt_\(parts[0])_\(parts[1])_" + nestedPath
+            if stdlibTypeExtensions[candidateInternalName] != nil {
+                parts = [defaultModule, candidateInternalName]
+            }
+        }
         if parts[0] == "__C" && parts.count > 1 {
             if let defaultMod = modules[defaultModule] {
                 var current = defaultMod
@@ -2137,7 +2186,26 @@ class Parser {
                 
                 definedTypes.insert(flattenedName)
                 let actualName = (moduleName == defaultModule) ? type.name : flattenedName
-                output += type.generateCode(indent: "", nameOverride: actualName, parser: self) + "\n\n"
+                if moduleName == defaultModule, let extInfo = stdlibTypeExtensions[type.name] {
+                    // Qualify with the extended type's own module (e.g. "TokenGeneration.Prompt"
+                    // vs "PromptKit.Prompt") so extending two same-named types from different
+                    // modules doesn't produce an ambiguous bare "extension Prompt {".
+                    output += "extension \(extInfo.module).\(extInfo.stdlibType) {\n"
+                    // Replace any bare outer generic-param placeholders (A, B, C…) with Any.
+                    // These come from the enclosing stdlib type's own type params (e.g. Optional<Wrapped>
+                    // or Result<Success, Failure>), which are not in scope inside the inner struct.
+                    var body = type.generateCode(indent: "    ", nameOverride: extInfo.displayName, parser: self)
+                    let replacementForB = (extInfo.stdlibType == "Result") ? "any Swift.Error" : "Any"
+                    body = body.replaceWord("A", with: "Any", allowPrecededByDot: false, allowFollowedByDot: false)
+                    body = body.replaceWord("B", with: replacementForB, allowPrecededByDot: false, allowFollowedByDot: false)
+                    for bare in ["C", "D"] {
+                        body = body.replaceWord(bare, with: "Any", allowPrecededByDot: false, allowFollowedByDot: false)
+                    }
+                    output += body + "\n"
+                    output += "}\n\n"
+                } else {
+                    output += type.generateCode(indent: "", nameOverride: actualName, parser: self) + "\n\n"
+                }
             }
         }
 
@@ -2506,22 +2574,57 @@ class Parser {
                 continue
             }
             
-            if let inIndex = path.range(of: " in ") {
+            // "(extension in Combine):Swift.Optional.Publisher" declares a brand-new nested
+            // type (Publisher) inside an extension the CURRENT module adds to another module's
+            // type (Optional) — this must be emitted as part of the current module's own output
+            // (`extension Swift.Optional { struct Publisher {...} }`), not filed under the
+            // extended type's own module namespace, where it would either silently vanish
+            // (Swift/Foundation are never emitted) or collide with another module's same-named
+            // extended type (e.g. TokenGeneration.Prompt vs PromptKit.Prompt both gaining
+            // extensions). Route it to currentModule and record the base type being extended,
+            // including ITS module, for the emission pass.
+            var extendedTypeModule: String? = nil
+            var extendedStdlibType: String? = nil
+            var displayName: String? = nil
+            if path.hasPrefix("(extension in "), let colonIdx = path.firstIndex(of: ":") {
+                let extModule = String(path[path.index(path.startIndex, offsetBy: "(extension in ".count)..<path.index(before: colonIdx)])
+                path = String(path[path.index(after: colonIdx)...])
+                let pathParts = path.components(separatedBy: ".")
+                // pathParts[0] is the module the extended type itself belongs to (e.g.
+                // "Swift" or "TokenGeneration"), pathParts[1] is the type being extended (e.g.
+                // "Optional" or "Prompt"), and the remainder is the new nested type's path
+                // (e.g. "Publisher").
+                if extModule == currentModule, pathParts.count >= 3 {
+                    extendedTypeModule = pathParts[0]
+                    extendedStdlibType = pathParts[1]
+                    let nestedPath = pathParts.dropFirst(2).joined(separator: ".")
+                    displayName = pathParts.last
+                    selfDeclaredExternalExtensionPaths.insert(pathParts.joined(separator: "."))
+                    // Multiple (module, type) pairs can be extended with a same-named nested
+                    // type (e.g. both Optional and Result gain a "Publisher", or unrelated
+                    // modules each have their own "Prompt"), so the internal node name must
+                    // stay unique per (extended-type-module, extended-type) pair.
+                    path = currentModule + "." + "__StdlibExt_\(pathParts[0])_\(pathParts[1])_" + nestedPath
+                }
+            } else if let inIndex = path.range(of: " in ") {
                 path = String(path[..<inIndex.lowerBound])
             }
-            
+
             let parts = path.components(separatedBy: ".")
             guard parts.count >= 2 else { continue }
-            
+
             let module = parts[0]
             if module != currentModule {
                 discoveredNamespaces.insert(module)
             }
-            
+
             let typePath = Array(parts[1...])
-            
+
             let node = findOrCreateDiscoveredTypePath(module: module, path: typePath)
-            setKind(kind, for: node)
+            setKind(kind, for: node, force: true)
+            if let typeModule = extendedTypeModule, let stdlibType = extendedStdlibType, let display = displayName {
+                stdlibTypeExtensions[node.name] = (typeModule, stdlibType, display)
+            }
         }
     }
 

@@ -397,8 +397,8 @@ extension String {
                 let matchedPath = String(result[range.lowerBound..<endPathIdx])
                 let components = matchedPath.components(separatedBy: ".")
                 let lastComponent = components.last ?? ""
-                if ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"].contains(lastComponent) {
-                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface"]
+                if ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "SchedulerTimeType", "Stride"].contains(lastComponent) {
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "SchedulerTimeType", "Stride"]
                     let suffixComponents = Array(components.dropFirst())
                     let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
                     if allAllowed {
@@ -503,7 +503,7 @@ extension String {
                     let lastComponent = components.last ?? ""
                     let prefix = String(result[prefixStartIdx..<dotIdx])
                     
-                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence", "EventType", "Stream", "Failure", "Output", "Input"]
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence", "EventType", "Stream", "Failure", "Output", "Input", "SchedulerTimeType", "Stride"]
                     let suffixComponents = Array(components.dropFirst())
                     let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
                     
@@ -2536,5 +2536,78 @@ extension String {
         }
 
         return result.joined(separator: "\n")
+    }
+
+    func fixResultAndEmptyFailureTypes() -> String {
+        var result = self
+        var searchStart = result.startIndex
+        
+        while searchStart < result.endIndex {
+            var foundIndex: String.Index? = nil
+            var isResult = true
+            
+            if let resultRange = result.range(of: "Result<", range: searchStart..<result.endIndex) {
+                if let emptyRange = result.range(of: "Empty<", range: searchStart..<result.endIndex) {
+                    if resultRange.lowerBound < emptyRange.lowerBound {
+                        foundIndex = resultRange.lowerBound
+                        isResult = true
+                    } else {
+                        foundIndex = emptyRange.lowerBound
+                        isResult = false
+                    }
+                } else {
+                    foundIndex = resultRange.lowerBound
+                    isResult = true
+                }
+            } else if let emptyRange = result.range(of: "Empty<", range: searchStart..<result.endIndex) {
+                foundIndex = emptyRange.lowerBound
+                isResult = false
+            }
+            
+            guard let start = foundIndex else {
+                break
+            }
+            
+            let scanStart = result.index(start, offsetBy: isResult ? 7 : 6)
+            var depth = 1
+            var parenDepth = 0
+            var i = scanStart
+            var topLevelComma: String.Index? = nil
+            
+            while i < result.endIndex && depth > 0 {
+                let char = result[i]
+                if char == "<" {
+                    depth += 1
+                } else if char == ">" {
+                    depth -= 1
+                } else if char == "(" {
+                    parenDepth += 1
+                } else if char == ")" {
+                    parenDepth -= 1
+                } else if char == "," && depth == 1 && parenDepth == 0 {
+                    topLevelComma = i
+                }
+                if depth > 0 {
+                    i = result.index(after: i)
+                }
+            }
+            
+            if depth == 0, let comma = topLevelComma {
+                let afterCommaStart = result.index(after: comma)
+                let secondArg = result[afterCommaStart..<i]
+                let trimmed = secondArg.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed == "Any" {
+                    let replacement = "any Swift.Error"
+                    result.replaceSubrange(afterCommaStart..<i, with: replacement)
+                    let newEndOffset = result.distance(from: result.startIndex, to: afterCommaStart) + replacement.count
+                    searchStart = result.index(result.startIndex, offsetBy: newEndOffset)
+                    continue
+                }
+            }
+            
+            searchStart = result.index(after: start)
+        }
+        
+        return result
     }
 }

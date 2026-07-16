@@ -41,10 +41,7 @@ class TypeNode {
                conformances.contains("Swift.\(proto)") ||
                conformances.contains("any \(proto)") ||
                conformances.contains("any Swift.\(proto)") ||
-               // During generateCode (before postProcess's shield substitution runs), the
-               // current module's own name may still be wrapped as ___SHIELDED_<Module>___,
-               // e.g. "___SHIELDED_Combine___.Publisher" instead of "Combine.Publisher".
-               conformances.contains(where: { $0.hasSuffix(".\(proto)") && $0.contains("___SHIELDED_") })
+               conformances.contains(where: { $0.hasSuffix(".\(proto)") })
     }
 
     func getGenericCount(parser: Parser?) -> Int {
@@ -277,7 +274,11 @@ class TypeNode {
         if t.starts(with: "Optional<") || t.hasSuffix("?") { return "nil" }
         if t.starts(with: "[[") { return "[]" }
         if t.starts(with: "Dictionary<") || (t.starts(with: "[") && t.contains(":") && !t.starts(with: "[(")) { return "[:]" }
-        if t.starts(with: "Array<") || t.starts(with: "[") { return "[]" }
+        // A "[" prefix normally means Array<...>, but a bracketed type can also be followed by
+        // a member access, e.g. "[Any]?.Publisher" (Combine's Optional<[Any]>.Publisher) — that
+        // is NOT itself an array literal type, so only match when the brackets are genuinely
+        // the outermost/entire type (nothing trails the closing bracket but an optional "?").
+        if t.starts(with: "Array<") || (t.starts(with: "[") && (t.hasSuffix("]") || t.hasSuffix("]?"))) { return "[]" }
         if t.starts(with: "Set<") { return "[]" }
         if t == "Void" || t == "()" { return "" }
         if t == "Data" { return "Data()" }
@@ -337,33 +338,35 @@ class TypeNode {
     func inferReceiveAssociatedTypes() -> [String: String] {
         var result = [String: String]()
         for member in members.values {
-            guard case .method(let mName, let sig, _) = member, mName == "receive" || mName.hasPrefix("receive<"),
-                  sig.contains("subscriber:"), let whereRange = sig.range(of: " where ") else { continue }
-            let paramsEnd = sig.range(of: ")", options: .backwards)?.upperBound ?? sig.startIndex
-            guard whereRange.lowerBound >= paramsEnd else { continue }
-
-            // The receive<X>(subscriber: X) generic param name (e.g. "GenericA" post-cleanup,
-            // "A1" pre-cleanup) is whatever follows "subscriber: " up to the next non-identifier char.
+            guard case .method(let mName, let sig, _) = member, mName == "receive" || mName.hasPrefix("receive<") else { continue }
+            guard sig.contains("subscriber:") else { continue }
+            guard let whereRange = sig.range(of: " where ") else { continue }
             guard let subRange = sig.range(of: "subscriber: ") else { continue }
+            var subParamStart = subRange.upperBound
+            let modifiers = ["__owned ", "shared ", "inout "]
+            for modifier in modifiers {
+                if sig[subParamStart...].hasPrefix(modifier) {
+                    subParamStart = sig.index(subParamStart, offsetBy: modifier.count)
+                    break
+                }
+            }
             var subParam = ""
-            for ch in sig[subRange.upperBound...] {
+            for ch in sig[subParamStart...] {
                 if ch.isLetter || ch.isNumber || ch == "_" { subParam.append(ch) } else { break }
             }
             guard !subParam.isEmpty else { continue }
 
             let whereClause = String(sig[whereRange.upperBound...])
-            for rawConstraint in whereClause.components(separatedBy: ",") {
+            let constraints = splitWhereClauseConstraints(whereClause)
+            for rawConstraint in constraints {
                 let constraint = rawConstraint.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard let eqRange = constraint.range(of: " == ") else { continue }
                 let lhs = String(constraint[..<eqRange.lowerBound]).trimmingCharacters(in: .whitespaces)
                 let rhs = String(constraint[eqRange.upperBound...]).trimmingCharacters(in: .whitespaces)
-                // Only same-type constraints that pin down the subscriber's own Input/Failure
-                // associated type tell us something about *our* Output/Failure.
                 for (assoc, other) in [(lhs, rhs), (rhs, lhs)] {
                     guard assoc.hasPrefix("\(subParam).") else { continue }
                     let subscriberAssoc = String(assoc.dropFirst(subParam.count + 1))
                     guard subscriberAssoc == "Input" || subscriberAssoc == "Failure" else { continue }
-                    // Map Subscriber.Input -> our Output, Subscriber.Failure -> our Failure.
                     let ourAssoc = subscriberAssoc == "Input" ? "Output" : "Failure"
                     if result[ourAssoc] == nil, !other.isEmpty, other != subParam,
                        !other.contains(subParam) {
@@ -373,6 +376,59 @@ class TypeNode {
             }
         }
         return result
+    }
+
+    func inferSubscriberAssociatedTypes() -> [String: String] {
+        var result = [String: String]()
+        for member in members.values {
+            guard case .method(let mName, let sig, _) = member, mName == "receive" else { continue }
+            if sig.contains("-> Subscribers.Demand") {
+                if let openParen = sig.firstIndex(of: "("),
+                   let closeParen = sig.firstIndex(of: ")"),
+                   openParen < closeParen {
+                    let paramList = String(sig[sig.index(after: openParen)..<closeParen])
+                    let parts = paramList.components(separatedBy: ":")
+                    let typePart = parts.last?.trimmingCharacters(in: .whitespaces) ?? paramList.trimmingCharacters(in: .whitespaces)
+                    if !typePart.isEmpty && typePart != "Self" {
+                        result["Input"] = typePart
+                    }
+                }
+            }
+            if sig.contains("completion:") {
+                if let openAngle = sig.firstIndex(of: "<"),
+                   let closeAngle = sig[openAngle...].firstIndex(of: ">") {
+                    let failureType = String(sig[sig.index(after: openAngle)..<closeAngle]).trimmingCharacters(in: .whitespaces)
+                    if !failureType.isEmpty && failureType != "Self" {
+                        result["Failure"] = failureType
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private func splitWhereClauseConstraints(_ whereClause: String) -> [String] {
+        var constraints = [String]()
+        var current = ""
+        var depth = 0
+        for char in whereClause {
+            if char == "(" || char == "<" || char == "[" {
+                depth += 1
+                current.append(char)
+            } else if char == ")" || char == ">" || char == "]" {
+                depth -= 1
+                current.append(char)
+            } else if char == "," && depth == 0 {
+                constraints.append(current)
+                current = ""
+            } else {
+                current.append(char)
+            }
+        }
+        if !current.isEmpty {
+            constraints.append(current)
+        }
+        return constraints
     }
 
     func pruneInvalidSelfConstraints(from sig: String, parser: Parser?) -> String {
@@ -500,6 +556,17 @@ class TypeNode {
         }
         
         var inScope = Set<String>()
+        var parentNode = parent
+        while let currParent = parentNode {
+            let placeholders = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
+            let parentOwnCount = currParent.getOwnGenericCount(parser: parser)
+            let parentParentCount = currParent.getParentGenericCount(parser: parser)
+            for i in 0..<parentOwnCount {
+                let p = placeholders[parentParentCount + i]
+                inScope.insert(p)
+            }
+            parentNode = currParent.parent
+        }
         var genericParamsList = ""
         if isGeneric {
             let placeholders = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
@@ -658,11 +725,19 @@ class TypeNode {
             // protocols cause compiler errors because they require many protocol requirements
             // that our stubs cannot satisfy.
             let isCustomFloatType = ["Float4", "Float8", "BFloat16"].contains(n)
-            let forbiddenProtocols: Set<String> = isCustomFloatType
-                ? []  // allow all conformances for custom float types
-                : ["AdditiveArithmetic", "BinaryFloatingPoint",
+            let isSchedulerTimeType = n == "SchedulerTimeType" || n.hasSuffix(".SchedulerTimeType")
+            let isStride = n == "Stride" || n.hasSuffix(".Stride")
+            var forbiddenProtocols: Set<String> = ["AdditiveArithmetic", "BinaryFloatingPoint",
                    "FloatingPoint", "Numeric", "SignedNumeric", "Strideable",
                    "BinaryInteger", "FixedWidthInteger", "SignedInteger", "UnsignedInteger"]
+            if isCustomFloatType {
+                forbiddenProtocols = []
+            } else if isSchedulerTimeType {
+                forbiddenProtocols.remove("Strideable")
+            } else if isStride {
+                forbiddenProtocols.remove("SignedNumeric")
+                forbiddenProtocols.remove("AdditiveArithmetic")
+            }
             inheritsList = inheritsList.filter { !forbiddenProtocols.contains($0) }
         }
         if actualKind == "class" {
@@ -777,17 +852,30 @@ class TypeNode {
             // `<param>.Input` implies Subscriber. This applies even to internal helper types
             // that don't themselves declare a Publisher/Subscriber conformance (e.g.
             // AnySubscriberBox<A> uses A.Input/A.Failure without conforming to anything).
+            func collectRawSignatures(node: TypeNode) -> [String] {
+                var sigs = [String]()
+                for member in node.members.values {
+                    switch member {
+                    case .method(_, let sig, _): sigs.append(sig)
+                    case .property(_, let t, _, _): sigs.append(t)
+                    case .initializer(let sig): sigs.append(sig)
+                    case .associatedType(let sig): sigs.append(sig)
+                    case .enumCase(_, let payload, _):
+                        if let p = payload { sigs.append(p) }
+                    default: break
+                    }
+                }
+                for child in node.nestedTypes.values {
+                    sigs.append(contentsOf: collectRawSignatures(node: child))
+                }
+                return sigs
+            }
             var placeholdersNeedingPublisher = Set<String>()
             var placeholdersNeedingSubscriber = Set<String>()
+            var placeholdersNeedingScheduler = Set<String>()
             let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
-            for member in members.values {
-                let rawSig: String
-                switch member {
-                case .method(_, let sig, _): rawSig = sig
-                case .property(_, let t, _, _): rawSig = t
-                case .initializer(let sig): rawSig = sig
-                default: continue
-                }
+            let allRawSigs = collectRawSignatures(node: self)
+            for rawSig in allRawSigs {
                 for p in placeholders {
                     if rawSig.contains("\(p).Output") || rawSig.contains("\(p).Failure") {
                         placeholdersNeedingPublisher.insert(p)
@@ -795,14 +883,17 @@ class TypeNode {
                     if rawSig.contains("\(p).Input") {
                         placeholdersNeedingSubscriber.insert(p)
                     }
+                    if rawSig.contains("\(p).SchedulerTimeType") || rawSig.contains("\(p).SchedulerOptions") {
+                        placeholdersNeedingScheduler.insert(p)
+                    }
                 }
             }
             // A generic param inferred as this type's own Failure (e.g. `B` in AnyPublisher<A, B>,
-            // via inferReceiveAssociatedTypes below) must conform to Error — Publisher.Failure
-            // requires it, and a bare placeholder has no constraint otherwise.
+            // via inferReceiveAssociatedTypes/inferSubscriberAssociatedTypes below) must conform to Error —
+            // Publisher.Failure/Subscriber.Failure requires it, and a bare placeholder has no constraint otherwise.
             var placeholdersNeedingError = Set<String>()
             if hasConformance("Publisher") || hasConformance("Subscriber") {
-                let inferred = inferReceiveAssociatedTypes()
+                let inferred = hasConformance("Publisher") ? inferReceiveAssociatedTypes() : inferSubscriberAssociatedTypes()
                 if let failure = inferred["Failure"], placeholders.contains(failure) {
                     placeholdersNeedingError.insert(failure)
                 }
@@ -819,10 +910,12 @@ class TypeNode {
                 } else {
                     if i < placeholders.count {
                         let p = placeholders[i]
-                        if placeholdersNeedingPublisher.contains(p) {
-                            params.append("\(p): Publisher")
-                        } else if placeholdersNeedingSubscriber.contains(p) {
+                        if placeholdersNeedingSubscriber.contains(p) {
                             params.append("\(p): Subscriber")
+                        } else if placeholdersNeedingPublisher.contains(p) {
+                            params.append("\(p): Publisher")
+                        } else if placeholdersNeedingScheduler.contains(p) {
+                            params.append("\(p): Scheduler")
                         } else if placeholdersNeedingError.contains(p) {
                             params.append("\(p): Error")
                         } else {
@@ -1178,7 +1271,7 @@ class TypeNode {
                     cleanedSig = cleanedSig.replacingOccurrences(of: " postfix(", with: "(")
                     funcModifier = "postfix "
                 }
-                
+
                 // Strip the parent's fully qualified prefix from any nested types
                 cleanedSig = cleanedSig.stripParentPrefix(parentName: self.name)
                 
@@ -1238,6 +1331,8 @@ class TypeNode {
                         let inside = String(cleanedSig[cleanedSig.index(after: openAngle)..<ca])
                         let beforeWhere: String
                         if let whereRange = inside.range(of: " where ") {
+                            beforeWhere = String(inside[..<whereRange.lowerBound])
+                        } else if let whereRange = inside.range(of: "where ") {
                             beforeWhere = String(inside[..<whereRange.lowerBound])
                         } else {
                             beforeWhere = inside
@@ -1372,8 +1467,8 @@ class TypeNode {
                         var left = argTypes[0].replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "").trimmingCharacters(in: .whitespaces)
                         var right = argTypes[1].replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "").trimmingCharacters(in: .whitespaces)
                         
-                        if left.contains(": ") { left = String(left.components(separatedBy: ": ").last!) }
-                        if right.contains(": ") { right = String(right.components(separatedBy: ": ").last!) }
+                        if left.contains(":") { left = String(left.components(separatedBy: ":").last!) }
+                        if right.contains(":") { right = String(right.components(separatedBy: ":").last!) }
                         
                         left = left.stripModuleBeforeSubscriptOrGeneric()
                         right = right.stripModuleBeforeSubscriptOrGeneric()
@@ -1522,15 +1617,22 @@ class TypeNode {
                     lines.append("\(nextIndent)open func encode(with coder: NSCoder) {}")
                 }
             }
-            if actualKind == "struct" && hasConformance("~Copyable") {
-                lines.append("\(nextIndent)deinit {}")
-            }
-
             if hasConformance("Publisher") {
                 let inferred = inferReceiveAssociatedTypes()
                 if let output = inferred["Output"],
                    !self.members.keys.contains("Output") && !self.members.keys.contains("typealias Output") {
                     lines.append("\(nextIndent)public typealias Output = \(output)")
+                }
+                if let failure = inferred["Failure"],
+                   !self.members.keys.contains("Failure") && !self.members.keys.contains("typealias Failure") {
+                    lines.append("\(nextIndent)public typealias Failure = \(failure)")
+                }
+            }
+            if hasConformance("Subscriber") {
+                let inferred = inferSubscriberAssociatedTypes()
+                if let input = inferred["Input"],
+                   !self.members.keys.contains("Input") && !self.members.keys.contains("typealias Input") {
+                    lines.append("\(nextIndent)public typealias Input = \(input)")
                 }
                 if let failure = inferred["Failure"],
                    !self.members.keys.contains("Failure") && !self.members.keys.contains("typealias Failure") {
@@ -1654,7 +1756,13 @@ class TypeNode {
                                     if case .method(let n, _, _) = $0 { return n == name }
                                     return false
                                 }
-                                let hasMethod = hasMethodInMembers || hasMethodInExt
+                                let hasMethodInConstrainedExt = self.constrainedExtensions.values.contains {
+                                    $0.values.contains {
+                                        if case .method(let n, _, _) = $0 { return n == name }
+                                        return false
+                                    }
+                                }
+                                let hasMethod = hasMethodInMembers || hasMethodInExt || hasMethodInConstrainedExt
                                 // Skip synthesis if the signature uses associated type paths (e.g.
                                 // `A.CatalogAssetType`) that can't be resolved when A = Any.
                                 let hasAssocTypePath = sig.range(of: "[A-Z]\\.[A-Z][a-zA-Z]+",
@@ -1696,7 +1804,13 @@ class TypeNode {
                                     }
                                     return false
                                 }
-                                let hasProp = hasPropInMembers || hasPropInExt
+                                let hasPropInConstrainedExt = self.constrainedExtensions.values.contains {
+                                    $0.values.contains {
+                                        if case .property(let name, _, _, _) = $0 { return name == pName }
+                                        return false
+                                    }
+                                }
+                                let hasProp = hasPropInMembers || hasPropInExt || hasPropInConstrainedExt
                                 let propHasAssocTypePath = pType.range(of: "[A-Z]\\.[A-Z][a-zA-Z]+",
                                     options: .regularExpression) != nil
                                 if !hasProp && !propHasAssocTypePath {
@@ -1748,6 +1862,16 @@ class TypeNode {
                 }
             }
         }
+        for ext in constrainedExtensions.values {
+            for member in ext.values {
+                if case .method(let n, _, _) = member {
+                    let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
+                    if cleanN == "==" {
+                        return true
+                    }
+                }
+            }
+        }
         return false
     }
 
@@ -1757,6 +1881,16 @@ class TypeNode {
                 let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
                 if cleanN == "<" {
                     return true
+                }
+            }
+        }
+        for ext in constrainedExtensions.values {
+            for member in ext.values {
+                if case .method(let n, _, _) = member {
+                    let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
+                    if cleanN == "<" {
+                        return true
+                    }
                 }
             }
         }
@@ -2038,6 +2172,40 @@ class TypeNode {
                     cleanedSig = cleanedSig.removingUnusedMethodGenericParams()
                     
                     let staticMod = isStatic ? "static " : ""
+                    if cleanN == "==" && cleanedSig.contains("(") {
+                        let parts = cleanedSig.components(separatedBy: "(")
+                        let argsPart = parts.dropFirst().joined(separator: "(")
+                        let sigParts = argsPart.components(separatedBy: " -> ")
+                        let returnType = sigParts.count > 1 ? sigParts.last!.replacingOccurrences(of: ")", with: "").trimmingCharacters(in: .whitespaces) : "Bool"
+                        let allArgs = sigParts[0].trimmingCharacters(in: .whitespaces)
+
+                        let argTypes = allArgs.components(separatedBy: ", ")
+                        if argTypes.count == 2 {
+                            var left = argTypes[0].replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "").trimmingCharacters(in: .whitespaces)
+                            var right = argTypes[1].replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "").trimmingCharacters(in: .whitespaces)
+
+                            if left.contains(":") { left = String(left.components(separatedBy: ":").last!) }
+                            if right.contains(":") { right = String(right.components(separatedBy: ":").last!) }
+
+                            left = left.stripModuleBeforeSubscriptOrGeneric()
+                            right = right.stripModuleBeforeSubscriptOrGeneric()
+
+                            if left == "Type" { left = "`Type`" }
+                            if right == "Type" { right = "`Type`" }
+                            if left.hasSuffix(".Type") && !left.contains("`Type`") { left = left.replacingOccurrences(of: ".Type", with: ".`Type`") }
+                            if right.hasSuffix(".Type") && !right.contains("`Type`") { right = right.replacingOccurrences(of: ".Type", with: ".`Type`") }
+
+                            left = left.trimmingCharacters(in: .whitespaces)
+                            right = right.trimmingCharacters(in: .whitespaces)
+                            let returnTypeClean = returnType.trimmingCharacters(in: .whitespaces)
+                            let paramPrefix = self.hasConformance("~Copyable") ? "borrowing " : ""
+                            let leftType = paramPrefix + ((left == right && self.kind != "class") ? "Self" : left)
+                            let rightType = paramPrefix + ((left == right && self.kind != "class") ? "Self" : right)
+                            let isBoolReturn = returnTypeClean == "Bool" || returnTypeClean == "Swift.Bool"
+                            extLines.append("\(extNextIndent)public static func == (lhs: \(leftType), rhs: \(rightType)) -> \(returnTypeClean) { \(isBoolReturn ? "true" : "fatalError()") }")
+                            continue
+                        }
+                    }
                     var extLifetimeAttr = ""
                     if let arrowRange = cleanedSig.range(of: "->", options: .backwards) {
                         let retPart = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)

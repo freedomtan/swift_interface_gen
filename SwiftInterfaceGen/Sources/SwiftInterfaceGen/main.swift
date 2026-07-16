@@ -1284,6 +1284,7 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c += "\n// --- Protocol Default Sentinels (dylib-only, stripped for module emit) ---\n"
             c += sentinelSource
         }
+        c = c.fixResultAndEmptyFailureTypes()
         return c
     }
 
@@ -1721,7 +1722,16 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                             isPrivateFw = true
                         }
                     }
-                    if isPrivateFw && mod != currentModule {
+                    // Skip types the current module itself declares via extension on another
+                    // module's type (e.g. TokenGeneration.Prompt.RenderedPromptFragment,
+                    // injected by our own stdlibTypeExtensions mechanism) — these aren't real
+                    // members of that external module, so stubbing them here would re-declare
+                    // them and create a genuine ambiguous-lookup conflict with our own
+                    // extension-injected declaration.
+                    let isSelfDeclaredExtension = parser.selfDeclaredExternalExtensionPaths.contains {
+                        typeName == $0 || typeName.hasPrefix($0 + ".")
+                    }
+                    if isPrivateFw && mod != currentModule && !isSelfDeclaredExtension {
                         var isProto = isProtocol
                         if constraintTypes.contains(typeName) || constraintTypes.contains(parts.dropFirst().joined(separator: ".")) {
                             isProto = true
