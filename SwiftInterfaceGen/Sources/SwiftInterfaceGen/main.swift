@@ -805,7 +805,7 @@ struct SwiftInterfaceGen {
         c = c.replaceWord("CFStringRef", with: "CFString")
         // NSUnit* subclasses were renamed to Unit* in Swift; remove any locally-emitted
         // stub declarations for them BEFORE renaming (they shadow Foundation's real Unit subclasses).
-        for nsUnitType in ["NSUnitAcceleration", "NSUnitAngle", "NSUnitArea", "NSUnitConcentrationMass",
+        for nsUnitType in ["NSUnit", "NSUnitAcceleration", "NSUnitAngle", "NSUnitArea", "NSUnitConcentrationMass",
                            "NSUnitDispersion", "NSUnitDuration", "NSUnitElectricCharge", "NSUnitElectricCurrent",
                            "NSUnitElectricPotentialDifference", "NSUnitElectricResistance", "NSUnitEnergy",
                            "NSUnitFrequency", "NSUnitFuelEfficiency", "NSUnitIlluminance", "NSUnitInformationStorage",
@@ -815,7 +815,10 @@ struct SwiftInterfaceGen {
             c = c.replacingOccurrences(of: "public struct \(nsUnitType):", with: "// Foundation type: \(nsUnitType):")
         }
 
-        // NSUnit* subclasses were renamed to Unit* in Swift.
+        // NSUnit* subclasses were renamed to Unit* in Swift. NSUnit itself (the base class,
+        // e.g. Measurement<NSUnit>'s generic argument) renames to bare "Unit" — must run AFTER
+        // the specific NSUnit<Dimension> renames above/below so "NSUnitLength" isn't partially
+        // matched and renamed to "UnitLength" via the "NSUnit"->"Unit" rule first.
         for (old, new) in [
             ("NSUnitAcceleration", "UnitAcceleration"), ("NSUnitAngle", "UnitAngle"),
             ("NSUnitArea", "UnitArea"), ("NSUnitConcentrationMass", "UnitConcentrationMass"),
@@ -828,6 +831,7 @@ struct SwiftInterfaceGen {
             ("NSUnitLength", "UnitLength"), ("NSUnitMass", "UnitMass"), ("NSUnitPower", "UnitPower"),
             ("NSUnitPressure", "UnitPressure"), ("NSUnitSpeed", "UnitSpeed"),
             ("NSUnitTemperature", "UnitTemperature"), ("NSUnitVolume", "UnitVolume"),
+            ("NSUnit", "Unit"),
         ] as [(String, String)] {
             c = c.replaceWord(old, with: new)
         }
