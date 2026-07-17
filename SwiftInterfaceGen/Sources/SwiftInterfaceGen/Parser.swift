@@ -501,7 +501,49 @@ class Parser {
         if demangled.contains("unsafeMutableAddressor") || demangled.contains("unsafeAddressor") {
             return
         }
-        
+
+        // "protocol witness for X.reqName(...) in conformance ConformingType : Protocol" is a
+        // pure ABI thunk that forwards a conforming type's implementation to satisfy a protocol
+        // requirement — it carries the REQUIREMENT's own signature (using the protocol's own
+        // generic placeholder, e.g. bare "A" for "SwiftUI._GraphValue<A>"), not a distinct
+        // member of the conforming type, so it's never itself parsed as a member. But it DOES
+        // prove the conforming type satisfies that requirement — record that so
+        // inheritProtocolMembers (below) doesn't think the requirement is missing and copy the
+        // protocol's raw (unresolvable-outside-the-protocol's-own-scope) signature onto a
+        // non-generic conforming type (e.g. Charts.AnyChartContent getting a stray
+        // "_makeChartContent(content: SwiftUI._GraphValue<A>, ...)" with no "A" in scope).
+        if demangled.hasPrefix("protocol witness for "), let conformanceRange = demangled.range(of: " in conformance ") {
+            var reqPart = String(demangled[..<conformanceRange.lowerBound])
+            reqPart = String(reqPart.dropFirst("protocol witness for ".count))
+            if reqPart.hasPrefix("static ") {
+                reqPart = String(reqPart.dropFirst(7))
+            }
+            let confPart = String(demangled[conformanceRange.upperBound...])
+            // confPart is "ConformingType : Protocol in Module" — take the part before " : ".
+            let conformingTypePath = confPart.components(separatedBy: " : ").first?.trimmingCharacters(in: .whitespaces) ?? ""
+            // reqPart is now "Module.Protocol.reqName(...) -> ReturnType" (method/init) or
+            // "Module.Protocol.reqName.getter : Type" (property) — cut off the return-type/value
+            // part first, THEN take the bare member name after the last remaining ".".
+            var reqNamePart = reqPart
+            if let parenIdx = reqNamePart.firstIndex(of: "(") {
+                reqNamePart = String(reqNamePart[..<parenIdx])
+            } else if let colonIdx = reqNamePart.firstIndex(of: ":") {
+                reqNamePart = String(reqNamePart[..<colonIdx])
+            }
+            reqNamePart = reqNamePart.trimmingCharacters(in: .whitespaces)
+            for suffix in [".getter", ".setter", ".modify"] {
+                if reqNamePart.hasSuffix(suffix) {
+                    reqNamePart = String(reqNamePart.dropLast(suffix.count))
+                }
+            }
+            let reqName = reqNamePart.components(separatedBy: ".").last?.trimmingCharacters(in: .whitespaces) ?? ""
+            if !conformingTypePath.isEmpty && !reqName.isEmpty {
+                let node = findOrCreateType(name: cleanType(conformingTypePath))
+                node.satisfiedRequirementNames.insert(reqName)
+            }
+            return
+        }
+
         var d = demangled
         let d_orig = demangled
         var constraints: String? = nil
@@ -2140,7 +2182,7 @@ class Parser {
                                 }
                             }
                             
-                            if !hasMember {
+                            if !hasMember && !node.satisfiedRequirementNames.contains(nameToCheck) {
                                 node.members[memberKey] = memberVal
                             }
                         }

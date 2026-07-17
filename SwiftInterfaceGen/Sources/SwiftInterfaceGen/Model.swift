@@ -28,6 +28,13 @@ class TypeNode {
     var finalMembers: Set<String> = []
     var isObjcBridged: Bool = false  // true when this is an ObjC class extended in Swift (So-prefix symbols)
     weak var parent: TypeNode? = nil
+    // Names of protocol requirements this type is KNOWN to implement via a "protocol witness
+    // for ... in conformance" ABI thunk, even though that thunk's demangled text isn't itself
+    // parsed as a member (it carries the REQUIREMENT's own signature, using the protocol's own
+    // generic placeholder like bare "A", which is meaningless on a non-generic conforming type).
+    // Populated so inheritProtocolMembers (Parser.swift) doesn't think the requirement is
+    // missing and copy the protocol's raw (unresolvable) signature onto this type.
+    var satisfiedRequirementNames: Set<String> = []
 
     private func isLifetimeSpanType(_ type: String) -> Bool {
         let clean = type.replacingOccurrences(of: "Optional<", with: "")
