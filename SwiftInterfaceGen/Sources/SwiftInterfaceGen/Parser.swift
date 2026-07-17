@@ -1557,7 +1557,33 @@ class Parser {
         }
         for word in scannedWords {
             if word == "__C" {
-                t = t.replaceWordDot(word, with: "")
+                // Real bridged ObjC types are conventionally UpperCamelCase and become directly
+                // visible once the "__C." qualifier is stripped (e.g. "__C.CMTime" -> "CMTime").
+                // A lowercase/snake_case name after "__C." (e.g. "__C.ccec_cp") is a private C
+                // struct/typedef with no Swift-visible declaration at all — stripping the prefix
+                // there just produces an unresolvable bare name ("cannot find type 'ccec_cp' in
+                // scope"). Leave "__C." in place for those so removePrivateObjCTypeReferences
+                // (postProcess) can recognize and drop the whole member instead.
+                var result = t
+                var startSearch = result.startIndex
+                let target = "__C."
+                while let range = result.range(of: target, range: startSearch..<result.endIndex) {
+                    let isWordCharBefore: Bool
+                    if range.lowerBound > result.startIndex {
+                        let prevChar = result[result.index(before: range.lowerBound)]
+                        isWordCharBefore = prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$"
+                    } else {
+                        isWordCharBefore = false
+                    }
+                    let followedByLowercase = range.upperBound < result.endIndex && result[range.upperBound].isLowercase
+                    if !isWordCharBefore && !followedByLowercase {
+                        result.replaceSubrange(range, with: "")
+                        startSearch = range.lowerBound
+                    } else {
+                        startSearch = range.upperBound
+                    }
+                }
+                t = result
             } else if word != "Swift" && word != defaultModule && isModuleAvailable(word) {
                 let isLocalType = modules[defaultModule]?.nestedTypes[word] != nil
                 if !isLocalType {

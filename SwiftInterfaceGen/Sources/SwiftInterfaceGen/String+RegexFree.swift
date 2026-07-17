@@ -2618,6 +2618,20 @@ extension String {
     // them — Apple's own .swiftinterface simply omits the member entirely. Drops the whole
     // member's line(s) for properties/methods, and the whole block for `extension __C._Foo { }`.
     func removePrivateObjCTypeReferences() -> String {
+        // "__C._Foo" (underscore-prefixed Swift-facing name) and "__C.snake_case" (a bare C
+        // struct/typedef simplifyType deliberately left qualified, see the "__C." handling in
+        // Parser.simplifyType) both indicate a type with no public Swift declaration.
+        let referencesPrivateType: (String) -> Bool = { line in
+            if line.contains("__C._") { return true }
+            var searchStart = line.startIndex
+            while let range = line.range(of: "__C.", range: searchStart..<line.endIndex) {
+                if range.upperBound < line.endIndex, line[range.upperBound].isLowercase {
+                    return true
+                }
+                searchStart = range.upperBound
+            }
+            return false
+        }
         let lines = self.components(separatedBy: "\n")
         var result = [String]()
         var skipDepth = 0
@@ -2636,7 +2650,7 @@ extension String {
                 i += 1
                 continue
             }
-            if line.contains("__C._") {
+            if referencesPrivateType(line) {
                 // A one-line member (property/method/init with a body on the same line) is
                 // simply dropped; a multi-line opening brace would need block-skip, but every
                 // member emitted by generateCode is single-line, so this is sufficient.
