@@ -64,6 +64,10 @@ SYSTEM_MODULES = {
     "Swift", "Foundation", "ObjectiveC", "os", "Dispatch", "Metal", "CoreGraphics",
     "CoreVideo", "CoreMedia", "IOSurface", "UniformTypeIdentifiers", "XPC",
     "Synchronization", "MetricKit", "Combine", "CoreAI", "CoreFoundation",
+    # Standard-library modules under usr/lib/swift (not under System/Library/Frameworks),
+    # so the sdk_fw existence check below never finds them and they'd otherwise get an
+    # empty emit_empty_stub() with none of their real types (e.g. Observation.Observable).
+    "Observation",
 }
 
 # ---------------------------------------------------------------------------
