@@ -873,6 +873,11 @@ class TypeNode {
             var placeholdersNeedingPublisher = Set<String>()
             var placeholdersNeedingSubscriber = Set<String>()
             var placeholdersNeedingScheduler = Set<String>()
+            // TabularData's FilledColumn<A> uses A.WrappedElement/A.Index without declaring
+            // `where A: OptionalColumnProtocol` anywhere reconstructable from demangled symbol
+            // text (the constraint lives in generic-requirement metadata swift-demangle doesn't
+            // surface) — same inference approach as Publisher/Subscriber/Scheduler above.
+            var placeholdersNeedingOptionalColumnProtocol = Set<String>()
             let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
             let allRawSigs = collectRawSignatures(node: self)
             for rawSig in allRawSigs {
@@ -885,6 +890,9 @@ class TypeNode {
                     }
                     if rawSig.contains("\(p).SchedulerTimeType") || rawSig.contains("\(p).SchedulerOptions") {
                         placeholdersNeedingScheduler.insert(p)
+                    }
+                    if rawSig.contains("\(p).WrappedElement") {
+                        placeholdersNeedingOptionalColumnProtocol.insert(p)
                     }
                 }
             }
@@ -916,6 +924,8 @@ class TypeNode {
                             params.append("\(p): Publisher")
                         } else if placeholdersNeedingScheduler.contains(p) {
                             params.append("\(p): Scheduler")
+                        } else if placeholdersNeedingOptionalColumnProtocol.contains(p) {
+                            params.append("\(p): OptionalColumnProtocol")
                         } else if placeholdersNeedingError.contains(p) {
                             params.append("\(p): Error")
                         } else {
@@ -1642,6 +1652,15 @@ class TypeNode {
             if hasConformance("CustomCombineIdentifierConvertible") &&
                !self.members.keys.contains("combineIdentifier") {
                 lines.append("\(nextIndent)public \(actualKind == "class" ? "final " : "")var combineIdentifier: CombineIdentifier { get { CombineIdentifier() } }")
+            }
+            // TabularData's OptionalColumnProtocol requires `associatedtype WrappedElement`.
+            // Conforming types (Column<A>, ColumnSlice<A>, DiscontiguousColumnSlice<A>) never
+            // declare it explicitly — it's just their own bare first generic parameter — so
+            // infer it the same way Combine's Publisher/Subscriber associated types are
+            // inferred above.
+            if hasConformance("OptionalColumnProtocol") && isGeneric &&
+               !self.members.keys.contains("WrappedElement") && !self.members.keys.contains("typealias WrappedElement") {
+                lines.append("\(nextIndent)public typealias WrappedElement = A")
             }
 
             // Synthesize missing protocol requirements to guarantee conformance
