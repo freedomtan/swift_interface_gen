@@ -16,6 +16,10 @@ class Parser {
     ]
 
     var discoveredGenerics = [String: Int]() // [DottedType: Count]
+    // Nodes seen via a bare "nominal type descriptor for X" symbol with no other context —
+    // candidates for the Hashable/Codable/Sendable default-conformance fallback, applied only
+    // if the node still has zero real conformances once all symbols have been parsed.
+    var needsDefaultConformanceFallback: [ObjectIdentifier: TypeNode] = [:]
     var discoveredProtocols = Set<String>() // [DottedType]
     var discoveredNamespaces = Set<String>()
     var discoveredConcreteTypes = Set<String>()
@@ -1339,9 +1343,14 @@ class Parser {
             }
             
             if node.kind != "protocol" && node.kind != "class" {
-                node.conformances.insert("Hashable")
-                node.conformances.insert("Codable")
-                node.conformances.insert("Sendable")
+                // Don't insert Hashable/Codable/Sendable here directly — this "nominal type
+                // descriptor for X" symbol exists for EVERY struct/enum, including ones with
+                // real, different (or zero) conformances (e.g. TipKit.TipView only conforms to
+                // SwiftUI.View), so unconditionally injecting these produced conformances the
+                // real ABI never had. Only mark the node as a candidate; a deferred pass after
+                // all symbols are parsed applies the fallback ONLY if the node still has no
+                // conformances of its own by then (see needsDefaultConformanceFallback below).
+                needsDefaultConformanceFallback[ObjectIdentifier(node)] = node
             }
             return
         }
@@ -2097,6 +2106,21 @@ class Parser {
     }
 
     func applyTypeFixups() {
+        // Deferred Hashable/Codable/Sendable fallback: only apply to nodes that were seen via a
+        // bare "nominal type descriptor for X" symbol AND still have zero real conformances
+        // after all symbols were parsed. Applying this unconditionally at parse time (the old
+        // behavior) injected these conformances onto every struct/enum regardless of its real
+        // ABI conformances — e.g. TipKit.TipView only conforms to SwiftUI.View in reality, but
+        // got Codable/Hashable/Sendable added anyway, producing invalid Decodable-conformance
+        // codegen ("crosses into main actor-isolated code").
+        for node in needsDefaultConformanceFallback.values {
+            if node.conformances.isEmpty {
+                node.conformances.insert("Hashable")
+                node.conformances.insert("Codable")
+                node.conformances.insert("Sendable")
+            }
+        }
+
         if defaultModule == "MetricKit" {
             if let node = modules["MetricKit"]?.nestedTypes["AveragePixelLuminance"] {
                 node.baseClass = "Foundation.Dimension"

@@ -1821,14 +1821,20 @@ class TypeNode {
                 
                 // Fallbacks for common external/system protocols
                 if confBase == "View" || confBase == "SwiftUI.View" {
-                    if !self.members.keys.contains("Body") && !self.members.keys.contains("typealias Body") {
-                        lines.append("\(nextIndent)public typealias Body = SwiftUI.EmptyView")
-                    }
                     let hasBody = self.members.values.contains {
                         if case .property(let name, _, _, _) = $0 { return name == "body" }
                         return false
                     }
+                    // A real `body` property (e.g. inherited from View's own requirement via
+                    // inheritProtocolMembers, typed `some SwiftUI.View`) already determines
+                    // Body's underlying type via associated-type inference — an explicit
+                    // `typealias Body = SwiftUI.EmptyView` alongside it would conflict with
+                    // that inferred type (Self.Body must match body's declared type exactly).
+                    // Only synthesize the EmptyView fallback pair when there's no body at all.
                     if !hasBody {
+                        if !self.members.keys.contains("Body") && !self.members.keys.contains("typealias Body") {
+                            lines.append("\(nextIndent)public typealias Body = SwiftUI.EmptyView")
+                        }
                         lines.append("\(nextIndent)public var body: SwiftUI.EmptyView { get { fatalError() } }")
                     }
                 }
