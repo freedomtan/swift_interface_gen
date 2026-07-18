@@ -1814,6 +1814,14 @@ class TypeNode {
                !self.members.keys.contains("WrappedElement") && !self.members.keys.contains("typealias WrappedElement") {
                 lines.append("\(nextIndent)public typealias WrappedElement = A")
             }
+            // TipKit's RuleInput requires `associatedtype Value`. Conforming types
+            // (Event<A>, Parameter<A>) satisfy it via their own generic parameter in the
+            // real module, but the ABI doesn't reveal the exact substitution, so infer the
+            // same way OptionalColumnProtocol's WrappedElement is inferred above.
+            if hasConformance("RuleInput") && isGeneric &&
+               !self.members.keys.contains("Value") && !self.members.keys.contains("typealias Value") {
+                lines.append("\(nextIndent)public typealias Value = A")
+            }
 
             // Synthesize missing protocol requirements to guarantee conformance
             for conf in self.conformances {
