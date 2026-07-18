@@ -275,9 +275,23 @@ def test_framework(name, tbd, swiftinterface_path, work_dir):
 
         # 1c. Pass ObjC bridge header if generated alongside the interface (Cat F)
         bridge_h = str(SCRIPT_DIR / f"{name}Interface_bridge.h")
+        bridge_m = str(SCRIPT_DIR / f"{name}Interface_bridge.m")
+        bridge_o = os.path.join(work_dir, f"{name}Interface_bridge.o")
         extra_compile_flags = []
+        extra_objs = []
         if os.path.exists(bridge_h):
             extra_compile_flags = ["-import-objc-header", bridge_h]
+            if os.path.exists(bridge_m):
+                clang_cmd = [
+                    "clang", "-c", bridge_m, "-o", bridge_o,
+                    "-isysroot", SDK_ROOT,
+                    "-fobjc-arc"
+                ]
+                r = run(clang_cmd)
+                if r.returncode != 0:
+                    result["error"] = f"compile bridge.m failed: {r.stderr[:200]}"
+                    return result
+                extra_objs.append(bridge_o)
 
         # 2. Compile first-pass dylib (no exports list, undefined=dynamic_lookup)
         compile_cmd = [
@@ -310,24 +324,8 @@ def test_framework(name, tbd, swiftinterface_path, work_dir):
             if r.returncode != 0:
                 result["error"] = f"assemble stubs failed: {r.stderr[:200]}"
                 return result
-            extra_objs = [stubs_o]
-        else:
-            extra_objs = []
+            extra_objs.append(stubs_o)
 
-        final_cmd = [
-            "swiftc", "-emit-library", "-o", final_dylib,
-            gen_iface,
-            "-enable-library-evolution", "-module-name", name,
-            "-F", local_fw, "-sdk", SDK_ROOT,
-            "-language-mode", "6",
-            "-Xlinker", "-not_for_dyld_shared_cache",
-            "-Xlinker", "-install_name", "-Xlinker", install_name,
-            "-Xlinker", "-exported_symbols_list", "-Xlinker", exports_file,
-            "-enable-experimental-feature", "NonescapableTypes",
-            "-enable-experimental-feature", "Lifetimes",
-        ] + ["-Xlinker" if i % 2 == 0 else o
-             for obj in extra_objs for i, o in enumerate([obj, obj])]
-        # Simpler: just append object files directly
         final_cmd = [
             "swiftc", "-emit-library", "-o", final_dylib,
             gen_iface,

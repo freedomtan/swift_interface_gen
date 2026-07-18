@@ -503,7 +503,7 @@ extension String {
                     let lastComponent = components.last ?? ""
                     let prefix = String(result[prefixStartIdx..<dotIdx])
                     
-                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence", "EventType", "Stream", "Failure", "Output", "Input", "SchedulerTimeType", "Stride"]
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence", "EventType", "Stream", "Failure", "Output", "Input", "FormatInput", "FormatOutput", "Content", "SchedulerTimeType", "Stride", "RawSignificand", "RawValue", "WrappedElement", "Bound", "Result", "Body", "Indices", "SchedulerOptions", "Exponent", "Scalar", "Swift"]
                     let suffixComponents = Array(components.dropFirst())
                     let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
                     
@@ -1038,6 +1038,10 @@ extension String {
                         j = out.index(before: j)
                     }
                     if let op = openP {
+                        guard op == out.firstIndex(of: "(") else {
+                            searchFrom = r.upperBound
+                            continue
+                        }
                         // Check: the char/word BEFORE `(` must be an identifier or `>`, not a keyword
                         var prevEnd = op
                         while prevEnd > out.startIndex {
@@ -1056,8 +1060,19 @@ extension String {
                             continue
                         }
                         let inner = String(out[out.index(after: op)..<closeP]).trimmingCharacters(in: .whitespaces)
-                        // Single bare type with no `:` (no label) — needs `_ arg1: `
-                        if !inner.isEmpty && !inner.contains(":") && !inner.contains(",") && !inner.contains("->") {
+                        let containsAtDepth0 = { (str: String, char: Character) -> Bool in
+                            var depth = 0
+                            for c in str {
+                                if c == "<" || c == "(" || c == "[" { depth += 1 }
+                                else if c == ">" || c == ")" || c == "]" { if depth > 0 { depth -= 1 } }
+                                else if c == char && depth == 0 {
+                                    return true
+                                }
+                            }
+                            return false
+                        }
+                        // Single bare type with no `:` at depth 0 (no label) — needs `_ arg1: `
+                        if !inner.isEmpty && !containsAtDepth0(inner, ":") && !containsAtDepth0(inner, ",") {
                             let replacement = "(_ arg1: \(inner))"
                             out.replaceSubrange(op...closeP, with: replacement)
                             searchFrom = out.index(op, offsetBy: replacement.count, limitedBy: out.endIndex) ?? out.endIndex
@@ -1086,7 +1101,10 @@ extension String {
                     var gt: String.Index? = nil
                     while j < out.endIndex {
                         if out[j] == "<" { depth += 1 }
-                        else if out[j] == ">" { depth -= 1; if depth == 0 { gt = j; break } }
+                        else if out[j] == ">" {
+                            depth -= 1
+                            if depth == 0 { gt = j; break }
+                        }
                         j = out.index(after: j)
                     }
                     if let g = gt {
@@ -1098,11 +1116,13 @@ extension String {
             }
             // After stripping a func/init generic clause, a bare `(Any)` parameter list is left
             // unnamed — give it a label so it parses.
-            out = out.replacingOccurrences(of: "(Any) ->", with: "(_ arg1: Any) ->")
-            out = out.replacingOccurrences(of: "(Any) {", with: "(_ arg1: Any) {")
-            out = out.replacingOccurrences(of: "(Any) throws", with: "(_ arg1: Any) throws")
-            out = out.replacingOccurrences(of: "(Any) async", with: "(_ arg1: Any) async")
-            out = out.replacingOccurrences(of: "(Any) where", with: "(_ arg1: Any) where")
+            if let firstParen = out.firstIndex(of: "(") {
+                let tail = out[firstParen...]
+                if tail.hasPrefix("(Any) ->") || tail.hasPrefix("(Any) {") || tail.hasPrefix("(Any) throws") || tail.hasPrefix("(Any) async") || tail.hasPrefix("(Any) where") {
+                    let rangeToReplace = firstParen...out.index(firstParen, offsetBy: 4)
+                    out.replaceSubrange(rangeToReplace, with: "(_ arg1: Any)")
+                }
+            }
             return out
         }
         return fixed.joined(separator: "\n")
@@ -2391,11 +2411,16 @@ extension String {
         var prunedParams = Set<String>()
         for param in rawParams {
             if param.isEmpty { continue }
+            var cleanParam = param
+            if cleanParam.hasPrefix("each ") {
+                cleanParam = String(cleanParam.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+            }
             // Check if the param name (whole-word) appears in the signature (excluding where clause)
-            let usedInSig = checkBody.replaceWord(param, with: "").count < checkBody.count
+            let usedInSig = checkBody.replaceWord(cleanParam, with: "").count < checkBody.count
             if usedInSig {
                 keptParams.append(param)
             } else {
+                prunedParams.insert(cleanParam)
                 prunedParams.insert(param)
             }
         }
@@ -2404,7 +2429,7 @@ extension String {
         // and also any constraints containing ~Copyable.
         var finalWhere = ""
         if !whereClause.isEmpty {
-            let constraints = whereClause.components(separatedBy: ",")
+            let constraints = whereClause.splitByCommaRespectingBrackets()
             var keptConstraints = [String]()
             for constraint in constraints {
                 let trimmed = constraint.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2661,5 +2686,33 @@ extension String {
             i += 1
         }
         return result.joined(separator: "\n")
+    }
+
+    func splitByCommaRespectingBrackets() -> [String] {
+        var result = [String]()
+        var current = ""
+        var depth = 0
+        let chars = Array(self)
+        var idx = 0
+        let n = chars.count
+        while idx < n {
+            let char = chars[idx]
+            if char == "<" || char == "(" || char == "[" {
+                depth += 1
+            } else if char == ">" || char == ")" || char == "]" {
+                depth -= 1
+            }
+            if char == "," && depth == 0 {
+                result.append(current)
+                current = ""
+            } else {
+                current.append(char)
+            }
+            idx += 1
+        }
+        if !current.isEmpty {
+            result.append(current)
+        }
+        return result
     }
 }

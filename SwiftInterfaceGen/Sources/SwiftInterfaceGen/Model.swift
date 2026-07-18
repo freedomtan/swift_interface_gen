@@ -455,7 +455,7 @@ class TypeNode {
         
         guard !whereClause.isEmpty else { return sig }
         
-        let constraints = whereClause.components(separatedBy: ",")
+        let constraints = whereClause.splitByCommaRespectingBrackets()
         var keptConstraints = [String]()
         for constraint in constraints {
             let trimmed = constraint.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -497,7 +497,11 @@ class TypeNode {
         let n = nameOverride ?? name
         if n.contains(" ") { return "" }
         let actualKind = kind == "unknown" ? "struct" : kind
-        if isObjcBridged && actualKind == "enum" {
+        var finalKind = actualKind
+        if actualKind == "class" && (hasConformance("Actor") || hasConformance("Swift.Actor")) {
+            finalKind = "actor"
+        }
+        if isObjcBridged && finalKind == "enum" {
             return ""
         }
         var lines = [String]()
@@ -619,7 +623,7 @@ class TypeNode {
             if case .enumCase(_, _, _) = member { hasCases = true; break }
         }
 
-        if isEnum && hasCases, let raw = rawType {
+        if isEnum, let raw = rawType {
             var cleanRaw = raw.trimmingCharacters(in: .whitespaces)
             if cleanRaw.hasPrefix("any ") {
                 cleanRaw = String(cleanRaw.dropFirst(4)).trimmingCharacters(in: .whitespaces)
@@ -779,6 +783,9 @@ class TypeNode {
                 inheritsList[idx] = "@unchecked Sendable"
             }
         }
+        if finalKind == "actor" {
+            inheritsList = inheritsList.filter { $0 != "Actor" && $0 != "Swift.Actor" }
+        }
         let inheritance = inheritsList.isEmpty ? "" : ": " + inheritsList.joined(separator: ", ")
         
         let typeName = nameOverride ?? name
@@ -796,6 +803,12 @@ class TypeNode {
             inScope.insert("A")
         } else if typeName == "ResourceBundleIdentifier" {
             displayTypeName += "<A: ResourceBundle>"
+            inScope.insert("A")
+        } else if typeName == "MLShapedArray" {
+            displayTypeName += "<A: MLShapedArrayScalar>"
+            inScope.insert("A")
+        } else if typeName == "MLShapedArraySlice" {
+            displayTypeName += "<A: MLShapedArrayScalar>"
             inScope.insert("A")
         } else if typeName == "XPCServiceClientConnection" {
             displayTypeName += "<A: XPCService>"
@@ -949,15 +962,15 @@ class TypeNode {
         // ObjC-bridged types are extended via a Swift extension (not declared as a new class).
         // The extension block is wrapped in sentinel comments so orchestrate.py can strip it
         // from the module-interface compilation phase (which can't use -import-objc-header).
-        if isObjcBridged && actualKind == "class" {
+        if isObjcBridged && finalKind == "class" {
             lines.append("\(indent)// --- ObjC Extension (bridge-header required) ---")
             lines.append("\(indent)extension \(displayTypeName) {")
         } else {
             // NSObject subclasses need `open` so that library-evolution mode generates dispatch
             // thunks (Tj) for overridable/required methods like init?(coder:).
             let isNSObjectSubclass = baseClass == "NSObject"
-            var classVisibility = (actualKind == "class" && isNSObjectSubclass) ? "open" : "public"
-            if actualKind == "class" && classVisibility == "public" && name != "NSObject" {
+            var classVisibility = (finalKind == "class" && isNSObjectSubclass) ? "open" : "public"
+            if finalKind == "class" && classVisibility == "public" && name != "NSObject" {
                 var hasSubclass = false
                 var isNonFinalInTBD = false
                 if let parser = parser {
@@ -992,8 +1005,8 @@ class TypeNode {
                     classVisibility = "final " + classVisibility
                 }
             }
-            let fixedLayoutAttr = (actualKind == "class") ? "@_fixed_layout " : ""
-            lines.append("\(indent)\(fixedLayoutAttr)\(classVisibility) \(actualKind) \(displayTypeName)\(inheritance) {")
+            let fixedLayoutAttr = (finalKind == "class") ? "@_fixed_layout " : ""
+            lines.append("\(indent)\(fixedLayoutAttr)\(classVisibility) \(finalKind) \(displayTypeName)\(inheritance) {")
         }
         
         let nextIndent = indent + "    "
@@ -1033,11 +1046,25 @@ class TypeNode {
             let isOverride: Bool
             switch member {
             case .initializer(let sig):
-                isOverride = baseClass == "NSObject" && sig.starts(with: "init()")
+                if baseClass == "NSObject" && sig.starts(with: "init()") {
+                    isOverride = true
+                } else if baseClass != nil && sig.contains("init(symbol:") && sig.contains("converter:") {
+                    isOverride = true
+                } else {
+                    isOverride = false
+                }
             case .property(let n, _, _, _):
                 isOverride = !isObjcBridged && baseClass == "NSObject" && ["description", "hash", "debugDescription"].contains(n)
-            case .method(let n, _, _):
-                isOverride = !isObjcBridged && baseClass == "NSObject" && ["isEqual"].contains(n)
+            case .method(let n, let sig, let isStatic):
+                if !isObjcBridged && baseClass == "NSObject" && ["isEqual"].contains(n) {
+                    isOverride = true
+                } else if baseClass != nil && n == "baseUnit" {
+                    isOverride = true
+                } else if baseClass == "Foundation.Dimension" && n == "encode" && sig.contains("NSCoder") {
+                    isOverride = true
+                } else {
+                    isOverride = false
+                }
             default:
                 isOverride = false
             }
@@ -1098,7 +1125,10 @@ class TypeNode {
                     if let ca = closeAngle {
                         let inside = String(cleanedSig[cleanedSig.index(after: openAngle)..<ca])
                         for param in inside.components(separatedBy: ",") {
-                            let p = param.trimmingCharacters(in: .whitespaces)
+                            var p = param.trimmingCharacters(in: .whitespaces)
+                            if p.hasPrefix("each ") {
+                                p = String(p.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                            }
                             if !p.isEmpty { initGenericInScope.insert(p) }
                         }
                     }
@@ -1125,6 +1155,43 @@ class TypeNode {
                 }
                 cleanedSig = localCleanScope(cleanedSig)
                 
+                for param in initGenericInScope {
+                    var isPack = false
+                    if let openBracket = cleanedSig.firstIndex(of: "<"),
+                       let closeBracket = cleanedSig.firstIndex(of: ">"),
+                       openBracket < closeBracket {
+                        let bracketContent = String(cleanedSig[openBracket...closeBracket])
+                        if bracketContent.contains("each \(param)") {
+                            isPack = true
+                        }
+                    }
+                    if isPack {
+                        cleanedSig = cleanedSig.replacingOccurrences(of: "<\(param)>", with: "<each \(param)>")
+                        cleanedSig = cleanedSig.replacingOccurrences(of: "<\(param),", with: "<each \(param),")
+                        cleanedSig = cleanedSig.replacingOccurrences(of: ", \(param),", with: ", each \(param),")
+                        cleanedSig = cleanedSig.replacingOccurrences(of: ", \(param)>", with: ", each \(param)>")
+                        cleanedSig = cleanedSig.replacingOccurrences(of: "repeat \(param)", with: "repeat each \(param)")
+                        cleanedSig = cleanedSig.replacingOccurrences(of: "repeat  \(param)", with: "repeat each \(param)")
+                        
+                        if let whereRange = cleanedSig.range(of: " where ") {
+                            let before = String(cleanedSig[..<whereRange.upperBound])
+                            let after = String(cleanedSig[whereRange.upperBound...])
+                            let constraints = after.splitByCommaRespectingBrackets()
+                            var newConstraints = [String]()
+                            for c in constraints {
+                                let trimmed = c.trimmingCharacters(in: .whitespaces)
+                                if trimmed.contains(param) && !trimmed.contains("repeat each \(param)") {
+                                    let replaced = trimmed.replaceWord(param, with: "repeat each \(param)")
+                                    newConstraints.append(replaced)
+                                } else {
+                                    newConstraints.append(c)
+                                }
+                            }
+                            cleanedSig = before + newConstraints.joined(separator: ", ")
+                        }
+                    }
+                }
+                
                 var normalizedSig = cleanedSig
                 if let parser = parser, !parser.defaultModule.isEmpty {
                     normalizedSig = normalizedSig.replacingOccurrences(of: "\(parser.defaultModule).", with: "")
@@ -1137,7 +1204,7 @@ class TypeNode {
                 else if isEnum {
                     lines.append("\(nextIndent)public \(cleanedSig) { fatalError() }")
                 }
-                else if isObjcBridged {
+                else if isObjcBridged && self.kind == "class" {
                     // Swift extension on an ObjC class: use @nonobjc convenience init to produce
                     // the So-prefixed mangled symbols without conflicting with the ObjC -init.
                     lines.append("\(nextIndent)@nonobjc public \(overrideMod)convenience \(cleanedSig) { fatalError() }")
@@ -1163,8 +1230,8 @@ class TypeNode {
                 if n == "rawValue" && isEnum { continue }
                 
                 var cleanT = t
-                // Strip the parent's fully qualified prefix from any nested types
-                cleanT = cleanT.stripParentPrefix(parentName: self.name)
+                let fullEnclosingPath = self.getEnclosingPath().isEmpty ? self.name : self.getEnclosingPath() + "." + self.name
+                cleanT = cleanT.stripParentPrefix(parentName: fullEnclosingPath)
 
                 cleanT = cleanT.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith, defaultModule: parser?.defaultModule ?? "")
                 cleanT = cleanT.replaceWordWithoutGeneric(self.name, with: selfReplaceWith, allowPrecededByDot: false)
@@ -1290,7 +1357,8 @@ class TypeNode {
                 }
 
                 // Strip the parent's fully qualified prefix from any nested types
-                cleanedSig = cleanedSig.stripParentPrefix(parentName: self.name)
+                let fullEnclosingPath = self.getEnclosingPath().isEmpty ? self.name : self.getEnclosingPath() + "." + self.name
+                cleanedSig = cleanedSig.stripParentPrefix(parentName: fullEnclosingPath)
                 
                 cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith, defaultModule: parser?.defaultModule ?? "")
                 cleanedSig = cleanedSig.replaceWordWithoutGeneric(self.name, with: selfReplaceWith, allowPrecededByDot: false)
@@ -1355,7 +1423,10 @@ class TypeNode {
                             beforeWhere = inside
                         }
                         for param in beforeWhere.components(separatedBy: ",") {
-                            let p = param.trimmingCharacters(in: .whitespaces)
+                            var p = param.trimmingCharacters(in: .whitespaces)
+                            if p.hasPrefix("each ") {
+                                p = String(p.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                            }
                             if !p.isEmpty { methodGenericInScope.insert(p) }
                         }
                     }
@@ -1374,6 +1445,43 @@ class TypeNode {
                     }
                     return res
                 }()
+                
+                for param in methodGenericInScope {
+                    var isPack = false
+                    if let openBracket = cleanedSig.firstIndex(of: "<"),
+                       let closeBracket = cleanedSig.firstIndex(of: ">"),
+                       openBracket < closeBracket {
+                        let bracketContent = String(cleanedSig[openBracket...closeBracket])
+                        if bracketContent.contains("each \(param)") {
+                            isPack = true
+                        }
+                    }
+                    if isPack {
+                        cleanedSig = cleanedSig.replacingOccurrences(of: "<\(param)>", with: "<each \(param)>")
+                        cleanedSig = cleanedSig.replacingOccurrences(of: "<\(param),", with: "<each \(param),")
+                        cleanedSig = cleanedSig.replacingOccurrences(of: ", \(param),", with: ", each \(param),")
+                        cleanedSig = cleanedSig.replacingOccurrences(of: ", \(param)>", with: ", each \(param)>")
+                        cleanedSig = cleanedSig.replacingOccurrences(of: "repeat \(param)", with: "repeat each \(param)")
+                        cleanedSig = cleanedSig.replacingOccurrences(of: "repeat  \(param)", with: "repeat each \(param)")
+                        
+                        if let whereRange = cleanedSig.range(of: " where ") {
+                            let before = String(cleanedSig[..<whereRange.upperBound])
+                            let after = String(cleanedSig[whereRange.upperBound...])
+                            let constraints = after.splitByCommaRespectingBrackets()
+                            var newConstraints = [String]()
+                            for c in constraints {
+                                let trimmed = c.trimmingCharacters(in: .whitespaces)
+                                if trimmed.contains(param) && !trimmed.contains("repeat each \(param)") {
+                                    let replaced = trimmed.replaceWord(param, with: "repeat each \(param)")
+                                    newConstraints.append(replaced)
+                                } else {
+                                    newConstraints.append(c)
+                                }
+                            }
+                            cleanedSig = before + newConstraints.joined(separator: ", ")
+                        }
+                    }
+                }
 
                 if cleanN == "==" && (sig.contains(".Type") || sig.contains(".`Type`")) {
                     continue
@@ -1596,19 +1704,56 @@ class TypeNode {
                 lines.append("\(nextIndent)public static func ==(_ lhs: \(leftType), _ rhs: \(rightType)) -> Bool { fatalError() }")
             }
             // RawRepresentable: enums without a primitive raw type need explicit rawValue.
-            // If the enum conforms to RawRepresentable but has no rawType (like NS-bridged enums
-            // with init(rawValue: String)), emit a rawValue property so the conformance compiles.
-            if isEnum && hasConformance("RawRepresentable") && rawType == nil {
+            // If the enum conforms to RawRepresentable but doesn't inherit from a primitive raw type
+            // (like NS-bridged enums or custom RawRepresentable conformances), emit a rawValue property
+            // with type inferred from init(rawValue:).
+            var inheritsFromPrimitiveRawType = false
+            if let raw = rawType {
+                let cleanRaw = raw.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "Swift.", with: "")
+                let validRawTypes: Set<String> = [
+                    "Int", "Int8", "Int16", "Int32", "Int64",
+                    "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
+                    "Double", "Float", "Float16", "String", "Character"
+                ]
+                if validRawTypes.contains(cleanRaw) {
+                    inheritsFromPrimitiveRawType = true
+                }
+            }
+            if isEnum && hasConformance("RawRepresentable") && !inheritsFromPrimitiveRawType {
                 let hasRawValueProp = members.values.contains {
                     if case .property(let pname, _, _, _) = $0, pname == "rawValue" { return true }
                     return false
                 }
-                let hasRawValueInit = members.values.contains {
-                    if case .initializer(let s) = $0, s.contains("rawValue") { return true }
+                var rawValueType = "String"
+                let hasRawValueInit = members.values.contains { member in
+                    if case .initializer(let s) = member, s.contains("rawValue:") {
+                        if let range = s.range(of: "rawValue:") {
+                            let after = s[range.upperBound...]
+                            let scanner = String(after).trimmingCharacters(in: .whitespaces)
+                            var typeStr = ""
+                            var depth = 0
+                            for char in scanner {
+                                if char == "(" || char == "<" {
+                                    depth += 1
+                                } else if char == ")" || char == ">" {
+                                    depth -= 1
+                                    if depth < 0 { break }
+                                } else if char == "," && depth == 0 {
+                                    break
+                                }
+                                typeStr.append(char)
+                            }
+                            let trimmedType = typeStr.trimmingCharacters(in: .whitespaces)
+                            if !trimmedType.isEmpty {
+                                rawValueType = trimmedType
+                                return true
+                            }
+                        }
+                    }
                     return false
                 }
                 if !hasRawValueProp && hasRawValueInit {
-                    lines.append("\(nextIndent)public var rawValue: String { get { fatalError() } }")
+                    lines.append("\(nextIndent)public var rawValue: \(rawValueType) { get { fatalError() } }")
                 }
             }
 
@@ -2085,7 +2230,8 @@ class TypeNode {
                     }
                 case .property(let n, let t, let isReadOnly, let isStatic):
                     var cleanT = t
-                    cleanT = cleanT.stripParentPrefix(parentName: self.name)
+                    let fullEnclosingPath = self.getEnclosingPath().isEmpty ? self.name : self.getEnclosingPath() + "." + self.name
+                    cleanT = cleanT.stripParentPrefix(parentName: fullEnclosingPath)
                     if isProtocol {
                         cleanT = cleanT.replaceWord("A", with: "Self")
                         cleanT = cleanT.replacePlaceholderDotsWithSelf(validAssoc: getAllAssociatedTypes(parser: parser))
@@ -2097,7 +2243,7 @@ class TypeNode {
                     
                     let staticMod = isStatic ? "static " : ""
                     if n == "subscript" || n == "`subscript`" {
-                        extLines.append(renderSubscript(cleanT: cleanT, isProtocol: isProtocol, isReadOnly: isReadOnly, staticMod: staticMod, finalMod: "", overrideMod: "", nextIndent: extNextIndent, inScope: extInScope))
+                        extLines.append(renderSubscript(cleanT: cleanT, isProtocol: isProtocol, isReadOnly: isReadOnly, staticMod: staticMod, finalMod: "", overrideMod: "", nextIndent: extNextIndent, inScope: extInScope, isExtension: true))
                     } else {
                         let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
                         let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
@@ -2173,7 +2319,10 @@ class TypeNode {
                         if let ca = closeAngle {
                             let inside = String(cleanedSig[cleanedSig.index(after: openAngle)..<ca])
                             for param in inside.components(separatedBy: ",") {
-                                let p = param.trimmingCharacters(in: .whitespaces)
+                                var p = param.trimmingCharacters(in: .whitespaces)
+                                if p.hasPrefix("each ") {
+                                    p = String(p.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                                }
                                 if !p.isEmpty { methodGenericInScope.insert(p) }
                             }
                         }
@@ -2196,6 +2345,39 @@ class TypeNode {
                     }
                     cleanedSig = methodCleanScope(cleanedSig)
                     cleanedSig = cleanedSig.removingUnusedMethodGenericParams()
+                    
+                    for param in methodGenericInScope {
+                        var isPack = false
+                        if let openBracket = cleanedSig.firstIndex(of: "<"),
+                           let closeBracket = cleanedSig.firstIndex(of: ">"),
+                           openBracket < closeBracket {
+                            let bracketContent = String(cleanedSig[openBracket...closeBracket])
+                            if bracketContent.contains("each \(param)") {
+                                isPack = true
+                            }
+                        }
+                        if isPack {
+                            cleanedSig = cleanedSig.replacingOccurrences(of: "repeat \(param)", with: "repeat each \(param)")
+                            cleanedSig = cleanedSig.replacingOccurrences(of: "repeat  \(param)", with: "repeat each \(param)")
+                            
+                            if let whereRange = cleanedSig.range(of: " where ") {
+                                let before = String(cleanedSig[..<whereRange.upperBound])
+                                let after = String(cleanedSig[whereRange.upperBound...])
+                                let constraints = after.splitByCommaRespectingBrackets()
+                                var newConstraints = [String]()
+                                for c in constraints {
+                                    let trimmed = c.trimmingCharacters(in: .whitespaces)
+                                    if trimmed.contains(param) && !trimmed.contains("repeat each \(param)") {
+                                        let replaced = trimmed.replaceWord(param, with: "repeat each \(param)")
+                                        newConstraints.append(replaced)
+                                    } else {
+                                        newConstraints.append(c)
+                                    }
+                                }
+                                cleanedSig = before + newConstraints.joined(separator: ", ")
+                            }
+                        }
+                    }
                     
                     let staticMod = isStatic ? "static " : ""
                     if cleanN == "==" && cleanedSig.contains("(") {
@@ -2349,7 +2531,7 @@ class TypeNode {
         return (left, right)
     }
 
-    private func renderSubscript(cleanT: String, isProtocol: Bool, isReadOnly: Bool, staticMod: String, finalMod: String, overrideMod: String, nextIndent: String, inScope: Set<String>) -> String {
+    private func renderSubscript(cleanT: String, isProtocol: Bool, isReadOnly: Bool, staticMod: String, finalMod: String, overrideMod: String, nextIndent: String, inScope: Set<String>, isExtension: Bool = false) -> String {
         var params = cleanT
         var retType = "Any"
         var genericPart = ""
@@ -2444,7 +2626,7 @@ class TypeNode {
             genericPart = "<" + newGps.joined(separator: ", ") + ">"
         }
         
-        if isProtocol {
+        if isProtocol && !isExtension {
             let suffix = isReadOnly ? "{ get }" : "{ get set }"
             return "\(nextIndent)\(staticMod)subscript\(genericPart)\(params) -> \(retType) \(suffix)"
         } else {

@@ -411,7 +411,7 @@ class Parser {
             let parts = demangled.components(separatedBy: " where ")
             if parts.count >= 2 {
                 let whereClause = parts[1]
-                let constraints = whereClause.components(separatedBy: ",")
+                let constraints = whereClause.splitByCommaRespectingBrackets()
                 var nonCopyableParams = Set<String>()
                 var paramProtocols = [String: Set<String>]()
                 
@@ -948,7 +948,7 @@ class Parser {
                             let beforeWhere = String(cleanGenericPart[..<whereRange.lowerBound])
                             let afterWhere = String(cleanGenericPart[whereRange.upperBound...])
                             let clauseBody = afterWhere.hasSuffix(">") ? String(afterWhere.dropLast()) : afterWhere
-                            methodWhereClause = " where " + clauseBody
+                            methodWhereClause = " where " + simplifyType(clauseBody)
                             cleanGenericPart = beforeWhere + ">"
                         }
                         
@@ -1183,7 +1183,7 @@ class Parser {
                             let beforeWhere = String(genericPart[..<whereRange.lowerBound])
                             let afterWhere = String(genericPart[whereRange.upperBound...])
                             let clauseBody = afterWhere.hasSuffix(">") ? String(afterWhere.dropLast()) : afterWhere
-                            methodWhereClause = " where " + clauseBody
+                            methodWhereClause = " where " + simplifyType(clauseBody)
                             genericPart = beforeWhere + ">"
                         }
                         
@@ -1430,31 +1430,28 @@ class Parser {
     }
 
     private func splitPath(_ path: String) -> (String, String) {
-        // Split by '.' only at angle-bracket depth 0 to handle generic types like
-        // "SupportedArgument<A where A: Swift.Equatable>.all"
-        var parts = [String]()
-        var current = ""
         var depth = 0
-        for ch in path {
-            if ch == "<" { depth += 1; current.append(ch) }
-            else if ch == ">" { depth -= 1; current.append(ch) }
+        var idx = path.endIndex
+        while idx > path.startIndex {
+            idx = path.index(before: idx)
+            let ch = path[idx]
+            if ch == ">" { depth += 1 }
+            else if ch == "<" { depth -= 1 }
             else if ch == "." && depth == 0 {
-                parts.append(current)
-                current = ""
-            } else {
-                current.append(ch)
+                if idx > path.startIndex {
+                    let prevIdx = path.index(before: idx)
+                    if path[prevIdx] == "." {
+                        let memberName = String(path[idx...])
+                        let typeName = String(path[..<prevIdx])
+                        return (typeName, memberName)
+                    }
+                }
+                let memberName = String(path[path.index(after: idx)...])
+                let typeName = String(path[..<idx])
+                return (typeName, memberName)
             }
         }
-        if !current.isEmpty { parts.append(current) }
-        if parts.isEmpty {
-            return (defaultModule, "")
-        }
-        if parts.count == 1 {
-            return (defaultModule, parts[0])
-        }
-        let memberName = parts.last!
-        let typeName = parts.dropLast().joined(separator: ".")
-        return (typeName, memberName)
+        return (defaultModule, path)
     }
 
     private func cleanType(_ name: String) -> String {
@@ -1530,14 +1527,45 @@ class Parser {
         return result
     }
 
+    func isNestedTypeName(_ name: String, in node: TypeNode) -> Bool {
+        if node.name == name { return true }
+        for child in node.nestedTypes.values {
+            if isNestedTypeName(name, in: child) { return true }
+        }
+        return false
+    }
+    
+    func isTypeDefinedInFramework(_ name: String) -> Bool {
+        guard let moduleNode = modules[defaultModule] else { return false }
+        for child in moduleNode.nestedTypes.values {
+            if isNestedTypeName(name, in: child) { return true }
+        }
+        return false
+    }
+
     func simplifyType(_ type: String, parentName: String? = nil, isMethodSignature: Bool = false, memberName: String? = nil) -> String {
         var t = Parser.fixInlineArrayValGenerics(type)
+        if isMethodSignature && memberName == "baseUnit" {
+            if let range = t.range(of: "->") {
+                t = String(t[..<range.lowerBound]) + "-> Self"
+            }
+        }
         t = t.replacingOccurrences(of: "CVBufferRef", with: "CVBuffer")
         t = t.replaceWord("Decoder", with: "Swift.Decoder", allowPrecededByDot: false)
         t = t.replaceWord("Encoder", with: "Swift.Encoder", allowPrecededByDot: false)
+        t = t.replaceWord("FormatStyle", with: "Foundation.FormatStyle", allowPrecededByDot: false)
+        t = t.replaceWord("Slice", with: "Swift.Slice", allowPrecededByDot: false)
         t = t.replacingOccurrences(of: "any (Swift\\.)?AsyncSequence<[^>]+>", with: "any AsyncSequence", options: .regularExpression)
         t = t.replacingOccurrences(of: "\\(extension in [^)]+\\):", with: "", options: .regularExpression)
         
+        // Simplify protocol-qualified associated type paths from the demangler
+        // (e.g. A.Swift.BinaryFloatingPoint.RawSignificand -> A.RawSignificand)
+        let protoPattern = "(?:BinaryFloatingPoint|RawRepresentable|Collection|Publisher|Subscriber|Sequence|RangeExpression|Scheduler|MLTensorScalar|MLTensorRangeExpression|MutableCollection|RandomAccessCollection|BidirectionalCollection|Numeric|Equatable|Hashable|Comparable|Identifiable|Codable|Decodable|Encodable|Sendable|Error)"
+        t = t.replacingOccurrences(
+            of: "\\b(Self|[A-Z][0-9]?)((?:\\.[A-Za-z0-9_]+)*)\\.\(protoPattern)\\.([A-Za-z0-9_]+)\\b",
+            with: "$1$2.$3",
+            options: .regularExpression
+        )
 
         // For each discovered protocol, add 'any' prefix when used as an existential type.
         // Track which ones are "ambiguous" (also have a concrete type with the same short name)
@@ -1637,7 +1665,31 @@ class Parser {
                     if !systemModules.contains(word) {
                         referencedModules.insert(word)
                     } else {
-                        t = t.replaceWordDot(word, with: "")
+                        var shouldStrip = true
+                        let dotTarget = word + "."
+                        if t.contains(dotTarget) {
+                            var startSearch = t.startIndex
+                            while let range = t.range(of: dotTarget, range: startSearch..<t.endIndex) {
+                                let afterDot = range.upperBound
+                                var endIdx = afterDot
+                                while endIdx < t.endIndex && (t[endIdx].isLetter || t[endIdx].isNumber || t[endIdx] == "_") {
+                                    endIdx = t.index(after: endIdx)
+                                }
+                                let qualifiedType = String(t[afterDot..<endIdx])
+                                if ["FormatStyle", "Slice", "Decoder", "Encoder"].contains(qualifiedType) {
+                                    shouldStrip = false
+                                    break
+                                }
+                                if !qualifiedType.isEmpty && isTypeDefinedInFramework(qualifiedType) {
+                                    shouldStrip = false
+                                    break
+                                }
+                                startSearch = range.upperBound
+                            }
+                        }
+                        if shouldStrip {
+                            t = t.replaceWordDot(word, with: "")
+                        }
                         referencedModules.insert(word)
                     }
                 }
@@ -2045,6 +2097,18 @@ class Parser {
     }
 
     func applyTypeFixups() {
+        if defaultModule == "MetricKit" {
+            if let node = modules["MetricKit"]?.nestedTypes["AveragePixelLuminance"] {
+                node.baseClass = "Foundation.Dimension"
+            }
+        }
+
+        if defaultModule == "Network" {
+            if let node = modules["Network"]?.nestedTypes["ActorSystemError"] {
+                node.conformances.remove("Distributed.DistributedActorSystemError")
+                node.conformances.remove("DistributedActorSystemError")
+            }
+        }
 
         if defaultModule == "ModelCatalog" {
             // Fix VisionModelBase
@@ -2518,7 +2582,11 @@ class Parser {
                 }
             }
             if !isDefined {
-                for ns in discoveredNamespaces {
+                var searchModules = discoveredNamespaces
+                for rm in referencedModules {
+                    searchModules.insert(rm)
+                }
+                for ns in searchModules {
                     if ns != defaultModule && isModuleAvailable(ns) {
                         if isTypeDefinedInFramework(module: ns, typeName: type) {
                             isDefined = true

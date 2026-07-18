@@ -109,7 +109,10 @@ struct SwiftInterfaceGen {
                 var headerLines = ["#import <Foundation/Foundation.h>"]
                 var implLines = ["#import \"\(currentModule)Interface_bridge.h\""]
                 for t in bridgedTypes {
-                    let actualKind = t.kind == "unknown" ? "struct" : t.kind
+                    var actualKind = t.kind == "unknown" ? "struct" : t.kind
+                    if t.name == "MLModelStructure" {
+                        actualKind = "class"
+                    }
                     if actualKind == "class" {
                         headerLines.append("@interface \(t.name) : NSObject")
                         headerLines.append("@end")
@@ -121,7 +124,29 @@ struct SwiftInterfaceGen {
                         headerLines.append("};")
                     }
                 }
-                let bridgeHeader = headerLines.joined(separator: "\n") + "\n"
+                var bridgeHeader = headerLines.joined(separator: "\n") + "\n"
+                if currentModule == "CoreML" {
+                    bridgeHeader += """
+@interface MLBatchProvider : NSObject
+@end
+@interface MLComputeDeviceProtocol : NSObject
+@end
+@interface MLFeatureProvider : NSObject
+@end
+typedef NS_ENUM(NSInteger, MLComputeUnits) {
+    MLComputeUnitsAll = 0
+};
+typedef NS_ENUM(NSInteger, MLFeatureType) {
+    MLFeatureTypeInvalid = 0
+};
+typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
+    MLMultiArrayDataTypeDouble = 0
+};
+@interface MLModelCollection : NSObject
+@end
+
+"""
+                }
                 let bridgeImpl   = implLines.joined(separator: "\n")   + "\n"
                 try? bridgeHeader.write(toFile: "\(currentModule)Interface_bridge.h", atomically: true, encoding: .utf8)
                 try? bridgeImpl.write(toFile:   "\(currentModule)Interface_bridge.m", atomically: true, encoding: .utf8)
@@ -419,8 +444,10 @@ struct SwiftInterfaceGen {
             if node.kind == "unknown" {
                 parser.setKind("class", for: node)
                 node.baseClass = nsUnitSubclasses.contains(objcClass) ? "NSUnit" : "NSObject"
+                node.isObjcBridged = true
+            } else if node.kind == "class" {
+                node.isObjcBridged = true
             }
-            node.isObjcBridged = true
         }
         
         // Special case: UAFSubscriptionDownloadStatus is an ObjC enum in UnifiedAssetFramework.
@@ -712,6 +739,14 @@ struct SwiftInterfaceGen {
 
     static func postProcess(_ code: String, parser: Parser) -> String {
         var c = code
+        // Shield conflict-prone system types from prefix-stripping in postProcess
+        c = c.replacingOccurrences(of: "Foundation.FormatStyle", with: "___FOUNDATION_SHIELDED_FormatStyle___")
+        c = c.replacingOccurrences(of: "Swift.Slice", with: "___SWIFT_SHIELDED_Slice___")
+        
+        // Remove DistributedActorSystemError from conformances
+        c = c.replacingOccurrences(of: ", Distributed.DistributedActorSystemError", with: "")
+        c = c.replacingOccurrences(of: ": Distributed.DistributedActorSystemError", with: ":")
+        
         c = c.replacingOccurrences(of: "OS_dispatch_queue", with: "DispatchQueue")
         // Remove redundant current module prefix to avoid self-referencing, and ObjectiveC.
         c = c.replacingOccurrences(of: "\(parser.defaultModule).", with: "")
@@ -797,6 +832,7 @@ struct SwiftInterfaceGen {
         c = c.replacingOccurrences(of: "NSBundle", with: "Bundle")
         c = c.replacingOccurrences(of: "OS_os_log", with: "OSLog")
         c = c.replacingOccurrences(of: "NSUnitConverter", with: "UnitConverter")
+        c = c.replacingOccurrences(of: "NSProgress", with: "Progress")
         c = c.replaceWord("NSDecimal", with: "Decimal")
         c = c.replaceWord("CGImageRef", with: "CGImage")
         c = c.replaceWord("CGMutablePathRef", with: "CGMutablePath")
@@ -962,6 +998,20 @@ struct SwiftInterfaceGen {
             c = regex.stringByReplacingMatches(
                 in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
         }
+        
+        // Fix: `where Any: Protocol` — conformance constraints with `Any` on LHS are invalid.
+        if let regex = try? NSRegularExpression(pattern: ",\\s*Any\\s*:\\s*[^,{}>)\\n]+", options: []) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
+        }
+        if let regex = try? NSRegularExpression(pattern: "\\bAny\\s*:\\s*[^,{}>)\\n]+,\\s*", options: []) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
+        }
+        if let regex = try? NSRegularExpression(pattern: "where\\s+Any\\s*:\\s*[^{>)\\n]+", options: []) {
+            c = regex.stringByReplacingMatches(
+                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
+        }
 
         // Fix: `where T: any Protocol` — `any` in conformance constraints is invalid;
         // remove `any` from constraint positions in where clauses.
@@ -1069,6 +1119,64 @@ struct SwiftInterfaceGen {
             }
         }
 
+        // Fix: StoreKit `StoreProductManager` is declared as an actor but Swift 6 strict
+        // concurrency emits a [#ConformanceIsolation] error for explicit Actor conformance.
+        // Convert it to a final class with @unchecked Sendable for compilation purposes.
+        if parser.defaultModule == "StoreKit" {
+            c = c.replacingOccurrences(of: "public actor StoreProductManager",
+                                        with: "public final class StoreProductManager: @unchecked Sendable")
+        }
+
+        // Fix: Network framework has many internal protocol conformances (NetworkProtocolOptions,
+        // BottomProtocolHandler, LowerProtocolHandler, OutboundDatagramHandler, etc.) that require
+        // associated types our stubs cannot satisfy. Strip these conformances from inheritance lists.
+        // Also strip `where Self: ~Copyable` protocol extension constraints which are invalid
+        // in Swift 6 standard compilation (Copyable is the default).
+        if parser.defaultModule == "Network" {
+            let networkConformancesToStrip: Set<String> = [
+                "NetworkProtocolOptions", "BottomProtocolHandler", "LowerProtocolHandler",
+                "OutboundDatagramHandler", "OutboundStreamHandler",
+            ]
+            // Process line by line: for type declaration lines (struct/class/protocol/enum/actor),
+            // strip only the problematic conformances from the inheritance list (after the colon).
+            let networkLines = c.components(separatedBy: "\n")
+            var networkFixed = [String]()
+            let typeHeaderRegex = try? NSRegularExpression(
+                pattern: "^(\\s*(?:public|open|@_fixed_layout\\s+public|@_fixed_layout\\s+open)\\s+(?:final\\s+)?(?:struct|class|protocol|enum|actor|extension)\\s+\\S+)(:)(.*?)( \\{|$)", options: [])
+            for line in networkLines {
+                var fixedLine = line
+                if let regex = typeHeaderRegex,
+                   let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) {
+                    // Extract the part before the colon, the inheritance list, and the trailing brace
+                    if let prefixRange = Range(match.range(at: 1), in: line),
+                       let colonRange = Range(match.range(at: 2), in: line),
+                       let listRange = Range(match.range(at: 3), in: line),
+                       let suffixRange = Range(match.range(at: 4), in: line) {
+                        let prefix = String(line[prefixRange])
+                        let list = String(line[listRange])
+                        let suffix = String(line[suffixRange])
+                        // Parse the conformance list and remove the problematic ones
+                        var conformances = list.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                        conformances.removeAll { networkConformancesToStrip.contains($0) }
+                        if conformances.isEmpty {
+                            fixedLine = prefix + suffix
+                        } else {
+                            fixedLine = prefix + ": " + conformances.joined(separator: ", ") + suffix
+                        }
+                        _ = colonRange // suppress warning
+                    }
+                }
+                networkFixed.append(fixedLine)
+            }
+            c = networkFixed.joined(separator: "\n")
+            // Strip `where Self: ~Copyable` extensions (not valid in standard Swift 6 mode)
+            if let regex = try? NSRegularExpression(
+                pattern: "extension\\s+\\S+\\s+where\\s+Self\\s*:\\s*~Copyable\\s*\\{[^}]*\\}", options: [.dotMatchesLineSeparators]) {
+                c = regex.stringByReplacingMatches(
+                    in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
+            }
+        }
+
         // Fix: MetricKit `AverageStatistics<A>` and `Histogram<A>` require `A: Unit`
         // (they wrap Measurement<A> which has that constraint). The generic structs are
         // emitted without the constraint because it's not visible from the TBD alone.
@@ -1086,6 +1194,18 @@ struct SwiftInterfaceGen {
                     in: c, range: NSRange(c.startIndex..<c.endIndex, in: c),
                     withTemplate: "open class SignalBars: Foundation.Dimension")
             }
+            // Foundation.Dimension already conforms to NSCoding, so remove the redundant
+            // NSCoding conformance from SignalBars's inheritance list.
+            c = c.replacingOccurrences(of: "open class SignalBars: Foundation.Dimension, NSCoding",
+                                        with: "open class SignalBars: Foundation.Dimension")
+            // After substituting Dimension as parent, encode(with:) is now an override of
+            // Foundation.Dimension's NSCoding conformance — mark it accordingly.
+            c = c.replacingOccurrences(of: "open func encode(with coder: NSCoder) {}",
+                                        with: "open override func encode(with coder: NSCoder) {}")
+            // required init?(coder:) must call super.init(coder:) since Foundation.Dimension
+            // is the new base class and its designated initializers must be called.
+            c = c.replacingOccurrences(of: "public required init?(coder: NSCoder) {}",
+                                        with: "public required init?(coder: NSCoder) { super.init(coder: coder) }")
         }
 
         // Note: UnsafeArrayPointer/UnsafeMutableArrayPointer family are kept generic —
@@ -1282,6 +1402,48 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c += "    public var metadataURL: URL { get { fatalError() } }\n"
             c += "}\n"
         }
+        
+        if parser.defaultModule == "Network" {
+            // Fix Swift 3 renamed types used in __C_ typealiases
+            c = c.replacingOccurrences(of: "NSURLSessionTask", with: "URLSessionTask")
+            c = c.replacingOccurrences(of: "NSURLSessionConfiguration", with: "URLSessionConfiguration")
+            c = c.replacingOccurrences(of: "OS_dispatch_data", with: "__DispatchData")
+            c += """
+            
+            // --- Auto-generated stubs for C/system types ---
+            public class OS_nw_application_id {}
+            public class OS_nw_array {}
+            public class OS_nw_browse_descriptor {}
+            public class OS_nw_connection {}
+            public class OS_nw_connection_group {}
+            public class OS_nw_connection_progress_report {}
+            public class OS_nw_content_context {}
+            public class OS_nw_context {}
+            public class OS_nw_endpoint {}
+            public class OS_nw_error {}
+            public class OS_nw_frame {}
+            public class OS_nw_group_descriptor {}
+            public class OS_nw_interface {}
+            public class OS_nw_listener {}
+            public class OS_nw_parameters {}
+            public class OS_nw_path {}
+            public class OS_nw_path_monitor {}
+            public class OS_nw_protocol_definition {}
+            public class OS_nw_protocol_metadata {}
+            public class OS_nw_protocol_options {}
+            public class OS_nw_proxy_config {}
+            public class OS_nw_txt_record {}
+            public class OS_sec_identity {}
+            public class OS_sec_protocol_metadata {}
+            public class OS_sec_protocol_options {}
+            public class OS_sec_trust {}
+            public struct ether_addr {}
+            public struct tls_ciphersuite_group_t {}
+            public struct tls_ciphersuite_t {}
+            public struct tls_protocol_version_t {}
+            
+            """
+        }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
         if !sentinelSource.isEmpty {
@@ -1290,6 +1452,32 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
         }
         c = c.fixResultAndEmptyFailureTypes()
         c = c.removePrivateObjCTypeReferences()
+        // Restore shielded system types
+        c = c.replacingOccurrences(of: "___FOUNDATION_SHIELDED_FormatStyle___", with: "Foundation.FormatStyle")
+        c = c.replacingOccurrences(of: "___SWIFT_SHIELDED_Slice___", with: "Swift.Slice")
+        
+        c = c.replacingOccurrences(of: "Darwin.POSIXErrorCode", with: "POSIXErrorCode")
+        
+        // Remove duplicate top-level free function declarations that arise when overlapping
+        // `where Any: Protocol` constraints are stripped, leaving identical signatures.
+        // Only targets non-indented lines (top-level scope) to avoid removing indented methods.
+        let declLines = c.components(separatedBy: "\n")
+        var seenDecls = Set<String>()
+        var cleanedLines = [String]()
+        for line in declLines {
+            let isTopLevel = !line.hasPrefix(" ") && !line.hasPrefix("\t")
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if isTopLevel && (trimmed.hasPrefix("public func ") || trimmed.hasPrefix("open func ")) {
+                let normalized = trimmed.replacingOccurrences(of: " ", with: "")
+                if seenDecls.contains(normalized) {
+                    continue
+                }
+                seenDecls.insert(normalized)
+            }
+            cleanedLines.append(line)
+        }
+        c = cleanedLines.joined(separator: "\n")
+        
         return c
     }
 
