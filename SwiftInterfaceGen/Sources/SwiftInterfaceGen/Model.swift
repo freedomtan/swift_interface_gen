@@ -1020,7 +1020,22 @@ class TypeNode {
             }
         }
         
-        let sortedMembers = members.values.sorted(by: {
+        // ContiguousBytes.withUnsafeBytes is declared `rethrows`; the ABI sometimes exposes a
+        // spurious `throws`-only overload for it (its actual witness in the real module has no
+        // separate throws-only entry) which can't coexist with the synthesized rethrows fallback
+        // below — drop it so only the rethrows-conforming version is emitted.
+        let membersFilteredForContiguousBytes: [MemberKind]
+        if hasConformance("ContiguousBytes") {
+            membersFilteredForContiguousBytes = members.values.filter {
+                if case .method(let n, let sig, _) = $0 {
+                    return !((n == "withUnsafeBytes" || n.hasPrefix("withUnsafeBytes<")) && !sig.contains("rethrows"))
+                }
+                return true
+            }
+        } else {
+            membersFilteredForContiguousBytes = Array(members.values)
+        }
+        let sortedMembers = membersFilteredForContiguousBytes.sorted(by: {
             switch ($0, $1) {
             case (.enumCase(let n1, _, _), .enumCase(let n2, _, _)): return n1 < n2
             case (.enumCase(_, _, _), _): return true
@@ -1764,6 +1779,23 @@ class TypeNode {
             }
             if hasConformance("CustomStringConvertible") && !hasDescriptionProperty() {
                 lines.append("\(nextIndent)public var description: String { get { return \"\" } }")
+            }
+            // ContiguousBytes requires `withUnsafeBytes<R>(_:) rethrows -> R`, which CryptoKit's
+            // conforming types (Nonce/Digest/SymmetricKey/etc.) never declare explicitly in their
+            // own ABI-visible members — the real implementation is presumably synthesized from a
+            // stored buffer. Emit a fatalError() stub purely for compile-time conformance.
+            // ContiguousBytes.withUnsafeBytes is declared `rethrows`; a witness declared
+            // `throws` (as several CryptoKit types' own ABI-visible overload is) doesn't satisfy
+            // a `rethrows` requirement, so the exact-effect overload must always be present
+            // alongside any throws-only overload already emitted from real ABI symbols.
+            let hasRethrowingWithUnsafeBytes = self.members.values.contains {
+                if case .method(let n, let sig, _) = $0 {
+                    return (n == "withUnsafeBytes" || n.hasPrefix("withUnsafeBytes<")) && sig.contains("rethrows")
+                }
+                return false
+            }
+            if hasConformance("ContiguousBytes") && !hasRethrowingWithUnsafeBytes {
+                lines.append("\(nextIndent)public func withUnsafeBytes<R>(_ body: (UnsafeRawBufferPointer) throws -> R) rethrows -> R { fatalError() }")
             }
             // NSCoding: open classes that NSObject subclasses need required init?(coder:) and encode(with:)
             // so that library-evolution dispatch thunks (Tj) are generated.

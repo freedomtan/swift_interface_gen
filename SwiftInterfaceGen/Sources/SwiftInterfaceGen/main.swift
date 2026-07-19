@@ -184,6 +184,7 @@ typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
         if code.contains("AVFoundation.") || code.contains("AVAudio") || code.contains("AVVideo") { imports.insert("AVFoundation") }
         if code.contains("CoreLocation.") || code.contains("CLLocation") { imports.insert("CoreLocation") }
         if code.contains("UAF") && currentModule != "UnifiedAssetFramework" { imports.insert("UnifiedAssetFramework") }
+        if code.contains("LAContext") { imports.insert("LocalAuthentication") }
         
         for mod in parser.discoveredNamespaces {
             let pattern = "(?:^|[^.])\\b\(NSRegularExpression.escapedPattern(for: mod))\\."
@@ -838,6 +839,89 @@ typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
         c = c.replaceWord("NSNotificationName", with: "NSNotification.Name")
         c = c.replaceWord("NSUndoManager", with: "UndoManager")
         c = c.replaceWord("NSValueTransformer", with: "ValueTransformer")
+        c = c.replaceWord("SecKeyRef", with: "SecKey")
+        c = c.replaceWord("SecAccessControlRef", with: "SecAccessControl")
+
+        // Fix: CryptoKit's HKDF is actually generic (`struct HKDF<H> where H: HashFunction`),
+        // but no ABI symbol ever applies a generic argument directly to the type itself (only
+        // indirectly, via `extract`'s return type `HashedAuthenticationCode<H>`), so our
+        // generic-parameter discovery pass never marks it generic. `extract`'s two overloads
+        // reference the never-declared bare `HashedAuthenticationCode<GenericA>`/
+        // `HashedAuthenticationCode<A>` — one wrongly reusing the method's own DataProtocol
+        // placeholder, the other referencing an undeclared struct-scope `A`. Make HKDF generic
+        // and fix both `extract` overloads to return `HashedAuthenticationCode` parameterized by
+        // HKDF's own generic parameter, matching the real module.
+        if parser.defaultModule == "CryptoKit" {
+            c = c.replacingOccurrences(
+                of: "public struct HKDF: Codable, Hashable, @unchecked Sendable {",
+                with: "public struct HKDF<A>: Codable, Hashable, @unchecked Sendable where A: HashFunction {")
+            c = c.replacingOccurrences(
+                of: "public static func extract<GenericA>(inputKeyMaterial: SymmetricKey, salt: GenericA?) -> HashedAuthenticationCode<GenericA> where GenericA: DataProtocol { fatalError() }",
+                with: "public static func extract<GenericA>(inputKeyMaterial: SymmetricKey, salt: GenericA?) -> HashedAuthenticationCode<A> where GenericA: DataProtocol { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public static func extract(inputKeyMaterial: SymmetricKey, salt: borrowing RawSpan?) -> HashedAuthenticationCode<A> { fatalError() }",
+                with: "public static func extract(inputKeyMaterial: SymmetricKey, salt: borrowing RawSpan?) -> HashedAuthenticationCode<A> { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public static func ==(_ lhs: HKDF, _ rhs: HKDF) -> Bool { fatalError() }",
+                with: "public static func ==(_ lhs: HKDF<A>, _ rhs: HKDF<A>) -> Bool { fatalError() }")
+            // `SecureEnclave.P256`/`.P384`/`.P521`/`.Curve` are distinct nested enums that shadow
+            // the top-level `P256`/`P384`/`P521`/`Curve` types of the same name. Bare references
+            // like `P256.KeyAgreement.PublicKey` written inside SecureEnclave's own nested types
+            // resolve to the *enclosing* SecureEnclave.P256 (which has no such nested member)
+            // instead of the top-level type the real module actually means. Fully qualify with
+            // the module name (unambiguous everywhere, including outside SecureEnclave) so name
+            // lookup can't shadow it.
+            for curve in ["P256", "P384", "P521", "Curve"] {
+                c = c.replacingOccurrences(of: "\(curve).KeyAgreement.PublicKey", with: "CryptoKit.\(curve).KeyAgreement.PublicKey")
+                c = c.replacingOccurrences(of: "\(curve).Signing.ECDSASignature", with: "CryptoKit.\(curve).Signing.ECDSASignature")
+                c = c.replacingOccurrences(of: "\(curve).Signing.PublicKey", with: "CryptoKit.\(curve).Signing.PublicKey")
+            }
+            // Same shadowing issue for the post-quantum key types nested under SecureEnclave.
+            for pqType in ["MLDSA65", "MLDSA87", "MLKEM1024", "MLKEM768"] {
+                c = c.replacingOccurrences(of: "\(pqType).PublicKey", with: "CryptoKit.\(pqType).PublicKey")
+            }
+            // CorecryptoSupportedNISTCurve/CorecryptoSupportedMLKEMKEM are internal-only
+            // conformances (present as ABI witness-table symbols in the TBD, but never declared
+            // in the real public .swiftinterface) whose associated-type requirements (H,
+            // curveType, etc.) can't be satisfied from public API alone — drop them.
+            c = c.replacingOccurrences(of: "public enum P256: CorecryptoSupportedNISTCurve {",
+                                        with: "public enum P256 {")
+            c = c.replacingOccurrences(of: "public enum P384: CorecryptoSupportedNISTCurve {",
+                                        with: "public enum P384 {")
+            c = c.replacingOccurrences(of: "public enum P521: CorecryptoSupportedNISTCurve {",
+                                        with: "public enum P521 {")
+            c = c.replacingOccurrences(of: "public enum MLKEM1024: CorecryptoSupportedMLKEMKEM {",
+                                        with: "public enum MLKEM1024 {")
+            c = c.replacingOccurrences(of: "public enum MLKEM768: CorecryptoSupportedMLKEMKEM {",
+                                        with: "public enum MLKEM768 {")
+            // HPKEDiffieHellmanPublicKey requires `associatedtype EphemeralPrivateKey:
+            // HPKEDiffieHellmanPrivateKeyGeneration where Self == Self.EphemeralPrivateKey.PublicKey`.
+            // The sibling `KeyAgreement.PrivateKey` in the same nested scope satisfies the
+            // where-clause (its own `publicKey` property already returns this exact PublicKey
+            // type), but the compiler can't infer that witness purely from context — every
+            // curve's `KeyAgreement.PublicKey` struct has this identical declaration line, so a
+            // single global replace adds the associated-type alias for all of them at once.
+            c = c.replacingOccurrences(
+                of: "public struct PublicKey: HPKEDiffieHellmanPublicKey, HPKEPublicKeySerialization {",
+                with: "public struct PublicKey: HPKEDiffieHellmanPublicKey, HPKEPublicKeySerialization {\n            public typealias EphemeralPrivateKey = PrivateKey")
+            // Same associated-type-inference gap as HPKEDiffieHellmanPublicKey above, but for
+            // HPKEKEMPublicKey (XWingMLKEM768X's sibling PrivateKey/PublicKey pair).
+            c = c.replacingOccurrences(
+                of: "public struct PublicKey: HPKEKEMPublicKey, HPKEPublicKeySerialization, KEMPublicKey {",
+                with: "public struct PublicKey: HPKEKEMPublicKey, HPKEPublicKeySerialization, KEMPublicKey {\n        public typealias EphemeralPrivateKey = PrivateKey")
+            // HashFunction's `associatedtype Digest: Digest` shadows the bound protocol with the
+            // associated type's own name — qualify the bound with the module name.
+            c = c.replacingOccurrences(of: "associatedtype Digest: Digest", with: "associatedtype Digest: CryptoKit.Digest")
+        }
+
+        // Fix: CryptoKit's Digest/MessageAuthenticationCode `==<A1>(_ arg1: Any, _ arg2: A1)`
+        // is a mis-demangled `==<A1>(Self, A1)` — the demangler's first parameter loses its
+        // Self-typed identity and gets simplified down to the generic-placeholder fallback
+        // `Any`, but a `==` overload defined in a protocol extension must have at least one
+        // parameter of the exact type `Self`.
+        c = c.replacingOccurrences(
+            of: "public static func ==<A1>(_ arg1: Any, _ arg2: A1) -> Swift.Bool where A1: DataProtocol { fatalError() }",
+            with: "public static func ==<A1>(_ arg1: Self, _ arg2: A1) -> Swift.Bool where A1: DataProtocol { fatalError() }")
         c = c.replaceWord("NSDecimal", with: "Decimal")
         c = c.replaceWord("CGImageRef", with: "CGImage")
         c = c.replaceWord("CGMutablePathRef", with: "CGMutablePath")
