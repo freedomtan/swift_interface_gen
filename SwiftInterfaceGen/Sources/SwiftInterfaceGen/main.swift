@@ -833,6 +833,11 @@ typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
         c = c.replacingOccurrences(of: "OS_os_log", with: "OSLog")
         c = c.replacingOccurrences(of: "NSUnitConverter", with: "UnitConverter")
         c = c.replacingOccurrences(of: "NSProgress", with: "Progress")
+        c = c.replaceWord("NSComparisonResult", with: "ComparisonResult")
+        c = c.replaceWord("NSFileProtectionType", with: "FileProtectionType")
+        c = c.replaceWord("NSNotificationName", with: "NSNotification.Name")
+        c = c.replaceWord("NSUndoManager", with: "UndoManager")
+        c = c.replaceWord("NSValueTransformer", with: "ValueTransformer")
         c = c.replaceWord("NSDecimal", with: "Decimal")
         c = c.replaceWord("CGImageRef", with: "CGImage")
         c = c.replaceWord("CGMutablePathRef", with: "CGMutablePath")
@@ -1208,6 +1213,71 @@ typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
                                         with: "public required init?(coder: NSCoder) { super.init(coder: coder) }")
         }
 
+        // Fix: SwiftData's DefaultHistoryDelete<A>/DefaultHistoryInsert<A>/DefaultHistoryUpdate<A>
+        // conform to HistoryDelete/HistoryInsert/HistoryUpdate via their own generic parameter
+        // (associatedtype Model: PersistentModel), matching the real module's
+        // `where Model : PersistentModel` constraint. The ABI doesn't reveal this bound, so add
+        // it explicitly and provide the associated-type alias the same way TipKit's RuleInput fix
+        // does for Event<A>/Parameter<A>.
+        if parser.defaultModule == "SwiftData" {
+            for historyType in ["DefaultHistoryDelete", "DefaultHistoryInsert", "DefaultHistoryUpdate"] {
+                let protoName = historyType.replacingOccurrences(of: "Default", with: "")
+                c = c.replacingOccurrences(
+                    of: "public struct \(historyType)<A>: \(protoName) {",
+                    with: "public struct \(historyType)<A>: \(protoName) where A: PersistentModel {\n    public typealias Model = A")
+            }
+            // DataStoreConfiguration requires `associatedtype Store: DataStore where Self ==
+            // Self.Store.Configuration`, and DataStore requires `where Self ==
+            // Self.Configuration.Store` — a mutually-referential pair the compiler can only
+            // resolve if both sides declare the typealias explicitly (DefaultStore's own
+            // Configuration is inferred fine from its init(_:migrationPlan:) witness, but
+            // ModelConfiguration.Store has no witness to infer from).
+            c = c.replacingOccurrences(
+                of: "public struct ModelConfiguration: CustomDebugStringConvertible, DataStoreConfiguration, Hashable, Identifiable {",
+                with: "public struct ModelConfiguration: CustomDebugStringConvertible, DataStoreConfiguration, Hashable, Identifiable {\n    public typealias Store = DefaultStore")
+            // ResultsSection<Element, SectionName> conforms to Identifiable via `id: SectionName`
+            // (its own second generic parameter), not the AnyObject-only default `id:
+            // ObjectIdentifier`. The generated `id` property already returns `B`; the missing
+            // piece is telling the compiler ResultsSection.ID is B, not the ambiguous default.
+            // Identifiable.ID requires Hashable, so B needs that bound too (the real module
+            // constrains SectionName: Swift.Hashable).
+            c = c.replacingOccurrences(
+                of: "public struct ResultsSection<A, B>: BidirectionalCollection, Collection, Identifiable, RandomAccessCollection, Sequence {",
+                with: "public struct ResultsSection<A, B>: BidirectionalCollection, Collection, Identifiable, RandomAccessCollection, Sequence where B: Hashable {\n    public typealias ID = B")
+            c = c.replacingOccurrences(
+                of: "public struct ResultsSectionCollection<A, B>: BidirectionalCollection, Collection, RandomAccessCollection, Sequence {",
+                with: "public struct ResultsSectionCollection<A, B>: BidirectionalCollection, Collection, RandomAccessCollection, Sequence where B: Hashable {")
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout final public class ResultsObserver<A, B>: CustomDebugStringConvertible, Observation.Observable {",
+                with: "@_fixed_layout final public class ResultsObserver<A, B>: CustomDebugStringConvertible, Observation.Observable where B: Hashable {")
+            // `_computeSections`'s real constraint is `A == B.Element` (A is B's element type),
+            // but replaceGenericPlaceholderPathsWithAny (applied generically to all top-level
+            // global function signatures) erases "B.Element" to "Any" since it can't distinguish
+            // a meaningful associated-type reference on a generic parameter from an unresolvable
+            // demangler placeholder path — producing the self-contradictory "A == Any, A:
+            // PersistentModel". Restore the real constraint.
+            c = c.replacingOccurrences(
+                of: "where A: PersistentModel, A == Any, B: RandomAccessCollection, C: Hashable",
+                with: "where A: PersistentModel, A == B.Element, B: RandomAccessCollection, C: Hashable")
+            // DefaultSerialModelExecutor is non-final but must conform to Sendable (required by
+            // SerialExecutor/Executor); the real class declares this via `@unchecked Sendable`.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class DefaultSerialModelExecutor: Executor, ModelExecutor, SerialExecutor, SerialModelExecutor {",
+                with: "@_fixed_layout public class DefaultSerialModelExecutor: Executor, ModelExecutor, SerialExecutor, SerialModelExecutor, @unchecked Sendable {")
+            // Schema.Index<T>'s nested `Types` enum is itself generic (`enum Types<P> where P:
+            // PersistentModel`) in the real module, but our generic-discovery pass never sees a
+            // usage that would mark it generic (it's only ever referenced as `Index<T>.Types<T>`,
+            // matching the outer class's own parameter), so it's emitted as a plain non-generic
+            // enum while still being *referenced* with a `<A1>` argument. Make the declaration
+            // generic to match its use sites, using Index's own parameter name.
+            c = c.replacingOccurrences(
+                of: "public enum Types: Codable, Hashable, @unchecked Sendable {",
+                with: "public enum Types<A1>: Codable, Hashable, @unchecked Sendable {")
+            c = c.replacingOccurrences(
+                of: "public static func ==(_ lhs: Types, _ rhs: Types) -> Bool { fatalError() }",
+                with: "public static func ==(_ lhs: Types<A1>, _ rhs: Types<A1>) -> Bool { fatalError() }")
+        }
+
         // Note: UnsafeArrayPointer/UnsafeMutableArrayPointer family are kept generic —
         // their ABI exports use <A> throughout (properties, subscripts, inits).
         // The pMV property descriptor stubs are handled by the assembly stub mechanism.
@@ -1233,6 +1303,37 @@ typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
         // the constraint without primary associated type syntax.
         // Pattern: `any Identifier<...==...>` where the <...> contains `==`.
         c = c.stripConstrainedExistentialGenerics()
+
+        if parser.defaultModule == "SwiftData" {
+            // `BackingData` isn't declared with a primary associated type (`protocol
+            // BackingData<Model>`), so constrained-existential usages like `any
+            // BackingData<Self.Model == A1>` (left behind above as just `any BackingData`,
+            // since stripConstrainedExistentialGenerics drops the whole `<...>` clause) are
+            // already fixed by that strip. What's left is that A1 no longer appears anywhere
+            // in these two extension methods' signatures once the constraint is gone, which
+            // the compiler rejects as an unused generic parameter — add a same-named phantom
+            // parameter so A1 appears in the parameter list too.
+            c = c.replacingOccurrences(
+                of: "public func _generateCurrentClassBackingData<A1>() -> any BackingData where A1: PersistentModel { fatalError() }",
+                with: "public func _generateCurrentClassBackingData<A1>(as type: A1.Type) -> any BackingData where A1: PersistentModel { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public func _superClassBackingData<A1>(of: any PersistentModel.Type) -> any BackingData where A1: PersistentModel { fatalError() }",
+                with: "public func _superClassBackingData<A1>(of: any PersistentModel.Type, as type: A1.Type) -> any BackingData where A1: PersistentModel { fatalError() }")
+            // `init(backingData:)`/`persistentBackingData` reference `any BackingData<Self.Model
+            // == A>` in the real module; here the generic-placeholder-path eraser reduces the
+            // constraint to plain `<Any>` (no `==` survives, so stripConstrainedExistentialGenerics
+            // above doesn't catch it) rather than dropping it — BackingData has no primary
+            // associated type, so any `<...>` on it is invalid.
+            c = c.replacingOccurrences(of: "any BackingData<Any>", with: "any BackingData")
+            // DefaultStore's HistoryProviding.historyType witness returns
+            // `DefaultHistoryTransaction.Type` (a concrete metatype), but the protocol
+            // requirement is typed `Any` (another generic-placeholder-path erasure — the real
+            // requirement is `Self.HistoryType.Type`). A concrete-type witness can't satisfy a
+            // requirement declared as bare `Any`; restore the associated-type-metatype form.
+            c = c.replacingOccurrences(
+                of: "static var historyType: Any { get }",
+                with: "static var historyType: Self.HistoryType.Type { get }")
+        }
 
         if parser.defaultModule == "AppleIntelligenceReporting" {
             c = c.replacingOccurrences(
