@@ -34,18 +34,21 @@ types, Swift-3 renamed C types, missing generic-parameter detection, etc.).
 ## ❌ REMAINING (8/18), smallest first
 
 ### Charts (2021 symbols)
-First error: `type 'AnyChartContent' does not conform to protocol 'ChartContent'`, plus a
-long tail (`AreaMark`, `BarMark`, `LineMark`, `PointMark`, `RectangleMark`, `RuleMark`,
-`SectorMark`, ... all fail the same way). `ChartContent` is `@_typeEraser(AnyChartContent)`
-and `@MainActor`-isolated; conforming mark types get their `body`/`Body` requirement
-synthesized incorrectly by our generator (bare `Any` return type, which can't satisfy an
-associated-type-typed protocol requirement). This needs proper result-builder /
-type-eraser-aware associated-type synthesis, likely a non-trivial addition to Model.swift's
-protocol-fallback logic. Also has smaller issues: `SPAngle` type not found, `_ScaleRangeOutputs`/
-`_PrimitivePlottableKind` wrongly treated as generic, `AnyChartSymbolShape`/
-`BasicChartSymbolShape` MainActor-isolation conformance errors, a `ChartBinRange<A>` not
-conforming to `RangeExpression`, and a pack-expansion error. Likely the largest single
-investigation remaining in the curated set — plan to split into sub-fixes.
+**Mostly fixed** (commit `2509588`): all ~15 first-pass compile errors are resolved (shadowed
+`body`/`Body` types on AreaMark/LineMark/PointMark/etc. retyped to `Swift.Never`, missing
+`Never`/`Optional` ChartContent-family conformances added, `nonisolated` fixes for
+ChartSymbolShape, `SPAngle`/`ChartBinRange`/`NumberBins`/`BuilderTuple`/Vectorized*PlotContent
+associated-type and generic-parameter fixes, `ValueAlignedChartScrollTargetBehavior`'s
+redundant-conformance conflict, `Chart<Content>.init`'s associated-type-chain erasure).
+
+**Remaining blocker**: `AnyChartContent` (ChartContent's `@_typeEraser` type) compiles fine
+into the first-pass dylib but its `_makeChartContent`/`body` witness-thunk symbols vanish
+under `-exported_symbols_list` at the final-link stage, leaving 2 undefined symbols. This
+looks like a Swift compiler ABI-emission quirk specific to `@_typeEraser`-synthesized
+conformances (the witness thunk's mangled name uses the protocol's own generic placeholder
+`x` rather than `AnyChartContent`, and gets dropped entirely once the exports allowlist is
+applied) — investigated but not resolved; needs deeper linker/ABI investigation or an
+upstream Swift bug report. Charts still reports ERROR, not PASS.
 
 ### SoundAnalysis (2302 symbols)
 Not yet investigated this session — needs a fresh root-cause pass.
