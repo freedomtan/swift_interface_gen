@@ -1243,7 +1243,29 @@ class TypeNode {
                 
                 if n == "allCases" && isEnum { continue }
                 if n == "rawValue" && isEnum { continue }
-                
+
+                var t = t
+                // ChartContent's `body` requirement is typed `Self.Body: ChartContent`, but its
+                // ABI-visible witness never reveals a concrete Body type (mark types like
+                // AreaMark/LineMark/PointMark render entirely through the static
+                // _makeChartContent/_layoutChartContent/_renderChartContent hooks) — the raw
+                // demangled type is a placeholder path like "A.Body" that later collapses to a
+                // bare `Any`, which can't satisfy an associated-type-typed requirement.
+                // `Swift.Never` genuinely conforms to ChartContent in the real module.
+                if n == "body" && hasConformance("ChartContent") &&
+                   (t == "Any" || t.range(of: "^[A-Z][A-Za-z0-9_]*\\.Body$", options: .regularExpression) != nil) {
+                    t = "Never"
+                }
+                // VectorizedAreaPlotContent/VectorizedBarPlotContent/etc. have a real `body:
+                // some Charts.ChartContent`, but simplifyType's `some`-return heuristic can't
+                // see the enclosing type's conformances at parse time and defaults every
+                // `body`-named opaque return to `some SwiftUI.View` — wrong here since these
+                // types conform to ChartContent/VectorizedChartContent, not View.
+                if n == "body" && t == "some SwiftUI.View" &&
+                   (hasConformance("ChartContent") || hasConformance("VectorizedChartContent")) &&
+                   !hasConformance("View") && !hasConformance("SwiftUI.View") {
+                    t = "some Charts.ChartContent"
+                }
                 var cleanT = t
                 let fullEnclosingPath = self.getEnclosingPath().isEmpty ? self.name : self.getEnclosingPath() + "." + self.name
                 cleanT = cleanT.stripParentPrefix(parentName: fullEnclosingPath)
@@ -1865,13 +1887,19 @@ class TypeNode {
                         if case .property(let name, _, _, _) = $0 { return name == "body" }
                         return false
                     }
+                    // Shape (and Animatable-via-Shape) provides View's `body` requirement via
+                    // its own protocol-extension default (returning `some View`, actually
+                    // `Never` under the hood via `_ShapeView`) — conforming types never declare
+                    // their own `body`, so don't inject the EmptyView fallback here; it would
+                    // conflict with Shape's real default.
+                    let satisfiesBodyViaShape = hasConformance("Shape") || hasConformance("SwiftUI.Shape")
                     // A real `body` property (e.g. inherited from View's own requirement via
                     // inheritProtocolMembers, typed `some SwiftUI.View`) already determines
                     // Body's underlying type via associated-type inference — an explicit
                     // `typealias Body = SwiftUI.EmptyView` alongside it would conflict with
                     // that inferred type (Self.Body must match body's declared type exactly).
                     // Only synthesize the EmptyView fallback pair when there's no body at all.
-                    if !hasBody {
+                    if !hasBody && !satisfiesBodyViaShape {
                         if !self.members.keys.contains("Body") && !self.members.keys.contains("typealias Body") {
                             lines.append("\(nextIndent)public typealias Body = SwiftUI.EmptyView")
                         }

@@ -2134,6 +2134,30 @@ class Parser {
             }
         }
 
+        if defaultModule == "CryptoKit" {
+            // CorecryptoSupportedNISTCurve/CorecryptoSupportedMLKEMKEM are internal-only
+            // conformances (present as ABI witness-table symbols in the TBD, but never declared
+            // in the real public .swiftinterface) whose associated-type requirements (H,
+            // curveType, publicKeyType, etc.) can't be satisfied from public API alone. Must be
+            // removed here (before inheritProtocolMembers runs) rather than via a later
+            // postProcess string replace on the declaration line — inheritProtocolMembers would
+            // otherwise still copy the stripped protocol's own requirements (e.g.
+            // `createPublicKey(...) -> Self.publicKeyType`) onto these types as real members.
+            // These are demangled as "any CorecryptoSupportedNISTCurve"/"any
+            // CorecryptoSupportedMLKEMKEM" (existential form), not the bare protocol name, so
+            // filter by substring rather than exact Set.remove.
+            for curveName in ["P256", "P384", "P521"] {
+                if let node = modules["CryptoKit"]?.nestedTypes[curveName] {
+                    node.conformances = node.conformances.filter { !$0.contains("CorecryptoSupportedNISTCurve") }
+                }
+            }
+            for kemName in ["MLKEM1024", "MLKEM768"] {
+                if let node = modules["CryptoKit"]?.nestedTypes[kemName] {
+                    node.conformances = node.conformances.filter { !$0.contains("CorecryptoSupportedMLKEMKEM") }
+                }
+            }
+        }
+
         if defaultModule == "ModelCatalog" {
             // Fix VisionModelBase
             if let node = modules["ModelCatalog"]?.nestedTypes["VisionModelBase"] {
@@ -2271,7 +2295,38 @@ class Parser {
                             }
                             
                             if !hasMember && !node.satisfiedRequirementNames.contains(nameToCheck) {
-                                node.members[memberKey] = memberVal
+                                // The demangler encodes a protocol requirement's implicit `Self`
+                                // generic parameter as a bare placeholder ("A") when the
+                                // protocol itself isn't generic (e.g. Charts.ChartContent's
+                                // `_makeChartContent(content: _GraphValue<Self>, ...)` demangles
+                                // with "Self" replaced by "A"). That's fine inside the protocol's
+                                // own declaration (where "A" IS in scope, standing for Self), but
+                                // copying the raw signature verbatim onto a non-generic
+                                // conforming struct/enum leaves "A" referring to nothing.
+                                // Scoped to Charts only: a blanket "any bare A means Self"
+                                // substitution is unsound in general — some protocols
+                                // legitimately use "A" as an associated-type placeholder in a
+                                // requirement copied verbatim (e.g. ModelCatalog's
+                                // AssetBackedResource.CatalogAssetType), and rewriting those to
+                                // the conforming type's name breaks their real semantics.
+                                var resolvedVal = memberVal
+                                if defaultModule == "Charts" {
+                                    let protoEnclosing = protoNode.getEnclosingPath()
+                                    let protoRelativeName = protoEnclosing.isEmpty ? protoNode.name : protoEnclosing + "." + protoNode.name
+                                    let protoIsGeneric = discoveredGenerics[defaultModule + "." + protoRelativeName] != nil || discoveredGenerics[protoRelativeName] != nil
+                                    if !protoIsGeneric {
+                                        let selfName = node.name
+                                        switch memberVal {
+                                        case .method(let n, let sig, let isStatic):
+                                            resolvedVal = .method(name: n, signature: sig.replaceWord("A", with: selfName), isStatic: isStatic)
+                                        case .property(let n, let t, let isReadOnly, let isStatic):
+                                            resolvedVal = .property(name: n, type: t.replaceWord("A", with: selfName), isReadOnly: isReadOnly, isStatic: isStatic)
+                                        default:
+                                            break
+                                        }
+                                    }
+                                }
+                                node.members[memberKey] = resolvedVal
                             }
                         }
                     }

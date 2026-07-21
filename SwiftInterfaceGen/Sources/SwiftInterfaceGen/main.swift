@@ -880,20 +880,6 @@ typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
             for pqType in ["MLDSA65", "MLDSA87", "MLKEM1024", "MLKEM768"] {
                 c = c.replacingOccurrences(of: "\(pqType).PublicKey", with: "CryptoKit.\(pqType).PublicKey")
             }
-            // CorecryptoSupportedNISTCurve/CorecryptoSupportedMLKEMKEM are internal-only
-            // conformances (present as ABI witness-table symbols in the TBD, but never declared
-            // in the real public .swiftinterface) whose associated-type requirements (H,
-            // curveType, etc.) can't be satisfied from public API alone — drop them.
-            c = c.replacingOccurrences(of: "public enum P256: CorecryptoSupportedNISTCurve {",
-                                        with: "public enum P256 {")
-            c = c.replacingOccurrences(of: "public enum P384: CorecryptoSupportedNISTCurve {",
-                                        with: "public enum P384 {")
-            c = c.replacingOccurrences(of: "public enum P521: CorecryptoSupportedNISTCurve {",
-                                        with: "public enum P521 {")
-            c = c.replacingOccurrences(of: "public enum MLKEM1024: CorecryptoSupportedMLKEMKEM {",
-                                        with: "public enum MLKEM1024 {")
-            c = c.replacingOccurrences(of: "public enum MLKEM768: CorecryptoSupportedMLKEMKEM {",
-                                        with: "public enum MLKEM768 {")
             // HPKEDiffieHellmanPublicKey requires `associatedtype EphemeralPrivateKey:
             // HPKEDiffieHellmanPrivateKeyGeneration where Self == Self.EphemeralPrivateKey.PublicKey`.
             // The sibling `KeyAgreement.PrivateKey` in the same nested scope satisfies the
@@ -1216,6 +1202,149 @@ typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
                                         with: "public final class StoreProductManager: @unchecked Sendable")
         }
 
+        // Fix: Charts's ChartContent requires `associatedtype Body: ChartContent`. Mark types
+        // (AreaMark/LineMark/PointMark/etc.) render entirely through the static
+        // _makeChartContent/_layoutChartContent/_renderChartContent hooks and never expose a
+        // concrete Body type via the ABI, so their `body` property is retyped to `Swift.Never`
+        // above (see the "n == \"body\"" property-emission fixup in Model.swift) — but `Never`
+        // only conforms to ChartContent via a real-module extension we never discover from the
+        // ABI (Charts.tbd has no symbols for it since it's implemented entirely via default
+        // protocol-extension witnesses). Add it explicitly.
+        if parser.defaultModule == "Charts" {
+            c += """
+
+
+            extension Swift.Never: ChartContent {
+                public var body: Never { fatalError() }
+                public static func _layoutChartContent(_ content: Never, _ inputs: _ChartContentLayoutInputs) {}
+                public static func _renderChartContent(_ content: Never, _ inputs: _ChartContentRenderInputs) -> _ChartContentRenderOutputs { fatalError() }
+                public static func _collectChartContent(content: Never, inputs: _ChartContentCollectInputs) -> _ChartContentCollectOutputs { fatalError() }
+                public static func _chartContentCount(inputs: _ChartContentInputs) -> Int? { return nil }
+                public static func _makeChartContent(content: SwiftUI._GraphValue<Never>, inputs: _ChartContentInputs) -> _ChartContentOutputs { fatalError() }
+            }
+            extension Swift.Never: Chart3DContent {
+                public static func _makeChart3DContent(content: SwiftUI._GraphValue<Never>, inputs: _Chart3DContentInputs) -> _Chart3DContentOutputs { fatalError() }
+            }
+
+            """
+            // AnyChartSymbolShape/BasicChartSymbolShape conform to ChartSymbolShape (which
+            // requires SwiftUI.Shape's nonisolated `path(in:)`). Our synthesized init/path
+            // witnesses default to the enclosing (main-actor-inferred) isolation, which the
+            // compiler rejects as a data-race-unsafe conformance; the real module marks them
+            // `nonisolated` explicitly.
+            c = c.replacingOccurrences(
+                of: "public init(_ arg1: any ChartSymbolShape) { fatalError() }",
+                with: "nonisolated public init(_ arg1: any ChartSymbolShape) { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public func path(in: CGRect) -> SwiftUI.Path { fatalError() }",
+                with: "nonisolated public func path(in: CGRect) -> SwiftUI.Path { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public var perceptualUnitRect: CGRect { get { fatalError() } }",
+                with: "nonisolated public var perceptualUnitRect: CGRect { get { fatalError() } }")
+            // SPAngle (Chart3DPose.azimuth/inclination) is a private C type with no public
+            // Swift declaration anywhere (not even bridged via __C. — the demangler resolves it
+            // to a bare capitalized name that looks like a real bridged ObjC type, but it isn't
+            // one). Stub it out.
+            c += "\npublic struct SPAngle: Hashable, Sendable {}\n"
+            // AnyChartContent's `_makeChartContent`/`body` witnesses are satisfied via a
+            // "protocol witness for ..." ABI thunk, but ChartContent's own default-extension
+            // implementation for them is never emitted by this generator (protocol-extension
+            // defaults aren't reproduced, only concrete-type extensions), so AnyChartContent
+            // itself needs the members explicitly.
+            c = c.replacingOccurrences(
+                of: "public struct AnyChartContent: ChartContent {",
+                with: "public struct AnyChartContent: ChartContent {\n    public var body: Never { fatalError() }\n    public static func _makeChartContent(content: SwiftUI._GraphValue<AnyChartContent>, inputs: _ChartContentInputs) -> _ChartContentOutputs { fatalError() }")
+            // The real module declares `extension Optional: ChartContent/AxisMark/
+            // Chart3DContent/ContourContent where Wrapped: <same protocol>` so that optional
+            // chart content (`if let ... { SomeMark(...) }`) participates directly in the
+            // result-builder chain. These conditional extensions have real exported ABI symbols
+            // (required by the .tbd's exports list) but the extension declarations themselves
+            // are never discovered/emitted since our generator doesn't parse stdlib-type
+            // conditional-conformance extensions from demangled symbols.
+            c += """
+
+            extension Swift.Optional: ChartContent where Wrapped: ChartContent {
+                public var body: Never { fatalError() }
+                public static func _layoutChartContent(_ content: Wrapped?, _ inputs: _ChartContentLayoutInputs) {}
+                public static func _renderChartContent(_ content: Wrapped?, _ inputs: _ChartContentRenderInputs) -> _ChartContentRenderOutputs { fatalError() }
+                public static func _collectChartContent(content: Wrapped?, inputs: _ChartContentCollectInputs) -> _ChartContentCollectOutputs { fatalError() }
+                public static func _makeChartContent(content: SwiftUI._GraphValue<Wrapped?>, inputs: _ChartContentInputs) -> _ChartContentOutputs { fatalError() }
+                public static func _chartContentCount(inputs: _ChartContentInputs) -> Int? { return nil }
+            }
+            extension Swift.Optional: Chart3DContent where Wrapped: Chart3DContent {
+                public var body: Never { fatalError() }
+                public static func _makeChart3DContent(content: SwiftUI._GraphValue<Wrapped?>, inputs: _Chart3DContentInputs) -> _Chart3DContentOutputs { fatalError() }
+            }
+            extension Swift.Optional: AxisMark where Wrapped: AxisMark {
+                public static func _layoutAxisMark(_ content: Wrapped?, _ inputs: _AxisMarkLayoutInputs) {}
+                public static func _renderAxisMark(_ content: Wrapped?, _ inputs: _AxisMarkRenderInputs) -> _AxisMarkRenderOutputs { fatalError() }
+                public static func _collectAxisMark(_ content: Wrapped?, _ inputs: _AxisMarkCollectInputs) -> _AxisMarkCollectOutputs { fatalError() }
+            }
+            extension Swift.Optional: ContourContent where Wrapped: ContourContent {
+                public static func _makeContourContent(_ content: Wrapped?, _ inputs: _ContourContentInputs) -> _ContourContentOutputs { fatalError() }
+            }
+
+            """
+            // The Vectorized*PlotContent<Data> family (Area/Bar/Line/Point/Rectangle/Rule/
+            // Sector) all conform to VectorizedChartContent, which requires `associatedtype
+            // DataElement`; the real module resolves it to `Data.Element` (also requiring
+            // `Data: RandomAccessCollection`) — neither is visible from the ABI alone.
+            for plotKind in ["Area", "Bar", "Line", "Point", "Rectangle", "Rule", "Sector"] {
+                c = c.replacingOccurrences(
+                    of: "public struct Vectorized\(plotKind)PlotContent<A>: ChartContent, VectorizedChartContent {",
+                    with: "public struct Vectorized\(plotKind)PlotContent<A>: ChartContent, VectorizedChartContent where A: RandomAccessCollection {\n    public typealias DataElement = A.Element")
+            }
+            // ChartBinRange<Bound> requires `Bound: Comparable` (RangeExpression's own
+            // associatedtype bound) — not visible from the ABI alone.
+            c = c.replacingOccurrences(
+                of: "public struct ChartBinRange<A>: RangeExpression {",
+                with: "public struct ChartBinRange<A>: RangeExpression where A: Comparable {")
+            // NumberBins<Value>'s own generic parameter feeds ChartBinRange<Value>'s subscript,
+            // so it needs the same Comparable bound (the real module also requires Numeric).
+            c = c.replacingOccurrences(
+                of: "public struct NumberBins<A>: Collection, Equatable, Sequence {",
+                with: "public struct NumberBins<A>: Collection, Equatable, Sequence where A: Comparable, A: Numeric {")
+            // BuilderTuple<A> is really a parameter-pack type (`struct BuilderTuple<each T>` in
+            // the real, internal-only module) — its own generic parameter needs the `each`
+            // marker to match the `(repeat A)` tuple type used in its members.
+            c = c.replacingOccurrences(
+                of: "public struct BuilderTuple<A>: Codable, Hashable, @unchecked Sendable {",
+                with: "public struct BuilderTuple<each A>: Sendable {")
+            c = c.replacingOccurrences(
+                of: "public init(elements: (repeat A)) { fatalError() }\n    public var elements: (repeat A) { get { fatalError() } set {} }\n    public init(from decoder: any Swift.Decoder) throws { fatalError() }\n    public func encode(to encoder: Swift.Encoder) throws { fatalError() }\n    public func hash(into hasher: inout Hasher) { fatalError() }\n    public static func ==(_ lhs: BuilderTuple<A>, _ rhs: BuilderTuple<A>) -> Bool { fatalError() }",
+                with: "public init(elements: (repeat each A)) { fatalError() }\n    public var elements: (repeat each A) { get { fatalError() } }")
+            // Chart<Content>.init(_:content:)'s real constraint is
+            // `Content == ForEach<Data, Data.Element.ID, C>` (an associated-type chain through
+            // Data.Element's Identifiable conformance), which the generic-placeholder-path
+            // eraser can't resolve and erases to a self-contradictory bare `Any`.
+            c = c.replacingOccurrences(
+                of: "where A == SwiftUI.ForEach<A1, Any, B1>, A1: RandomAccessCollection, B1: ChartContent, A1.Element: Identifiable",
+                with: "where A == SwiftUI.ForEach<A1, A1.Element.ID, B1>, A1: RandomAccessCollection, B1: ChartContent, A1.Element: Identifiable")
+            c = c.replacingOccurrences(
+                of: "where A == SwiftUI.ForEach<A1, Any, B1>, A1: RandomAccessCollection, B1: Chart3DContent, A1.Element: Identifiable",
+                with: "where A == SwiftUI.ForEach<A1, A1.Element.ID, B1>, A1: RandomAccessCollection, B1: Chart3DContent, A1.Element: Identifiable")
+            // ValueAlignedChartScrollTargetBehavior conforms to ChartScrollTargetBehavior, which
+            // itself extends SwiftUI.ScrollTargetBehavior — the redundant explicit
+            // `SwiftUI.ScrollTargetBehavior` conformance forces its `updateTarget(context:)`
+            // requirement (typed with SwiftUI's own ScrollTargetBehaviorContext) to apply
+            // directly instead of through ChartScrollTargetBehavior's default implementation,
+            // conflicting with the witness typed for ChartScrollTargetBehavior's own
+            // ChartScrollTargetBehaviorContext requirement.
+            c = c.replacingOccurrences(
+                of: "public struct ValueAlignedChartScrollTargetBehavior: ChartScrollTargetBehavior, SwiftUI.ScrollTargetBehavior {",
+                with: "public struct ValueAlignedChartScrollTargetBehavior: ChartScrollTargetBehavior {")
+            // ChartScrollTargetBehavior : SwiftUI.ScrollTargetBehavior requires
+            // `updateTarget(context: Self.TargetContext)`; ValueAlignedChartScrollTargetBehavior
+            // only implements the Charts-specific ChartScrollTargetBehaviorContext overload — the
+            // real module also provides a ScrollTargetBehaviorContext overload via
+            // ChartScrollTargetBehavior's own default extension (never emitted since we don't
+            // generate protocol-extension defaults), which is what actually satisfies
+            // SwiftUI.ScrollTargetBehavior's requirement. Add it directly.
+            c = c.replacingOccurrences(
+                of: "public func updateTarget(_: inout SwiftUI.ScrollTarget, context: ChartScrollTargetBehaviorContext) -> () {}\n}",
+                with: "public func updateTarget(_: inout SwiftUI.ScrollTarget, context: ChartScrollTargetBehaviorContext) -> () {}\n    public func updateTarget(_ target: inout SwiftUI.ScrollTarget, context: SwiftUI.ScrollTargetBehaviorContext) -> () {}\n}")
+        }
+
         // Fix: Network framework has many internal protocol conformances (NetworkProtocolOptions,
         // BottomProtocolHandler, LowerProtocolHandler, OutboundDatagramHandler, etc.) that require
         // associated types our stubs cannot satisfy. Strip these conformances from inheritance lists.
@@ -1487,17 +1616,31 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             }
         }
         var underscoreStubs = ""
-        let refPattern = "\\b(_[A-Z][A-Za-z0-9_]+)\\b"
+        // Referenced with a generic argument (e.g. "_ScaleRangeOutputs<CGFloat>",
+        // "_PrimitivePlottableKind<Self>") vs. bare — some undeclared SPI types are generic in
+        // the real module even though no declaration site tells us so; detect this from a
+        // trailing "<...>" at any use site so the stub's arity matches every reference.
+        let refPattern = "\\b(_[A-Z][A-Za-z0-9_]+)\\b(<[^>{]*>)?"
         if let refRegex = try? NSRegularExpression(pattern: refPattern, options: []) {
             let nsRange = NSRange(c.startIndex..<c.endIndex, in: c)
             var seen = Set<String>()
+            var isGenericRef = Set<String>()
             for m in refRegex.matches(in: c, options: [], range: nsRange) {
                 if let r = Range(m.range(at: 1), in: c) {
                     let t = String(c[r])
-                    if !seen.contains(t) && !declaredTypes.contains(t) {
+                    if !declaredTypes.contains(t) {
                         seen.insert(t)
-                        underscoreStubs += "public struct \(t): Hashable, Sendable {}\n"
+                        if m.range(at: 2).location != NSNotFound {
+                            isGenericRef.insert(t)
+                        }
                     }
+                }
+            }
+            for t in seen {
+                if isGenericRef.contains(t) {
+                    underscoreStubs += "public struct \(t)<A>: Hashable, Sendable {}\n"
+                } else {
+                    underscoreStubs += "public struct \(t): Hashable, Sendable {}\n"
                 }
             }
         }
