@@ -1271,6 +1271,24 @@ class TypeNode {
                    !hasConformance("View") && !hasConformance("SwiftUI.View") {
                     t = "some Charts.ChartContent"
                 }
+                // SpeechModule requires `var results: Self.Results` where `associatedtype
+                // Results: Sendable, AsyncSequence` — same `some`-return heuristic gap as
+                // ChartContent's body above, defaulting to `some Sendable` (satisfies Sendable
+                // but not AsyncSequence). An opaque `some ... AsyncSequence` return needs a
+                // concrete underlying type at the fatalError() call site to type-check (a
+                // Never-returning body alone can't establish one) — use AsyncStream<Never>.
+                var resultsElementType = "Never"
+                if n == "results" && t == "some Sendable" && hasConformance("SpeechModule") {
+                    t = "some Sendable & AsyncSequence"
+                    // SpeechModule's `associatedtype Result: SpeechModuleResult where Self.Result
+                    // == Self.Results.Element` needs the AsyncSequence's Element to match a real
+                    // SpeechModuleResult-conforming nested type (usually named "Result", but
+                    // EndpointDetector names its own "ModuleOutput") — find it so the same-type
+                    // constraint infers correctly instead of leaving Result unresolved.
+                    if let resultTypeName = self.nestedTypes.values.first(where: { $0.conformances.contains("SpeechModuleResult") })?.name {
+                        resultsElementType = resultTypeName
+                    }
+                }
                 var cleanT = t
                 let fullEnclosingPath = self.getEnclosingPath().isEmpty ? self.name : self.getEnclosingPath() + "." + self.name
                 cleanT = cleanT.stripParentPrefix(parentName: fullEnclosingPath)
@@ -1363,14 +1381,21 @@ class TypeNode {
                     lines.append("\(nextIndent)\(staticMod)var \(n): \(cleanT) \(suffix)")
                 } else {
                     let defaultVal = TypeNode.defaultReturnValue(for: cleanT)
-                    let getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
+                    var getter = defaultVal == "fatalError()" ? "{ fatalError() }" : (defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }")
+                    if n == "results" && t == "some Sendable & AsyncSequence" {
+                        getter = "{ return AsyncStream<\(resultsElementType)> { _ in } }"
+                    }
                     let hasLifetime = isReadOnly && isLifetimeSpanType(cleanT)
                     let getPrefix = hasLifetime ? "@_lifetime(borrow self) get" : "get"
                     let suffix = isReadOnly ? "{ \(getPrefix) \(getter) }" : "{ \(getPrefix) \(getter) set {} }"
                     if cleanT.contains("Mutex<") || cleanT.contains("Synchronization.Mutex<") {
                         lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)let \(n): \(cleanT)")
                     } else {
-                        lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)var \(n): \(cleanT) \(suffix)")
+                        // Actor's own `unownedExecutor` requirement is declared `nonisolated`
+                        // in the protocol; an actor's witness for it must match, or the
+                        // compiler rejects the Actor conformance as isolation-unsafe.
+                        let nonisolatedMod = (finalKind == "actor" && n == "unownedExecutor") ? "nonisolated " : ""
+                        lines.append("\(nextIndent)\(nonisolatedMod)public \(finalMod)\(overrideMod)\(staticMod)var \(n): \(cleanT) \(suffix)")
                     }
                 }
             case .method(let n, let sig, var isStatic):
