@@ -1243,6 +1243,11 @@ class TypeNode {
                 
                 if n == "allCases" && isEnum { continue }
                 if n == "rawValue" && isEnum { continue }
+                // NSObject already declares description/hash/debugDescription; a Swift
+                // extension on an ObjC-bridged class can't override them (extensions can't
+                // override at all), and re-declaring them without `override` conflicts with the
+                // inherited member — skip, relying on the real ObjC class's own inheritance.
+                if isObjcBridged && baseClass == "NSObject" && ["description", "hash", "debugDescription"].contains(n) { continue }
 
                 var t = t
                 // ChartContent's `body` requirement is typed `Self.Body: ChartContent`, but its
@@ -1369,6 +1374,9 @@ class TypeNode {
                     }
                 }
             case .method(let n, let sig, var isStatic):
+                // NSObject already declares isEqual(_:); same reasoning as
+                // description/hash/debugDescription above — skip for ObjC-bridged extensions.
+                if isObjcBridged && baseClass == "NSObject" && n == "isEqual" { continue }
                 var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
                 let cleanN = n.replacingOccurrences(of: " infix", with: "").replacingOccurrences(of: " prefix", with: "").replacingOccurrences(of: " postfix", with: "").trimmingCharacters(in: .whitespaces)
                 let isOperator = !cleanN.isEmpty && cleanN.allSatisfy { "+-*/=<>&|^~%!?.".contains($0) }
@@ -1655,8 +1663,11 @@ class TypeNode {
                     lines.append("\(nextIndent)\(lifetimeAttr)\(staticMod)\(funcModifier)func \(prunedSig)")
                 } else {
                     var returnType = "Void"
-                    if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
-                        returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                    if let parenIdx = cleanedSig.firstIndex(of: ")") {
+                        let afterParen = cleanedSig[parenIdx...]
+                        if let arrowIdx = afterParen.range(of: "->") {
+                            returnType = String(afterParen[arrowIdx.upperBound...]).trimmingCharacters(in: .whitespaces)
+                        }
                     }
                     let defaultVal = TypeNode.defaultReturnValue(for: returnType)
                     let body = defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }"
@@ -1821,16 +1832,24 @@ class TypeNode {
             }
             // NSCoding: open classes that NSObject subclasses need required init?(coder:) and encode(with:)
             // so that library-evolution dispatch thunks (Tj) are generated.
+            // ObjC-bridged classes are extended via a Swift extension on an empty ObjC stub
+            // (see the isObjcBridged branch above) — Swift extensions can't add `required`
+            // initializers to an imported ObjC class, so use the same @nonobjc convenience-init
+            // pattern the regular initializer-emission path uses for these.
             let isNSObjectBase = baseClass == "NSObject"
             if isNSObjectBase && hasConformance("NSCoding") {
                 if !hasCoderInit {
-                    lines.append("\(nextIndent)public required init?(coder: NSCoder) {}")
+                    if isObjcBridged {
+                        lines.append("\(nextIndent)@nonobjc public convenience init?(coder: NSCoder) { fatalError() }")
+                    } else {
+                        lines.append("\(nextIndent)public required init?(coder: NSCoder) {}")
+                    }
                 } else {
                     // Replace non-required coder init with required version
                     // (done at emit time: mark existing coder init as required)
                 }
                 if !hasEncodeWith {
-                    lines.append("\(nextIndent)open func encode(with coder: NSCoder) {}")
+                    lines.append("\(nextIndent)\(isObjcBridged ? "@nonobjc public" : "open") func encode(with coder: NSCoder) {}")
                 }
             }
             if hasConformance("Publisher") {
@@ -2496,8 +2515,11 @@ class TypeNode {
                         }
                     }
                     var returnType = "Void"
-                    if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
-                        returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                    if let parenIdx = cleanedSig.firstIndex(of: ")") {
+                        let afterParen = cleanedSig[parenIdx...]
+                        if let arrowIdx = afterParen.range(of: "->") {
+                            returnType = String(afterParen[arrowIdx.upperBound...]).trimmingCharacters(in: .whitespaces)
+                        }
                     }
                     let defaultVal = TypeNode.defaultReturnValue(for: returnType)
                     let body = defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }"

@@ -1008,10 +1008,11 @@ extension String {
                 var cleanClause = clauseContent
                 cleanClause = cleanClause.stripLabeledTupleInWhereClause()
 
-                // Replace `<Ident where ...>` with `<Ident>` and append where clause after closing `)`
+                // Replace `<Ident where ...>` with `<Ident>` and append where clause before `{` (or at end of line)
                 out.replaceSubrange(ms...me, with: "<\(paramName)>")
-                // Find the closing `)` of the param list after the new `<Ident>`
-                if let parenClose = out.range(of: ") {", range: ms..<out.endIndex)?.lowerBound ??
+                if let bodyBrace = out.range(of: " {", options: .backwards, range: ms..<out.endIndex)?.lowerBound {
+                    out.insert(contentsOf: " where \(cleanClause)", at: bodyBrace)
+                } else if let parenClose = out.range(of: ") {", range: ms..<out.endIndex)?.lowerBound ??
                                        out.range(of: ") ->", range: ms..<out.endIndex)?.lowerBound ??
                                        out.range(of: ") throws", range: ms..<out.endIndex)?.lowerBound ??
                                        out.range(of: ") async", range: ms..<out.endIndex)?.lowerBound {
@@ -2714,5 +2715,57 @@ extension String {
             result.append(current)
         }
         return result
+    }
+
+    func removeAnyConstraintsFromWhereClause() -> String {
+        let lines = self.components(separatedBy: "\n")
+        let fixed = lines.map { line -> String in
+            guard let whereRange = line.range(of: " where ") else { return line }
+            let prefix = String(line[..<whereRange.lowerBound])
+            let suffix = String(line[whereRange.upperBound...])
+            var body = suffix
+            var trailing = ""
+            if let braceRange = suffix.range(of: " {") {
+                body = String(suffix[..<braceRange.lowerBound])
+                trailing = String(suffix[braceRange.lowerBound...])
+            }
+            let constraints = body.splitByCommaRespectingBrackets()
+            let kept = constraints.filter { c in
+                let trimmed = c.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("Any == ") || trimmed.hasPrefix("Any:") || trimmed.hasPrefix("Any.") { return false }
+                if trimmed.contains("Any ==") || trimmed.contains("Any :") { return false }
+                if trimmed.hasSuffix("== Any") || trimmed.hasSuffix(": Any") { return false }
+                if trimmed.contains("== Any") || trimmed.contains(": Any") { return false }
+                return true
+            }
+            if kept.isEmpty {
+                return prefix + trailing
+            } else {
+                return prefix + " where " + kept.joined(separator: ", ") + trailing
+            }
+        }
+        return fixed.joined(separator: "\n")
+    }
+
+    func stripRawRepresentableWrapperExtensions() -> String {
+        let lines = self.components(separatedBy: "\n")
+        var output = [String]()
+        var skipping = false
+        var depth = 0
+        for line in lines {
+            if !skipping && line.contains("extension RawRepresentableWrapper") {
+                skipping = true
+                depth = line.reduce(0) { $0 + ($1 == "{" ? 1 : 0) - ($1 == "}" ? 1 : 0) }
+                if depth <= 0 { skipping = false }
+                continue
+            }
+            if skipping {
+                depth += line.reduce(0) { $0 + ($1 == "{" ? 1 : 0) - ($1 == "}" ? 1 : 0) }
+                if depth <= 0 { skipping = false }
+                continue
+            }
+            output.append(line)
+        }
+        return output.joined(separator: "\n")
     }
 }

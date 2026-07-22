@@ -1060,33 +1060,11 @@ typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
         c = c.fixSubscriptGetSetInExtensions()
 
         // Fix: `where Any == ConcreteType` — same-type constraints with `Any` on LHS are invalid.
-        // Remove `, Any == <anything>` and `Any == <anything>,` from where clauses.
-        // Use regex to avoid consuming the function body. The excluded-character class must
-        // also exclude newlines — without it, a same-type constraint with no trailing comma
-        // (the last constraint in a where clause) greedily consumes past the end of the line,
-        // deleting unrelated declarations until the next `,{}>)` appears, possibly lines later.
-        if let regex = try? NSRegularExpression(pattern: ",\\s*Any\\s*==\\s*[^,{}>)\\n]+", options: []) {
-            c = regex.stringByReplacingMatches(
-                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
-        }
-        if let regex = try? NSRegularExpression(pattern: "\\bAny\\s*==\\s*[^,{}>)\\n]+,\\s*", options: []) {
-            c = regex.stringByReplacingMatches(
-                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
-        }
-        
-        // Fix: `where Any: Protocol` — conformance constraints with `Any` on LHS are invalid.
-        if let regex = try? NSRegularExpression(pattern: ",\\s*Any\\s*:\\s*[^,{}>)\\n]+", options: []) {
-            c = regex.stringByReplacingMatches(
-                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
-        }
-        if let regex = try? NSRegularExpression(pattern: "\\bAny\\s*:\\s*[^,{}>)\\n]+,\\s*", options: []) {
-            c = regex.stringByReplacingMatches(
-                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
-        }
-        if let regex = try? NSRegularExpression(pattern: "where\\s+Any\\s*:\\s*[^{>)\\n]+", options: []) {
-            c = regex.stringByReplacingMatches(
-                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
-        }
+        // Remove `, Any == <anything>` and `Any == <anything>,` from where clauses safely.
+        c = c.removeAnyConstraintsFromWhereClause()
+
+        // Strip invalid/duplicate `extension RawRepresentableWrapper where ...` blocks
+        c = c.stripRawRepresentableWrapperExtensions()
 
         // Fix: `where T: any Protocol` — `any` in conformance constraints is invalid;
         // remove `any` from constraint positions in where clauses.
@@ -1192,6 +1170,44 @@ typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
             for placeholder in placeholders {
                 c = c.replacingOccurrences(of: "\(typeName)<\(placeholder)>", with: typeName)
             }
+        }
+
+        c = c.replacingOccurrences(of: "AVAudioSessionCategoryOptions", with: "AVAudioSession.CategoryOptions")
+        c = c.replacingOccurrences(of: "AVAudioSessionCategory", with: "AVAudioSession.Category")
+        c = c.replacingOccurrences(of: "AVAudioSessionMode", with: "AVAudioSession.Mode")
+        c = c.replacingOccurrences(of: "NSUserDefaults", with: "UserDefaults")
+
+        if parser.defaultModule == "SoundAnalysis" {
+            c = c.replacingOccurrences(of: "public typealias __C_SNRequest = SNRequest", with: "")
+            c = c.replacingOccurrences(of: "public typealias __C_SNResult = SNResult", with: "")
+            c = c.replacingOccurrences(of: "public typealias __C_AVAudioSession = AVAudioSession", with: "")
+            c = c.replacingOccurrences(of: "public typealias __C_AVAudioSession.CategoryOptions = AVAudioSession.CategoryOptions", with: "")
+            c = c.replacingOccurrences(of: "@nonobjc public convenience init() { fatalError() }", with: "@nonobjc public override convenience init() { fatalError() }")
+            c = c.replaceWord("SNRequest", with: "Any")
+            c = c.replaceWord("SNResult", with: "Any")
+            c = c.replaceWord("MLMultiArray", with: "Any")
+            c = c.replaceWord("SHSignature", with: "Any")
+            c = c.replacingOccurrences(of: "GenericA.Result", with: "Any")
+            c = c.replacingOccurrences(of: "GenericA.Arg", with: "Any")
+            c = c.replacingOccurrences(of: "public static func automaticallyNotifiesObservers(forKey:", with: "public override static func automaticallyNotifiesObservers(forKey:")
+            c = c.replacingOccurrences(of: "public struct AnyPublisher<A, B>:", with: "public struct AnyPublisher<A, B: Swift.Error>:")
+            c = c.replacingOccurrences(of: "public struct AnySubject<A, B>:", with: "public struct AnySubject<A, B: Swift.Error>:")
+            c = c.replacingOccurrences(of: "public enum Completion<A>:", with: "public enum Completion<A: Swift.Error>:")
+            c = c.replacingOccurrences(of: "public enum Completion<A: Swift.Error>: Codable, Hashable", with: "public enum Completion<A: Swift.Error>: Codable")
+            c = c.replacingOccurrences(of: "extension PubSub.Completion where A: Equatable", with: "extension PubSub.Completion where A: Equatable")
+            c = c.replacingOccurrences(of: "extension PubSub.Completion where A: Hashable", with: "extension PubSub.Completion where A: Hashable")
+            c = c.replacingOccurrences(of: "public struct RawRepresentableWrapper<A>:", with: "public struct RawRepresentableWrapper<A: RawRepresentable>:")
+            c = c.removeAnyConstraintsFromWhereClause()
+
+            c += """
+
+
+            open class AVAudioSession: NSObject {
+                public struct Category: Hashable, RawRepresentable { public var rawValue: Swift.String; public init(rawValue: Swift.String) { self.rawValue = rawValue } }
+                public struct Mode: Hashable, RawRepresentable { public var rawValue: Swift.String; public init(rawValue: Swift.String) { self.rawValue = rawValue } }
+                public struct CategoryOptions: OptionSet, Sendable { public var rawValue: Swift.UInt; public init(rawValue: Swift.UInt) { self.rawValue = rawValue } }
+            }
+            """
         }
 
         // Fix: StoreKit `StoreProductManager` is declared as an actor but Swift 6 strict
@@ -1608,7 +1624,7 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
         // These are SPI/internal types (e.g. `_AxisContentOutputs` in Charts) that appear as
         // parameter or return types but whose definitions aren't in the public TBD.
         var declaredTypes = Set<String>()
-        let declPattern = "(?:public\\s+(?:struct|class|enum|protocol|typealias)|typealias)\\s+(_[A-Za-z][A-Za-z0-9_]*)"
+        let declPattern = "(?:public\\s+(?:struct|class|enum|protocol|typealias)|typealias|extension)\\s+(_[A-Za-z][A-Za-z0-9_]*)"
         if let declRegex = try? NSRegularExpression(pattern: declPattern, options: []) {
             let nsRange = NSRange(c.startIndex..<c.endIndex, in: c)
             for m in declRegex.matches(in: c, options: [], range: nsRange) {
