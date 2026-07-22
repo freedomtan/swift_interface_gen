@@ -7,7 +7,7 @@
 uses a curated 18-framework baseline (`--frameworks` to pick specific ones, `--all` for
 all ~193 discovered).
 
-**Status as of branch `using_public_framework_as_groundtruth`**: **11/18 PASS**.
+**Status as of branch `using_public_framework_as_groundtruth`**: **12/18 PASS**.
 
 ---
 
@@ -26,6 +26,7 @@ Sorted by TBD symbol count (smallest/easiest first):
 - Combine (2085)
 - StoreKit (2156)
 - SoundAnalysis (2406)
+- Speech (3323)
 
 Each of these was root-caused and fixed via real-tbd-vs-real-swiftinterface comparison —
 see git log on this branch for the individual fix commits and their detailed messages
@@ -50,9 +51,6 @@ conformances (the witness thunk's mangled name uses the protocol's own generic p
 `x` rather than `AnyChartContent`, and gets dropped entirely once the exports allowlist is
 applied) — investigated but not resolved; needs deeper linker/ABI investigation or an
 upstream Swift bug report. Charts still reports ERROR, not PASS.
-
-### Speech (3323 symbols)
-Not yet investigated this session — needs a fresh root-cause pass.
 
 ### CreateML (3849 symbols)
 Not yet investigated this session — needs a fresh root-cause pass.

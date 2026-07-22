@@ -147,6 +147,24 @@ typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
 
 """
                 }
+                // SFSpeechRecognitionTaskHint/SFSpeechErrorCode are real public ObjC enums
+                // (Speech/SFSpeechRecognitionTaskHint.h, Speech/SFErrors.h) referenced only as
+                // parameter/property types, never extended — so the parser's `isObjcBridged`
+                // discovery (which only fires for So-prefixed *extension* symbols) never finds
+                // them, and no declaration for them ends up in bridgedTypes above. Stub them
+                // here so the __C.SFSpeechRecognitionTaskHint/__C.SFSpeechErrorCode references
+                // resolve.
+                if currentModule == "Speech" {
+                    bridgeHeader += """
+typedef NS_ENUM(NSInteger, SFSpeechRecognitionTaskHint) {
+    SFSpeechRecognitionTaskHintUnspecified = 0
+};
+typedef NS_ENUM(NSInteger, SFSpeechErrorCode) {
+    SFSpeechErrorCodeInternalServiceError = 1
+};
+
+"""
+                }
                 let bridgeImpl   = implLines.joined(separator: "\n")   + "\n"
                 try? bridgeHeader.write(toFile: "\(currentModule)Interface_bridge.h", atomically: true, encoding: .utf8)
                 try? bridgeImpl.write(toFile:   "\(currentModule)Interface_bridge.m", atomically: true, encoding: .utf8)
@@ -1216,6 +1234,53 @@ typedef NS_ENUM(NSInteger, MLMultiArrayDataType) {
         if parser.defaultModule == "StoreKit" {
             c = c.replacingOccurrences(of: "public actor StoreProductManager",
                                         with: "public final class StoreProductManager: @unchecked Sendable")
+        }
+
+        // Fix: AttributeScopes.ConfidenceAttribute/TimeRangeAttribute conform to
+        // AttributedStringKey (`associatedtype Value: Hashable`), which resolves to Double/
+        // CMTimeRange respectively in the real module — never visible from the ABI since these
+        // are plain typealiases with no symbol of their own.
+        if parser.defaultModule == "Speech" {
+            c = c.replacingOccurrences(
+                of: "public struct ConfidenceAttribute: AttributedStringKey, DecodableAttributedStringKey, EncodableAttributedStringKey {",
+                with: "public struct ConfidenceAttribute: AttributedStringKey, DecodableAttributedStringKey, EncodableAttributedStringKey {\n        public typealias Value = Double")
+            c = c.replacingOccurrences(
+                of: "public struct TimeRangeAttribute: AttributedStringKey, DecodableAttributedStringKey, EncodableAttributedStringKey {",
+                with: "public struct TimeRangeAttribute: AttributedStringKey, DecodableAttributedStringKey, EncodableAttributedStringKey {\n        public typealias Value = CMTimeRange")
+            // Fix: SpeechModule requires `associatedtype Result: SpeechModuleResult` and
+            // `associatedtype Results: AsyncSequence` plus `var results: Self.Results { get }`.
+            // Concrete classes expose a nested SpeechModuleResult type (Result or ModuleOutput)
+            // and a `results` property typed as `some Sendable & AsyncSequence`. This opaque type
+            // does NOT satisfy `var results: Self.Results` because the compiler can't verify
+            // `some Sendable & AsyncSequence == AsyncStream<Result>`.
+            //
+            // Fix strategy:
+            //   1. For EndpointDetector (uses ModuleOutput not Result):
+            //      inject `typealias Result = ModuleOutput` + `typealias Results = AsyncStream<ModuleOutput>`
+            //      before `struct ModuleOutput`.
+            //   2. For all other classes (struct Result):
+            //      inject `typealias Results = AsyncStream<Result>` before `struct Result`.
+            //   3. Change every `results: some Sendable & AsyncSequence { get { return AsyncStream<Never> { _ in } } }`
+            //      to `results: Results { get { fatalError() } }` so the property type matches.
+            //
+            // EndpointDetector: anchor on `struct ModuleOutput`
+            c = c.replacingOccurrences(
+                of: "    public struct ModuleOutput: CustomStringConvertible, SpeechModuleResult {",
+                with: "    public typealias Result = ModuleOutput\n    public typealias Results = AsyncStream<ModuleOutput>\n    public struct ModuleOutput: CustomStringConvertible, SpeechModuleResult {")
+            // All other SpeechModule classes: anchor on `struct Result: ... SpeechModuleResult`
+            c = c.replacingOccurrences(
+                of: "    public struct Result: CustomStringConvertible, SpeechModuleResult",
+                with: "    public typealias Results = AsyncStream<Result>\n    public struct Result: CustomStringConvertible, SpeechModuleResult")
+            // SpeechDetector has `struct Result: CustomStringConvertible, Hashable, SpeechModuleResult`
+            // which is already covered by the Hashable variant below. Handle both variants:
+            c = c.replacingOccurrences(
+                of: "    public struct Result: CustomStringConvertible, Hashable, SpeechModuleResult",
+                with: "    public typealias Results = AsyncStream<Result>\n    public struct Result: CustomStringConvertible, Hashable, SpeechModuleResult")
+            // Change `results: some Sendable & AsyncSequence { get { return AsyncStream<Never> { _ in } } }`
+            // to `results: Results { get { fatalError() } }` so the type matches `Self.Results`.
+            c = c.replacingOccurrences(
+                of: "    public final var results: some Sendable & AsyncSequence { get { return AsyncStream<Never> { _ in } } }",
+                with: "    public final var results: Results { get { fatalError() } }")
         }
 
         // Fix: Charts's ChartContent requires `associatedtype Body: ChartContent`. Mark types
