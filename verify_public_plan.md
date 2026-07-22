@@ -7,11 +7,11 @@
 uses a curated 18-framework baseline (`--frameworks` to pick specific ones, `--all` for
 all ~193 discovered).
 
-**Status as of branch `using_public_framework_as_groundtruth`**: **12/18 PASS**.
+**Status as of branch `using_public_framework_as_groundtruth`**: **13/18 PASS**.
 
 ---
 
-## ✅ PASSING (11/18)
+## ✅ PASSING (13/18)
 
 Sorted by TBD symbol count (smallest/easiest first):
 
@@ -27,13 +27,25 @@ Sorted by TBD symbol count (smallest/easiest first):
 - StoreKit (2156)
 - SoundAnalysis (2406)
 - Speech (3323)
+- CreateML (3849)
 
 Each of these was root-caused and fixed via real-tbd-vs-real-swiftinterface comparison —
 see git log on this branch for the individual fix commits and their detailed messages
 (each documents the specific root cause: shadowed nested types, mis-demangled associated
 types, Swift-3 renamed C types, missing generic-parameter detection, etc.).
 
-## ❌ REMAINING (7/18), smallest first
+### CreateML fix detail
+First-pass errors were all `cannot find type 'NLLanguage'`/`'NLDistanceType'`/
+`'VNImageCropAndScaleOption'` in scope — CreateML's real `.swiftinterface` imports
+`NaturalLanguage` and `Vision`, but `resolveImports()` in `main.swift` had no substring
+trigger for either module, so the generated interface never imported them even though it
+referenced their types. Fixed by adding two rules to `resolveImports()`: `NLLanguage`/
+`NLDistanceType` → import `NaturalLanguage`; `VNImageCropAndScaleOption`/`VNRequest`/
+`VNBarcodeSymbology` → import `Vision`. Both are real SDK frameworks, so
+`verify_public.py`'s stub-generation step skips them and links against the real ones
+directly. No Parser.swift/Model.swift changes needed.
+
+## ❌ REMAINING (5/18), smallest first
 
 ### Charts (2021 symbols)
 **Mostly fixed** (commit `2509588`): all ~15 first-pass compile errors are resolved (shadowed
@@ -51,9 +63,6 @@ conformances (the witness thunk's mangled name uses the protocol's own generic p
 `x` rather than `AnyChartContent`, and gets dropped entirely once the exports allowlist is
 applied) — investigated but not resolved; needs deeper linker/ABI investigation or an
 upstream Swift bug report. Charts still reports ERROR, not PASS.
-
-### CreateML (3849 symbols)
-Not yet investigated this session — needs a fresh root-cause pass.
 
 ### GameKit (4680 symbols)
 Not yet investigated this session — needs a fresh root-cause pass.

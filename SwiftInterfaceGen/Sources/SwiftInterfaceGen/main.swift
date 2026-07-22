@@ -203,6 +203,8 @@ typedef NS_ENUM(NSInteger, SFSpeechErrorCode) {
         if code.contains("CoreLocation.") || code.contains("CLLocation") { imports.insert("CoreLocation") }
         if code.contains("UAF") && currentModule != "UnifiedAssetFramework" { imports.insert("UnifiedAssetFramework") }
         if code.contains("LAContext") { imports.insert("LocalAuthentication") }
+        if code.contains("NLLanguage") || code.contains("NLDistanceType") { imports.insert("NaturalLanguage") }
+        if code.contains("VNImageCropAndScaleOption") || code.contains("VNRequest") || code.contains("VNBarcodeSymbology") { imports.insert("Vision") }
         
         for mod in parser.discoveredNamespaces {
             let pattern = "(?:^|[^.])\\b\(NSRegularExpression.escapedPattern(for: mod))\\."
