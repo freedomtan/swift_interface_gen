@@ -7,11 +7,11 @@
 uses a curated 18-framework baseline (`--frameworks` to pick specific ones, `--all` for
 all ~193 discovered).
 
-**Status as of branch `using_public_framework_as_groundtruth`**: **10/18 PASS**.
+**Status as of branch `using_public_framework_as_groundtruth`**: **11/18 PASS**.
 
 ---
 
-## ✅ PASSING (10/18)
+## ✅ PASSING (11/18)
 
 Sorted by TBD symbol count (smallest/easiest first):
 
@@ -25,13 +25,14 @@ Sorted by TBD symbol count (smallest/easiest first):
 - CryptoKit (1886)
 - Combine (2085)
 - StoreKit (2156)
+- SoundAnalysis (2406)
 
 Each of these was root-caused and fixed via real-tbd-vs-real-swiftinterface comparison —
 see git log on this branch for the individual fix commits and their detailed messages
 (each documents the specific root cause: shadowed nested types, mis-demangled associated
 types, Swift-3 renamed C types, missing generic-parameter detection, etc.).
 
-## ❌ REMAINING (8/18), smallest first
+## ❌ REMAINING (7/18), smallest first
 
 ### Charts (2021 symbols)
 **Mostly fixed** (commit `2509588`): all ~15 first-pass compile errors are resolved (shadowed
@@ -49,9 +50,6 @@ conformances (the witness thunk's mangled name uses the protocol's own generic p
 `x` rather than `AnyChartContent`, and gets dropped entirely once the exports allowlist is
 applied) — investigated but not resolved; needs deeper linker/ABI investigation or an
 upstream Swift bug report. Charts still reports ERROR, not PASS.
-
-### SoundAnalysis (2302 symbols)
-Not yet investigated this session — needs a fresh root-cause pass.
 
 ### Speech (3323 symbols)
 Not yet investigated this session — needs a fresh root-cause pass.
