@@ -116,8 +116,13 @@ class Parser {
         "NSPredicate", "NSSortDescriptor",
         // Swift error types that must resolve to stdlib, not local stubs
         "CancellationError", "DecodingError", "EncodingError",
-        // Foundation ObjC-bridged types that must use __C.NSError, not a local stub
-        "NSError", "NSException"
+        // Foundation / AppKit ObjC-bridged types that must use system types, not local stubs
+        "NSError", "NSException",
+        "NSView", "NSViewController", "NSWindow", "NSColor", "NSFont", "NSImage",
+        "NSVisualEffectView", "NSCollectionView", "NSCollectionViewItem", "NSCollectionViewLayout",
+        "NSCollectionViewLayoutAttributes", "NSCollectionLayoutItem", "NSCollectionLayoutSection",
+        "NSDirectionalEdgeInsets", "NSValidatedUserInterfaceItem", "NSParagraphStyle",
+        "NSResponder", "NSEvent", "NSMenu", "NSMenuItem", "NSAlert"
     ])
     
     var defaultArguments = [String: Set<Int>]()
@@ -2091,11 +2096,11 @@ class Parser {
     }
 
     func isTypeDefinedInFramework(module: String, typeName: String) -> Bool {
-        if module == "Swift" {
+        if module == "Swift" || module == "__C" {
             return systemTypes.contains(typeName)
         }
         let systemModules: Set<String> = [
-            "Swift", "Foundation", "ObjectiveC", "__C", "Dispatch", 
+            "Swift", "Foundation", "ObjectiveC", "Dispatch", 
             "Metal", "IOSurface", "CoreGraphics", "CoreVideo", 
             "CoreMedia", "CoreImage", "CoreML", "UniformTypeIdentifiers"
         ]

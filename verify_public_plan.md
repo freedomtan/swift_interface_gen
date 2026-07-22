@@ -7,11 +7,11 @@
 uses a curated 18-framework baseline (`--frameworks` to pick specific ones, `--all` for
 all ~193 discovered).
 
-**Status as of branch `using_public_framework_as_groundtruth`**: **13/18 PASS**.
+**Status as of branch `using_public_framework_as_groundtruth`**: **14/18 PASS**.
 
 ---
 
-## ✅ PASSING (13/18)
+## ✅ PASSING (14/18)
 
 Sorted by TBD symbol count (smallest/easiest first):
 
@@ -28,24 +28,22 @@ Sorted by TBD symbol count (smallest/easiest first):
 - SoundAnalysis (2406)
 - Speech (3323)
 - CreateML (3849)
+- GameKit (4680)
 
-Each of these was root-caused and fixed via real-tbd-vs-real-swiftinterface comparison —
+Each of these was root-rooted and fixed via real-tbd-vs-real-swiftinterface comparison —
 see git log on this branch for the individual fix commits and their detailed messages
 (each documents the specific root cause: shadowed nested types, mis-demangled associated
-types, Swift-3 renamed C types, missing generic-parameter detection, etc.).
+types, Swift-3/4 renamed C types, missing generic-parameter detection, etc.).
 
-### CreateML fix detail
-First-pass errors were all `cannot find type 'NLLanguage'`/`'NLDistanceType'`/
-`'VNImageCropAndScaleOption'` in scope — CreateML's real `.swiftinterface` imports
-`NaturalLanguage` and `Vision`, but `resolveImports()` in `main.swift` had no substring
-trigger for either module, so the generated interface never imported them even though it
-referenced their types. Fixed by adding two rules to `resolveImports()`: `NLLanguage`/
-`NLDistanceType` → import `NaturalLanguage`; `VNImageCropAndScaleOption`/`VNRequest`/
-`VNBarcodeSymbology` → import `Vision`. Both are real SDK frameworks, so
-`verify_public.py`'s stub-generation step skips them and links against the real ones
-directly. No Parser.swift/Model.swift changes needed.
+### GameKit fix detail
+Fixes multiple distinct C/ObjC issues:
+1. `isTypeDefinedInFramework(module: "__C", ...)` in `Parser.swift` unconditionally returned `true` because `"__C"` was in `systemModules`, causing private/undeclared C types (like `RBSAssertion`, `ACDAccountStore`) to emit circular typealiases (`public typealias __C_RBSAssertion = RBSAssertion`) instead of struct/class stubs, producing "cannot find type in scope" errors. Fixed by checking `systemTypes.contains(typeName)` for `__C`.
+2. Added missing AppKit UI system types (`NSView`, `NSViewController`, `NSWindow`, `NSColor`, `NSFont`, `NSImage`, `NSVisualEffectView`, `NSCollectionView`, `NSCollectionViewItem`, `NSCollectionViewLayout`, `NSCollectionViewLayoutAttributes`, `NSCollectionLayoutItem`, `NSCollectionLayoutSection`, `NSDirectionalEdgeInsets`, `NSValidatedUserInterfaceItem`, `NSParagraphStyle`, `NSResponder`, `NSEvent`, `NSMenu`, `NSMenuItem`, `NSAlert`) to `systemTypes` in `Parser.swift`.
+3. Added Swift 3/4 C-type renames in `main.swift`: `NSVisualEffectBlendingMode` -> `NSVisualEffectView.BlendingMode`, `NSVisualEffectMaterial` -> `NSVisualEffectView.Material`, `NSCollectionViewItemHighlightState` -> `NSCollectionViewItem.HighlightState`, `NSCollectionViewScrollDirection` -> `NSCollectionView.ScrollDirection`, `NSURLSession*` -> `URLSession*`.
+4. Added regex cleanup in `main.swift` for invalid dot-containing `__C_` declarations.
+5. Added `Accounts` and `RunningBoardServices` import triggers in `resolveImports()`.
 
-## ❌ REMAINING (5/18), smallest first
+## ❌ REMAINING (4/18), smallest first
 
 ### Charts (2021 symbols)
 **Mostly fixed** (commit `2509588`): all ~15 first-pass compile errors are resolved (shadowed

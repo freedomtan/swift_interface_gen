@@ -205,6 +205,8 @@ typedef NS_ENUM(NSInteger, SFSpeechErrorCode) {
         if code.contains("LAContext") { imports.insert("LocalAuthentication") }
         if code.contains("NLLanguage") || code.contains("NLDistanceType") { imports.insert("NaturalLanguage") }
         if code.contains("VNImageCropAndScaleOption") || code.contains("VNRequest") || code.contains("VNBarcodeSymbology") { imports.insert("Vision") }
+        if code.contains("ACAccount") { imports.insert("Accounts") }
+        if code.contains("RBSAssertion") || code.contains("RBS") { imports.insert("RunningBoardServices") }
         
         for mod in parser.discoveredNamespaces {
             let pattern = "(?:^|[^.])\\b\(NSRegularExpression.escapedPattern(for: mod))\\."
@@ -1196,6 +1198,25 @@ typedef NS_ENUM(NSInteger, SFSpeechErrorCode) {
         c = c.replacingOccurrences(of: "AVAudioSessionCategory", with: "AVAudioSession.Category")
         c = c.replacingOccurrences(of: "AVAudioSessionMode", with: "AVAudioSession.Mode")
         c = c.replacingOccurrences(of: "NSUserDefaults", with: "UserDefaults")
+        c = c.replacingOccurrences(of: "public typealias __C_NSVisualEffectBlendingMode = NSVisualEffectBlendingMode", with: "")
+        c = c.replacingOccurrences(of: "public typealias __C_NSVisualEffectMaterial = NSVisualEffectMaterial", with: "")
+        c = c.replacingOccurrences(of: "NSVisualEffectBlendingMode", with: "NSVisualEffectView.BlendingMode")
+        c = c.replacingOccurrences(of: "NSVisualEffectMaterial", with: "NSVisualEffectView.Material")
+        c = c.replacingOccurrences(of: "public typealias __C_NSCollectionViewItemHighlightState = NSCollectionViewItemHighlightState", with: "")
+        c = c.replacingOccurrences(of: "public typealias __C_NSCollectionViewScrollDirection = NSCollectionViewScrollDirection", with: "")
+        c = c.replacingOccurrences(of: "NSCollectionViewItemHighlightState", with: "NSCollectionViewItem.HighlightState")
+        c = c.replacingOccurrences(of: "NSCollectionViewScrollDirection", with: "NSCollectionView.ScrollDirection")
+        c = c.replacingOccurrences(of: "public typealias __C_NSURLSessionTask = NSURLSessionTask", with: "")
+        c = c.replacingOccurrences(of: "public typealias __C_NSURLSessionTaskMetrics = NSURLSessionTaskMetrics", with: "")
+        c = c.replacingOccurrences(of: "public typealias __C_NSURLSessionConfiguration = NSURLSessionConfiguration", with: "")
+        c = c.replacingOccurrences(of: "public typealias __C_NSURLSession = NSURLSession", with: "")
+        c = c.replacingOccurrences(of: "NSURLSessionTaskMetrics", with: "URLSessionTaskMetrics")
+        c = c.replacingOccurrences(of: "NSURLSessionTask", with: "URLSessionTask")
+        c = c.replacingOccurrences(of: "NSURLSessionConfiguration", with: "URLSessionConfiguration")
+        c = c.replacingOccurrences(of: "NSURLSession", with: "URLSession")
+
+        // Clean up invalid declarations with dots in name like `public struct __C_NSVisualEffectView.BlendingMode`
+        c = c.replacingOccurrences(of: "public\\s+(?:struct|class|enum|typealias)\\s+__C_[A-Za-z0-9_]+\\.[^\n]+\n?", with: "", options: .regularExpression)
 
         if parser.defaultModule == "SoundAnalysis" {
             c = c.replacingOccurrences(of: "public typealias __C_SNRequest = SNRequest", with: "")
