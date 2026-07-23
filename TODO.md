@@ -8,10 +8,10 @@
 - [x] **Eliminate all ModelCatalog first-pass stubs (was 11, then 10, now 0):**
   - Constrained extension `ResourceBundleIdentifier<where A==LLMBundle>.serverConfiguration()` fixed via `<A: ResourceBundle>` generic constraint in `Model.swift`.
   - `fA_` default-argument accessor stubs eliminated by: (a) emitting typed constant defaults (`[]`, `[:]`, `{ false }`, `{ _ in false }`, `_Default_Proto()`) so Swift natively compiles the thunks, and (b) switching `--compare` from `nm -gU` to `nm -U` so locally-scoped thunks are found without assembly stubs.
-- [x] **Public-framework ground-truth verification (`verify_public.py`), curated 18-framework suite: 14/18 PASS** (see `verify_public_plan.md` for per-framework detail and the remaining 4).
-  - Fixed: NearbyInteraction, Translation, TipKit, CoreML, MetricKit, TabularData, SwiftData, CryptoKit, Combine, StoreKit, SoundAnalysis, Speech, CreateML, GameKit.
+- [x] **Public-framework ground-truth verification (`verify_public.py`), curated 18-framework suite: 15/18 PASS** (see `verify_public_plan.md` for per-framework detail and the remaining 3).
+  - Fixed: NearbyInteraction, Translation, TipKit, CoreML, MetricKit, TabularData, SwiftData, CryptoKit, Combine, StoreKit, SoundAnalysis, Speech, CreateML, GameKit, HealthKit.
   - Each fix verified against zero regressions in the 9 private targets (`run_regression_tests.py`) plus Combine (`orchestrate.py`).
-  - Remaining: Charts, HealthKit, Vision, Network.
+  - Remaining: Charts, Vision, Network.
 
 ## Future Improvements
 

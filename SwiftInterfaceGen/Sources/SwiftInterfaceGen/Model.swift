@@ -1277,6 +1277,10 @@ class TypeNode {
                 // but not AsyncSequence). An opaque `some ... AsyncSequence` return needs a
                 // concrete underlying type at the fatalError() call site to type-check (a
                 // Never-returning body alone can't establish one) — use AsyncStream<Never>.
+                if (n == "countProvider" || n == "durationProvider") && t == "some Sendable" {
+                    if n == "countProvider" { t = "SleepMetrics.Counts" }
+                    if n == "durationProvider" { t = "SleepMetrics.Durations" }
+                }
                 var resultsElementType = "Never"
                 if n == "results" && t == "some Sendable" && hasConformance("SpeechModule") {
                     t = "some Sendable & AsyncSequence"

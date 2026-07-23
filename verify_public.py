@@ -218,7 +218,19 @@ def test_framework(name, tbd, swiftinterface_path, work_dir):
         return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
     def emit_empty_stub(mod_name):
-        """Emit a minimal Swift stub framework so `import ModName` resolves."""
+        """Emit a minimal Swift stub framework so `import ModName` resolves.
+
+        If a real, already-built framework for this module exists in the project's
+        own LocalFrameworks/ (built by orchestrate.py's private-target pipeline, e.g.
+        FeatureFlags), copy that instead of an empty stub — an empty stub would be
+        missing every real declaration (e.g. HealthKit's `FeatureFlags.FeatureFlagsKey`
+        conformance), causing spurious "no type named X in module" errors.
+        """
+        project_fw = str(SCRIPT_DIR / "LocalFrameworks" / f"{mod_name}.framework")
+        if os.path.exists(project_fw):
+            fw = os.path.join(local_fw, f"{mod_name}.framework")
+            shutil.copytree(project_fw, fw, dirs_exist_ok=True)
+            return
         fw = os.path.join(local_fw, f"{mod_name}.framework")
         mod_dir = os.path.join(fw, "Modules", f"{mod_name}.swiftmodule")
         os.makedirs(mod_dir, exist_ok=True)

@@ -2432,8 +2432,13 @@ class Parser {
                 if moduleName == defaultModule, let extInfo = stdlibTypeExtensions[type.name] {
                     // Qualify with the extended type's own module (e.g. "TokenGeneration.Prompt"
                     // vs "PromptKit.Prompt") so extending two same-named types from different
-                    // modules doesn't produce an ambiguous bare "extension Prompt {".
-                    output += "extension \(extInfo.module).\(extInfo.stdlibType) {\n"
+                    // modules doesn't produce an ambiguous bare "extension Prompt {". "__C" isn't
+                    // a real importable module though (see the "__C." stripping convention in
+                    // simplifyType) — an ObjC-bridged type like HKAttachment becomes directly
+                    // visible under its bare name, so qualifying with "__C." here would produce
+                    // "cannot find type '__C' in scope".
+                    let extPrefix = extInfo.module == "__C" ? "" : "\(extInfo.module)."
+                    output += "extension \(extPrefix)\(extInfo.stdlibType) {\n"
                     // Replace any bare outer generic-param placeholders (A, B, C…) with Any.
                     // These come from the enclosing stdlib type's own type params (e.g. Optional<Wrapped>
                     // or Result<Success, Failure>), which are not in scope inside the inner struct.
@@ -2614,7 +2619,17 @@ class Parser {
                         let gps = genericParamsString(for: type)
                         
                         // Check if type is publicly defined in the SDK or Local framework modules
-                        if isTypeDefinedInFramework(module: moduleName, typeName: type.name) {
+                        // HealthKit's ObjC bridge header (main.swift) declares HKDataCacheContext/
+                        // HKDataCacheProviding/HKWorkoutMetricsDelegate as real @protocol
+                        // declarations (they have no Swift-visible ABI symbol at all) — skip the
+                        // stub-struct fallback below for them so the bridged protocol declaration
+                        // is what "HKDataCacheProviding" resolves to, not a conflicting struct.
+                        let hkBridgedProtocolNames: Set<String> = [
+                            "HKDataCacheContext", "HKDataCacheProviding", "HKWorkoutMetricsDelegate"
+                        ]
+                        if defaultModule == "HealthKit" && moduleName == "__C" && hkBridgedProtocolNames.contains(type.name) {
+                            // no-op: real declaration comes from the bridge header
+                        } else if isTypeDefinedInFramework(module: moduleName, typeName: type.name) {
                             if moduleName == "__C" {
                                 output += "public typealias \(flattenedName)\(gps) = \(type.name)\(gps)\n"
                             } else {
@@ -2623,6 +2638,21 @@ class Parser {
                         } else {
                             // Leak/Missing type in dependency - generate local stub to compile
                             output += "public struct \(flattenedName)\(gps): Hashable, Codable, Sendable {}\n"
+                            // Some "__C" types (real ObjC classes/protocols with no Swift-visible
+                            // declaration anywhere in the TBD — not even an objc-classes: entry,
+                            // e.g. HealthKit's HKDataCacheContext/HKDataCacheProviding, only ever
+                            // seen inside another symbol's signature) are referenced elsewhere in
+                            // the generated code under their bare ObjC name, not the flattened
+                            // "__C_Name" stub name — expose the stub under that bare name too.
+                            // Scoped to defaultModule == "HealthKit" (not every undeclared "__C"
+                            // type in any framework) because the bare name can otherwise collide
+                            // with an unrelated real system type declared elsewhere (e.g.
+                            // MetricKit references Foundation.UnitConverter, which isn't itself
+                            // declared in MetricKit's own TBD and would get shadowed by a
+                            // same-named stub struct here if this applied unconditionally).
+                            if defaultModule == "HealthKit" && moduleName == "__C" {
+                                output += "public typealias \(type.name)\(gps) = \(flattenedName)\(gps)\n"
+                            }
                         }
                     }
                 }

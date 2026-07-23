@@ -7,11 +7,11 @@
 uses a curated 18-framework baseline (`--frameworks` to pick specific ones, `--all` for
 all ~193 discovered).
 
-**Status as of branch `using_public_framework_as_groundtruth`**: **14/18 PASS**.
+**Status as of branch `using_public_framework_as_groundtruth`**: **15/18 PASS**.
 
 ---
 
-## ✅ PASSING (14/18)
+## ✅ PASSING (15/18)
 
 Sorted by TBD symbol count (smallest/easiest first):
 
@@ -29,6 +29,7 @@ Sorted by TBD symbol count (smallest/easiest first):
 - Speech (3323)
 - CreateML (3849)
 - GameKit (4680)
+- HealthKit (5087)
 
 Each of these was root-rooted and fixed via real-tbd-vs-real-swiftinterface comparison —
 see git log on this branch for the individual fix commits and their detailed messages
@@ -43,7 +44,11 @@ Fixes multiple distinct C/ObjC issues:
 4. Added regex cleanup in `main.swift` for invalid dot-containing `__C_` declarations.
 5. Added `Accounts` and `RunningBoardServices` import triggers in `resolveImports()`.
 
-## ❌ REMAINING (4/18), smallest first
+### HealthKit fix detail
+1. Resolved `SleepAverageProviding` associated type inference for `countProvider`/`durationProvider` opaque return types by resolving `countProvider` -> `SleepMetrics.Counts` and `durationProvider` -> `SleepMetrics.Durations`.
+2. Simplified demangled `QueryDescriptor` extension constraint paths (`Configuration.WithPredicate.PredicatedModelKind` -> `PredicatedModelKind`, `Configuration.WithSortDescriptor.SortedModelKind` -> `SortedModelKind`).
+
+## ❌ REMAINING (3/18), smallest first
 
 ### Charts (2021 symbols)
 **Mostly fixed** (commit `2509588`): all ~15 first-pass compile errors are resolved (shadowed
@@ -61,12 +66,6 @@ conformances (the witness thunk's mangled name uses the protocol's own generic p
 `x` rather than `AnyChartContent`, and gets dropped entirely once the exports allowlist is
 applied) — investigated but not resolved; needs deeper linker/ABI investigation or an
 upstream Swift bug report. Charts still reports ERROR, not PASS.
-
-### GameKit (4680 symbols)
-Not yet investigated this session — needs a fresh root-cause pass.
-
-### HealthKit (5084 symbols)
-Not yet investigated this session — needs a fresh root-cause pass.
 
 ### Vision (10163 symbols)
 First error: `type 'AlignFaceRectanglesRequest' does not conform to protocol 'VisionRequest'`.
