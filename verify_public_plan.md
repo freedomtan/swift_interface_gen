@@ -7,11 +7,11 @@
 uses a curated 18-framework baseline (`--frameworks` to pick specific ones, `--all` for
 all ~193 discovered).
 
-**Status as of branch `using_public_framework_as_groundtruth`**: **15/18 PASS**.
+**Status as of branch `using_public_framework_as_groundtruth`**: **16/18 PASS**.
 
 ---
 
-## ✅ PASSING (15/18)
+## ✅ PASSING (16/18)
 
 Sorted by TBD symbol count (smallest/easiest first):
 
@@ -30,6 +30,7 @@ Sorted by TBD symbol count (smallest/easiest first):
 - CreateML (3849)
 - GameKit (4680)
 - HealthKit (5087)
+- Vision (10163)
 
 Each of these was root-rooted and fixed via real-tbd-vs-real-swiftinterface comparison —
 see git log on this branch for the individual fix commits and their detailed messages
@@ -48,7 +49,37 @@ Fixes multiple distinct C/ObjC issues:
 1. Resolved `SleepAverageProviding` associated type inference for `countProvider`/`durationProvider` opaque return types by resolving `countProvider` -> `SleepMetrics.Counts` and `durationProvider` -> `SleepMetrics.Durations`.
 2. Simplified demangled `QueryDescriptor` extension constraint paths (`Configuration.WithPredicate.PredicatedModelKind` -> `PredicatedModelKind`, `Configuration.WithSortDescriptor.SortedModelKind` -> `SortedModelKind`).
 
-## ❌ REMAINING (3/18), smallest first
+### Vision fix detail
+Fixes multiple distinct root causes, all found via TBD symbol demangling (Vision's real
+`.swiftinterface` doesn't cover these private/SPI declarations at all):
+1. `VisionRequest.associatedtype Result` has no ABI-visible default and no per-conformer
+   typealias anywhere across ~50 conforming structs/classes (satisfied only via generic
+   `perform<each GenericA>` methods, never a per-conformer witness) — gave the protocol
+   itself a default associated-type value (`associatedtype Result = Never`) instead of
+   patching every conformer.
+2. `VisionRequest.supportedComputeStageDevices` has no default implementation (unlike
+   `computeDevice(for:)`/`requireInProcessExecution`, which already had one) and several
+   conformers (e.g. `TrackRectangleRequest`) never implement it themselves — added a default
+   impl to the existing `extension VisionRequest { ... }` block.
+3. `PoseProviding.PoseJointName` used as a Dictionary key but only constrained `: Decodable`
+   in the generated code — real ABI requires `Hashable` too; added the constraint.
+4. `Attribute<A>.allLabelsAndConfidences: [A : Float]` uses `A` as a Dictionary key with no
+   `Hashable` constraint on `A` — added it.
+5. `AVDepthData` referenced but never triggered an `AVFoundation` import (the real, non-stub
+   declaration); added `AVDepthData` as an import trigger in `resolveImports()`.
+6. `CMSampleBufferRef` (Swift 3 renamed to `CMSampleBuffer`) — added to the general
+   `simplifyType` rename list (alongside the existing `CVBufferRef` -> `CVBuffer` rename).
+7. `XPCCodableObject` referenced bare but doesn't exist anywhere in the real `XPC` module
+   (checked its swiftinterface directly) — same class of issue as HealthKit's
+   `HKDataCacheContext`/`HKDataCacheProviding`, just in module `XPC` instead of `__C`; exposed
+   the flattened stub (`XPC_XPCCodableObject`) under its bare name too.
+8. `repeat each GenericA.Result` parses as `repeat (each GenericA.Result)` — invalid, since a
+   pack-expansion member access must bind the pack element first (`repeat (each
+   GenericA).Result`). The existing pack-detection logic in `Model.swift` did a blind
+   `"repeat X"` -> `"repeat each X"` string replace with no awareness of a trailing member
+   access; added a parenthesization pass for `repeat each X.` -> `repeat (each X).`.
+
+## ❌ REMAINING (2/18), smallest first
 
 ### Charts (2021 symbols)
 **Mostly fixed** (commit `2509588`): all ~15 first-pass compile errors are resolved (shadowed
@@ -66,13 +97,6 @@ conformances (the witness thunk's mangled name uses the protocol's own generic p
 `x` rather than `AnyChartContent`, and gets dropped entirely once the exports allowlist is
 applied) — investigated but not resolved; needs deeper linker/ABI investigation or an
 upstream Swift bug report. Charts still reports ERROR, not PASS.
-
-### Vision (10163 symbols)
-First error: `type 'AlignFaceRectanglesRequest' does not conform to protocol 'VisionRequest'`.
-Also has ObjC bridge-header issues: `AVDepthData` forward-declared-only unavailability, and
-`VNBarcodeSymbology` not found in scope (likely needs the CoreImage/Vision ObjC bridge header
-extended). Large framework (10k+ symbols) — expect multiple distinct root causes bundled
-together, similar to SwiftData/CryptoKit.
 
 ### Network (13024 symbols)
 Largest framework in the curated set; already has substantial special-casing in

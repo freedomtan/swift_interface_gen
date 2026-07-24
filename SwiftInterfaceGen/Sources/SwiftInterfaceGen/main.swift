@@ -218,7 +218,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         if code.contains("NSWindow") || code.contains("NSView") || code.contains("NSViewController") || code.contains("NSResponder") { imports.insert("AppKit") }
         if code.contains("Combine.") && currentModule != "Combine" { imports.insert("Combine") }
         if code.contains("SwiftUI.") && currentModule != "SwiftUI" { imports.insert("SwiftUI") }
-        if code.contains("AVFoundation.") || code.contains("AVAudio") || code.contains("AVVideo") { imports.insert("AVFoundation") }
+        if code.contains("AVFoundation.") || code.contains("AVAudio") || code.contains("AVVideo") || code.contains("AVDepthData") { imports.insert("AVFoundation") }
         if code.contains("CoreLocation.") || code.contains("CLLocation") { imports.insert("CoreLocation") }
         if code.contains("UAF") && currentModule != "UnifiedAssetFramework" { imports.insert("UnifiedAssetFramework") }
         if code.contains("LAContext") { imports.insert("LocalAuthentication") }
@@ -1276,6 +1276,48 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         if parser.defaultModule == "StoreKit" {
             c = c.replacingOccurrences(of: "public actor StoreProductManager",
                                         with: "public final class StoreProductManager: @unchecked Sendable")
+        }
+
+        if parser.defaultModule == "Vision" {
+            // Fix: VisionRequest declares `associatedtype Result` with no ABI-visible default
+            // and no per-conformer typealias anywhere (satisfied only via the generic
+            // `perform<each GenericA>` methods on VisionRequestHandler, never a per-conformer
+            // ABI witness) — ~50 structs conform to VisionRequest, so give the protocol itself
+            // a default associated-type value (Swift resolves an unconstrained associatedtype
+            // to its default when no conformer supplies one) instead of patching every
+            // conformer individually.
+            if let declRange = c.range(of: "public protocol VisionRequest: CustomStringConvertible, Hashable {"),
+               let braceEnd = c.range(of: "\n}", range: declRange.upperBound..<c.endIndex) {
+                let bodyRange = declRange.upperBound..<braceEnd.lowerBound
+                var body = String(c[bodyRange])
+                body = body.replacingOccurrences(of: "associatedtype Result", with: "associatedtype Result = Never")
+                c.replaceSubrange(bodyRange, with: body)
+            }
+            // Fix: not every VisionRequest conformer implements
+            // `supportedComputeStageDevices: [ComputeStage : [MLComputeDevice]]` (e.g.
+            // TrackRectangleRequest has no ABI witness for it at all) — unlike
+            // computeDevice(for:)/requireInProcessExecution, which the generator already found
+            // a default `extension VisionRequest { ... }` implementation for, this one has no
+            // default anywhere either. Add one so non-implementing conformers still compile.
+            if let declRange = c.range(of: "extension VisionRequest {"),
+               let braceEnd = c.range(of: "\n}", range: declRange.upperBound..<c.endIndex) {
+                c.insert(contentsOf: "\n    public var supportedComputeStageDevices: [ComputeStage : [CoreML.MLComputeDevice]] { get { [:] } }", at: braceEnd.lowerBound)
+            }
+
+            // Fix: Attribute<A>'s allLabelsAndConfidences is [A : Float] (A used as a Dictionary
+            // key), but A has no Hashable constraint on the struct's own declaration.
+            c = c.replacingOccurrences(
+                of: "public struct Attribute<A>: Codable, CustomStringConvertible, Hashable {",
+                with: "public struct Attribute<A: Hashable>: Codable, CustomStringConvertible, Hashable {")
+
+            // Fix: PoseProviding.PoseJointName is used as a Dictionary key
+            // ([Self.PoseJointName : Joint]) but only declared `: Decodable` — the real ABI
+            // shows PoseJointName: Hashable too (found via the P0B9JointNameAC_SH conformance
+            // requirement symbol), just not resolved by the demangler-driven associated-type
+            // extraction here.
+            c = c.replacingOccurrences(
+                of: "associatedtype PoseJointName: Decodable",
+                with: "associatedtype PoseJointName: Decodable, Hashable")
         }
 
         if parser.defaultModule == "HealthKit" {

@@ -1187,6 +1187,10 @@ class TypeNode {
                         cleanedSig = cleanedSig.replacingOccurrences(of: ", \(param)>", with: ", each \(param)>")
                         cleanedSig = cleanedSig.replacingOccurrences(of: "repeat \(param)", with: "repeat each \(param)")
                         cleanedSig = cleanedSig.replacingOccurrences(of: "repeat  \(param)", with: "repeat each \(param)")
+                        // "repeat each A.Member" parses as "repeat (each A.Member)" — invalid,
+                        // since a pack-expansion member access must bind the pack element first:
+                        // "repeat (each A).Member". Parenthesize when a member access follows.
+                        cleanedSig = cleanedSig.replacingOccurrences(of: "repeat each \(param).", with: "repeat (each \(param)).")
                         
                         if let whereRange = cleanedSig.range(of: " where ") {
                             let before = String(cleanedSig[..<whereRange.upperBound])
@@ -1537,6 +1541,10 @@ class TypeNode {
                         cleanedSig = cleanedSig.replacingOccurrences(of: ", \(param)>", with: ", each \(param)>")
                         cleanedSig = cleanedSig.replacingOccurrences(of: "repeat \(param)", with: "repeat each \(param)")
                         cleanedSig = cleanedSig.replacingOccurrences(of: "repeat  \(param)", with: "repeat each \(param)")
+                        // "repeat each A.Member" parses as "repeat (each A.Member)" — invalid,
+                        // since a pack-expansion member access must bind the pack element first:
+                        // "repeat (each A).Member". Parenthesize when a member access follows.
+                        cleanedSig = cleanedSig.replacingOccurrences(of: "repeat each \(param).", with: "repeat (each \(param)).")
                         
                         if let whereRange = cleanedSig.range(of: " where ") {
                             let before = String(cleanedSig[..<whereRange.upperBound])
@@ -2481,7 +2489,12 @@ class TypeNode {
                         if isPack {
                             cleanedSig = cleanedSig.replacingOccurrences(of: "repeat \(param)", with: "repeat each \(param)")
                             cleanedSig = cleanedSig.replacingOccurrences(of: "repeat  \(param)", with: "repeat each \(param)")
-                            
+                            // "repeat each A.Member" parses as "repeat (each A.Member)" — invalid,
+                            // since a pack-expansion member access must bind the pack element
+                            // first: "repeat (each A).Member". Parenthesize when a member access
+                            // follows.
+                            cleanedSig = cleanedSig.replacingOccurrences(of: "repeat each \(param).", with: "repeat (each \(param)).")
+
                             if let whereRange = cleanedSig.range(of: " where ") {
                                 let before = String(cleanedSig[..<whereRange.upperBound])
                                 let after = String(cleanedSig[whereRange.upperBound...])

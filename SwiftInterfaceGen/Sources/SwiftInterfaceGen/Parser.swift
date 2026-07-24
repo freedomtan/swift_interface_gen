@@ -1565,6 +1565,7 @@ class Parser {
             }
         }
         t = t.replacingOccurrences(of: "CVBufferRef", with: "CVBuffer")
+        t = t.replacingOccurrences(of: "CMSampleBufferRef", with: "CMSampleBuffer")
         t = t.replaceWord("Decoder", with: "Swift.Decoder", allowPrecededByDot: false)
         t = t.replaceWord("Encoder", with: "Swift.Encoder", allowPrecededByDot: false)
         t = t.replaceWord("FormatStyle", with: "Foundation.FormatStyle", allowPrecededByDot: false)
@@ -2651,6 +2652,13 @@ class Parser {
                             // declared in MetricKit's own TBD and would get shadowed by a
                             // same-named stub struct here if this applied unconditionally).
                             if defaultModule == "HealthKit" && moduleName == "__C" {
+                                output += "public typealias \(type.name)\(gps) = \(flattenedName)\(gps)\n"
+                            }
+                            // Same root cause, different module: Vision's Serialization.decode/
+                            // encode reference bare XPCCodableObject, but that type doesn't exist
+                            // anywhere in the real XPC module (checked its swiftinterface directly)
+                            // — it's ABI-visible only inside Vision's own private declarations.
+                            if defaultModule == "Vision" && moduleName == "XPC" && type.name == "XPCCodableObject" {
                                 output += "public typealias \(type.name)\(gps) = \(flattenedName)\(gps)\n"
                             }
                         }
