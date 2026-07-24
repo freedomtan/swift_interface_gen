@@ -1070,7 +1070,7 @@ class TypeNode {
                 }
             case .property(let n, _, _, _):
                 isOverride = !isObjcBridged && baseClass == "NSObject" && ["description", "hash", "debugDescription"].contains(n)
-            case .method(let n, let sig, let isStatic):
+            case .method(let n, let sig, _):
                 if !isObjcBridged && baseClass == "NSObject" && ["isEqual"].contains(n) {
                     isOverride = true
                 } else if baseClass != nil && n == "baseUnit" {
@@ -2046,7 +2046,7 @@ class TypeNode {
                         }
                         
                         // 2. Synthesize missing methods/properties
-                        for (mName, mKind) in pn.members {
+                        for (_, mKind) in pn.members {
                             switch mKind {
                             case .method(let name, let sig, let isStatic):
                                 let hasMethodInMembers = self.members.values.contains {

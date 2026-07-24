@@ -785,7 +785,11 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         c = c.replacingOccurrences(of: "Foundation.FormatStyle", with: "___FOUNDATION_SHIELDED_FormatStyle___")
         c = c.replacingOccurrences(of: "Swift.Slice", with: "___SWIFT_SHIELDED_Slice___")
         
-        // Remove DistributedActorSystemError from conformances
+        // Remove DistributedActorSystemError from conformances. Order matters: the
+        // ": X, Rest" case must run before the "X, " / ", X" cases below, otherwise a leading
+        // conformance (": Distributed.DistributedActorSystemError, Swift.Error") loses only the
+        // type name and leaves a dangling ": , Swift.Error" (invalid — "expected type").
+        c = c.replacingOccurrences(of: ": Distributed.DistributedActorSystemError, ", with: ": ")
         c = c.replacingOccurrences(of: ", Distributed.DistributedActorSystemError", with: "")
         c = c.replacingOccurrences(of: ": Distributed.DistributedActorSystemError", with: ":")
         
@@ -1760,8 +1764,18 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             // strip only the problematic conformances from the inheritance list (after the colon).
             let networkLines = c.components(separatedBy: "\n")
             var networkFixed = [String]()
+            // Group 4 must swallow everything to end-of-line after the opening "{" (e.g. a
+            // trailing "}" closing a same-line empty body like "... Sendable {}") — matching
+            // only " {" and discarding the rest silently truncated single-line declarations,
+            // leaving their closing brace missing (manifested as cascading "expected '}' in
+            // struct" errors for the __C_* stub structs, which are emitted as one-liners).
+            // The modifier prefix allows any order/combination of @_fixed_layout/public/open/
+            // final (nested classes like "@_fixed_layout final public class BridgeInstance"
+            // put final before public) — a fixed-order alternation missed those lines entirely,
+            // leaving their BottomProtocolHandler/LowerProtocolHandler/etc. conformances
+            // unstripped (manifested as "does not conform to protocol" errors).
             let typeHeaderRegex = try? NSRegularExpression(
-                pattern: "^(\\s*(?:public|open|@_fixed_layout\\s+public|@_fixed_layout\\s+open)\\s+(?:final\\s+)?(?:struct|class|protocol|enum|actor|extension)\\s+\\S+)(:)(.*?)( \\{|$)", options: [])
+                pattern: "^(\\s*(?:@_fixed_layout\\s+|public\\s+|open\\s+|final\\s+)+(?:struct|class|protocol|enum|actor|extension)\\s+\\S+)(:)(.*?)( \\{.*|$)", options: [])
             for line in networkLines {
                 var fixedLine = line
                 if let regex = typeHeaderRegex,
@@ -1788,11 +1802,28 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 networkFixed.append(fixedLine)
             }
             c = networkFixed.joined(separator: "\n")
-            // Strip `where Self: ~Copyable` extensions (not valid in standard Swift 6 mode)
-            if let regex = try? NSRegularExpression(
-                pattern: "extension\\s+\\S+\\s+where\\s+Self\\s*:\\s*~Copyable\\s*\\{[^}]*\\}", options: [.dotMatchesLineSeparators]) {
-                c = regex.stringByReplacingMatches(
-                    in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
+            // Strip `where Self: ~Copyable` extensions (not valid in standard Swift 6 mode).
+            // The extension body contains member declarations with their own "{}" (e.g. stub
+            // function bodies), so a naive "[^}]*}" regex closes on the FIRST brace it finds —
+            // typically a member's own empty body — truncating the match and leaving the rest
+            // of the real extension body as orphaned top-level text (manifests as cascading
+            // "extraneous '}' at top level" errors). Scan brace depth instead.
+            if let headerRegex = try? NSRegularExpression(
+                pattern: "extension\\s+\\S+\\s+where\\s+Self\\s*:\\s*~Copyable[^{]*\\{", options: []) {
+                var searchStart = c.startIndex
+                while let match = headerRegex.firstMatch(in: c, range: NSRange(searchStart..<c.endIndex, in: c)),
+                      let matchRange = Range(match.range, in: c) {
+                    var depth = 1
+                    var idx = matchRange.upperBound
+                    var braceEnd = idx
+                    while idx < c.endIndex {
+                        if c[idx] == "{" { depth += 1 }
+                        else if c[idx] == "}" { depth -= 1; if depth == 0 { braceEnd = c.index(after: idx); break } }
+                        idx = c.index(after: idx)
+                    }
+                    c.removeSubrange(matchRange.lowerBound..<braceEnd)
+                    searchStart = matchRange.lowerBound
+                }
             }
         }
 
@@ -2137,6 +2168,86 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(of: "NSURLSessionTask", with: "URLSessionTask")
             c = c.replacingOccurrences(of: "NSURLSessionConfiguration", with: "URLSessionConfiguration")
             c = c.replacingOccurrences(of: "OS_dispatch_data", with: "__DispatchData")
+            // NWActorID/NetworkActorID: DistributedActorSystem.ActorID requires `Hashable,
+            // Sendable`; the generator only sees the demangled Codable/CustomStringConvertible/
+            // Hashable conformances (Sendable is implicit-only in the ABI, no witness table
+            // entry to detect it from).
+            c = c.replacingOccurrences(
+                of: "public struct NWActorID: Codable, CustomStringConvertible, Hashable {",
+                with: "public struct NWActorID: Codable, CustomStringConvertible, Hashable, Sendable {")
+            c = c.replacingOccurrences(
+                of: "public struct NetworkActorID: Codable, CustomStringConvertible, Hashable {",
+                with: "public struct NetworkActorID: Codable, CustomStringConvertible, Hashable, Sendable {")
+            // NWActivity/NWFileTransferDelegate are held in TaskLocal<...>, which requires its
+            // Value to be Sendable — same ABI-invisibility issue as above.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class NWActivity: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomStringConvertible, Equatable {",
+                with: "@_fixed_layout public class NWActivity: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomStringConvertible, Equatable, @unchecked Sendable {")
+            c = c.replacingOccurrences(
+                of: "public protocol NWFileTransferDelegate {",
+                with: "public protocol NWFileTransferDelegate: Sendable {")
+            // Distributed.DistributedActorSystem conformances (NWActorSystem/NetworkActorSystem):
+            // 1. recordArgument/recordReturnType/decodeNextArgument witness `mutating func`
+            //    protocol requirements (their conforming types are structs) — the generator
+            //    emits plain `func`, which the compiler treats as a non-matching candidate.
+            c = c.replacingOccurrences(
+                of: "public func recordArgument<GenericA>(_ arg1: Distributed.RemoteCallArgument<GenericA>) throws -> () where GenericA: Decodable,  GenericA: Encodable {}",
+                with: "public mutating func recordArgument<GenericA>(_ arg1: Distributed.RemoteCallArgument<GenericA>) throws -> () where GenericA: Decodable,  GenericA: Encodable {}")
+            c = c.replacingOccurrences(
+                of: "public func recordReturnType<GenericA>(_ arg1: GenericA.Type) throws -> () where GenericA: Decodable,  GenericA: Encodable {}",
+                with: "public mutating func recordReturnType<GenericA>(_ arg1: GenericA.Type) throws -> () where GenericA: Decodable,  GenericA: Encodable {}")
+            c = c.replacingOccurrences(
+                of: "public func decodeNextArgument<GenericA>() throws -> GenericA where GenericA: Decodable,  GenericA: Encodable { fatalError() }",
+                with: "public mutating func decodeNextArgument<GenericA>() throws -> GenericA where GenericA: Decodable,  GenericA: Encodable { fatalError() }")
+            // 2. remoteCall/remoteCallVoid's real ABI constrains `Self.ActorID == Act.ID`
+            //    (visible in the demangled symbol), but the generic-placeholder eraser drops it
+            //    since it can't tell an associated-type-of-Self reference from an unresolvable
+            //    demangler path — leaving these as "missing witness for protocol requirement".
+            c = c.replacingOccurrences(
+                of: "public final func remoteCall<GenericA, GenericB, GenericC>(on: GenericA, target: Distributed.RemoteCallTarget, invocation: inout NWActorSystemInvocationEncoder, throwing: GenericB.Type, returning: GenericC.Type) async throws -> GenericC where GenericA: Distributed.DistributedActor,  GenericB: Error,  GenericC: Decodable,  GenericC: Encodable { fatalError() }",
+                with: "public final func remoteCall<GenericA, GenericB, GenericC>(on: GenericA, target: Distributed.RemoteCallTarget, invocation: inout NWActorSystemInvocationEncoder, throwing: GenericB.Type, returning: GenericC.Type) async throws -> GenericC where GenericA: Distributed.DistributedActor,  GenericB: Error,  GenericC: Decodable,  GenericC: Encodable, GenericA.ID == NWActorID { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public final func remoteCallVoid<GenericA, GenericB>(on: GenericA, target: Distributed.RemoteCallTarget, invocation: inout NWActorSystemInvocationEncoder, throwing: GenericB.Type) async throws -> () where GenericA: Distributed.DistributedActor,  GenericB: Error {}",
+                with: "public final func remoteCallVoid<GenericA, GenericB>(on: GenericA, target: Distributed.RemoteCallTarget, invocation: inout NWActorSystemInvocationEncoder, throwing: GenericB.Type) async throws -> () where GenericA: Distributed.DistributedActor,  GenericB: Error, GenericA.ID == NWActorID {}")
+            c = c.replacingOccurrences(
+                of: "public final func remoteCall<GenericA, GenericB, GenericC>(on: GenericA, target: Distributed.RemoteCallTarget, invocation: inout NetworkActorSystemInvocationEncoder, throwing: GenericB.Type, returning: GenericC.Type) async throws -> GenericC where GenericA: Distributed.DistributedActor,  GenericB: Error,  GenericC: Decodable,  GenericC: Encodable { fatalError() }",
+                with: "public final func remoteCall<GenericA, GenericB, GenericC>(on: GenericA, target: Distributed.RemoteCallTarget, invocation: inout NetworkActorSystemInvocationEncoder, throwing: GenericB.Type, returning: GenericC.Type) async throws -> GenericC where GenericA: Distributed.DistributedActor,  GenericB: Error,  GenericC: Decodable,  GenericC: Encodable, GenericA.ID == NetworkActorID { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public final func remoteCallVoid<GenericA, GenericB>(on: GenericA, target: Distributed.RemoteCallTarget, invocation: inout NetworkActorSystemInvocationEncoder, throwing: GenericB.Type) async throws -> () where GenericA: Distributed.DistributedActor,  GenericB: Error {}",
+                with: "public final func remoteCallVoid<GenericA, GenericB>(on: GenericA, target: Distributed.RemoteCallTarget, invocation: inout NetworkActorSystemInvocationEncoder, throwing: GenericB.Type) async throws -> () where GenericA: Distributed.DistributedActor,  GenericB: Error, GenericA.ID == NetworkActorID {}")
+            // 3. None of the 4 protocols' associated types (ActorID/InvocationEncoder/
+            //    InvocationDecoder/ResultHandler on DistributedActorSystem,
+            //    SerializationRequirement on all 4) can be inferred without an explicit
+            //    typealias — nothing in the generated members' signatures pins them down
+            //    uniquely (e.g. `resolve`'s `GenericA.Type` is generic, not concretely
+            //    NWActorID). Missing inference cascades into "missing witness" for every
+            //    requirement, even ones with a correctly-typed candidate already present.
+            //    The class must also be `final` — DistributedActorSystem requires Sendable,
+            //    and a non-final class can't conform to Sendable.
+            for (systemName, idName, encName, decName, resultName) in [
+                ("NWActorSystem", "NWActorID", "NWActorSystemInvocationEncoder", "NWActorSystemInvocationDecoder", "NWActorSystemResultHandler"),
+                ("NetworkActorSystem", "NetworkActorID", "NetworkActorSystemInvocationEncoder", "NetworkActorSystemInvocationDecoder", "NetworkActorSystemResultHandler"),
+            ] {
+                c = c.replacingOccurrences(
+                    of: "@_fixed_layout public class \(systemName): Distributed.DistributedActorSystem {",
+                    with: """
+                    @_fixed_layout final public class \(systemName): Distributed.DistributedActorSystem {
+                        public typealias ActorID = \(idName)
+                        public typealias InvocationEncoder = \(encName)
+                        public typealias InvocationDecoder = \(decName)
+                        public typealias ResultHandler = \(resultName)
+                        public typealias SerializationRequirement = Codable
+                    """)
+                c = c.replacingOccurrences(
+                    of: "public struct \(encName): Distributed.DistributedTargetInvocationEncoder {",
+                    with: "public struct \(encName): Distributed.DistributedTargetInvocationEncoder {\n    public typealias SerializationRequirement = Codable")
+                c = c.replacingOccurrences(
+                    of: "public struct \(decName): Distributed.DistributedTargetInvocationDecoder {",
+                    with: "public struct \(decName): Distributed.DistributedTargetInvocationDecoder {\n    public typealias SerializationRequirement = Codable")
+                c = c.replacingOccurrences(
+                    of: "public struct \(resultName): Distributed.DistributedTargetInvocationResultHandler {",
+                    with: "public struct \(resultName): Distributed.DistributedTargetInvocationResultHandler {\n    public typealias SerializationRequirement = Codable")
+            }
             c += """
             
             // --- Auto-generated stubs for C/system types ---
