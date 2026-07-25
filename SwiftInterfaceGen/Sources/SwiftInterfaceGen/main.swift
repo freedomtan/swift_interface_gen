@@ -2214,6 +2214,58 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(
                 of: "public static func receive<GenericA>(connection: GenericA) async throws -> (content: Any, metadata: JSON<Any>.Metadata) where GenericA: ConnectionProtocol { fatalError() }",
                 with: "public static func receive<GenericA>(connection: GenericA) async throws -> (content: A, metadata: JSON<A>.Metadata) where GenericA: ConnectionProtocol { fatalError() }")
+            // ProtocolLinkage's `associatedtype PairedLinkage` is narrowed at every level of the
+            // Inbound/Outbound/Upper/Lower/Listener/Flow linkage hierarchy (confirmed via
+            // `swift-demangle` on each protocol's "associated conformance descriptor" symbol,
+            // e.g. InboundDataLinkage.ProtocolLinkage.PairedLinkage: OutboundDataLinkage) — but
+            // the generator emitted each narrowing as an orphaned nested protocol inside its own
+            // throwaway "<Name>_Network { public protocol ProtocolLinkage { associatedtype
+            // PairedLinkage: ... } }" wrapper struct instead of directly in the real protocol's
+            // body, so the narrowing never actually applies. Move each into its real protocol.
+            for (protoName, pairedType) in [
+                ("InboundDataLinkage", "OutboundDataLinkage"),
+                ("InboundFlowLinkage", "ListenerLinkage"),
+                ("ListenerLinkage", "InboundFlowLinkage"),
+                ("LowerProtocolLinkage", "UpperProtocolLinkage"),
+                ("OutboundDataLinkage", "InboundDataLinkage"),
+                ("UpperProtocolLinkage", "LowerProtocolLinkage"),
+            ] {
+                if let r = c.range(of: "public protocol \(protoName): ") {
+                    if let braceEnd = c.range(of: " {", range: r.upperBound..<c.endIndex) {
+                        c.insert(contentsOf: "\n    associatedtype PairedLinkage: \(pairedType)", at: braceEnd.upperBound)
+                    }
+                }
+            }
+            // LowerProtocolLinkage.invokeAttachUpperProtocol's real ABI returns `Self` (its
+            // dispatch-thunk demangles to "...) throws(NetworkError) -> A" where A is the
+            // protocol's own Self placeholder), but the generic-placeholder eraser replaced it
+            // with `Any` on every conformer (DatagramListenerLinkage/OutboundDatagramLinkage/
+            // OutboundStreamLinkage/StreamListenerLinkage) — `Self` is safe to substitute
+            // directly since it resolves per-conforming-type automatically.
+            c = c.replacingOccurrences(
+                of: "public func invokeAttachUpperProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> Any { fatalError() }",
+                with: "public func invokeAttachUpperProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> Self { fatalError() }")
+            // None of the 8 concrete *Linkage structs declare their own PairedLinkage
+            // typealias, and nothing in their member signatures pins it down uniquely (the
+            // members that DO reference the paired type, e.g. InboundDatagramLinkage's own
+            // deliver* methods don't mention it at all — only sibling types like
+            // OutboundDatagramLinkage's attachUpper* methods reference it by name), so it's
+            // not inferable. Add explicit typealiases; pairing follows the Datagram<->Datagram/
+            // Stream<->Stream naming convention consistently used throughout this hierarchy.
+            for (name, paired) in [
+                ("InboundDatagramLinkage", "OutboundDatagramLinkage"),
+                ("InboundStreamLinkage", "OutboundStreamLinkage"),
+                ("InboundDatagramFlowLinkage", "DatagramListenerLinkage"),
+                ("InboundStreamFlowLinkage", "StreamListenerLinkage"),
+                ("OutboundDatagramLinkage", "InboundDatagramLinkage"),
+                ("OutboundStreamLinkage", "InboundStreamLinkage"),
+                ("DatagramListenerLinkage", "InboundDatagramFlowLinkage"),
+                ("StreamListenerLinkage", "InboundStreamFlowLinkage"),
+            ] {
+                if let r = c.range(of: "public struct \(name): "), let braceEnd = c.range(of: " {", range: r.upperBound..<c.endIndex) {
+                    c.insert(contentsOf: "\n    public typealias PairedLinkage = \(paired)", at: braceEnd.upperBound)
+                }
+            }
             // NWActorID/NetworkActorID: DistributedActorSystem.ActorID requires `Hashable,
             // Sendable`; the generator only sees the demangled Codable/CustomStringConvertible/
             // Hashable conformances (Sendable is implicit-only in the ABI, no witness table
