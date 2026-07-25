@@ -2249,6 +2249,23 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
                 body += "    associatedtype Metadata\n"
                 c.replaceSubrange(headerRange.upperBound..<bodyEnd, with: body)
             }
+            // StreamProtocol's real ABI likewise declares `associatedtype Metadata` (confirmed
+            // via `swift-demangle` on its dispatch-thunk symbols, e.g. send's parameter type
+            // demangles as "metadata: A.Metadata") and every requirement already correctly uses
+            // `Self.Metadata` (no `Any`-erasure to fix here, unlike MessageProtocol above) — the
+            // only missing piece is the associatedtype declaration itself.
+            if let headerRange = c.range(of: "public protocol StreamProtocol: OneToOneProtocol {") {
+                var depth = 1
+                var idx = headerRange.upperBound
+                var bodyEnd = idx
+                while idx < c.endIndex {
+                    if c[idx] == "{" { depth += 1 }
+                    else if c[idx] == "}" { depth -= 1; if depth == 0 { bodyEnd = idx; break } }
+                    idx = c.index(after: idx)
+                }
+                let body = String(c[headerRange.upperBound..<bodyEnd]) + "    associatedtype Metadata\n"
+                c.replaceSubrange(headerRange.upperBound..<bodyEnd, with: body)
+            }
             // JSON's generic-parameter discovery missed its own declaration — every member
             // (map/receive/send/mapLegacy/Metadata) references "JSON<A>" but the struct itself
             // was emitted non-generic ("public struct JSON: MessageProtocol, ..."), confirmed
@@ -2484,6 +2501,22 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
                 c = c.replacingOccurrences(
                     of: "public struct \(resultName): Distributed.DistributedTargetInvocationResultHandler {",
                     with: "public struct \(resultName): Distributed.DistributedTargetInvocationResultHandler {\n    public typealias SerializationRequirement = Codable")
+            }
+            // nw_storage_* are free C-wrapper functions. Their closure parameters were
+            // emitted with two problems:
+            // 1. Double `@escaping @escaping` (generator adds @escaping, C demangle adds another)
+            // 2. `@convention(block) (OS_nw_array) -> ()` — OS_nw_array is a pure Swift class,
+            //    not @objc, so it's not representable in ObjC and can't be a block parameter.
+            // Fix: remove both the duplicate @escaping and @convention(block) from these
+            // particular functions so the closure is a plain Swift function type.
+            if let regex = try? NSRegularExpression(
+                pattern: #"@escaping @escaping @convention\(block\) (\([^)]*OS_nw_array[^)]*\) -> \(\))"#,
+                options: [])
+            {
+                c = regex.stringByReplacingMatches(
+                    in: c,
+                    range: NSRange(c.startIndex..<c.endIndex, in: c),
+                    withTemplate: "$1")
             }
             c += """
             
