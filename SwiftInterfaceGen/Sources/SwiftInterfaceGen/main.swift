@@ -2295,6 +2295,19 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(
                 of: "extension StreamDeserializationBuilder {",
                 with: "extension StreamDeserializationBuilder where A: StreamDeserializerState {")
+            // Fix 7: `Frame` is `~Copyable`, so all parameters of type `Frame` must specify
+            // ownership.  Three sites omit the keyword:
+            //   1. `init(frame: Frame)` — borrowing (init just reads the frame to copy data)
+            //   2. `peekFirstFrame<GenericA>(_ arg1: (Frame) -> GenericA)` — closure takes Frame
+            //      by borrowing reference
+            //   3. `iterateImmutableFrames(_ arg1: (Frame) -> Bool)` — same
+            c = c.replacingOccurrences(of: "public init(frame: Frame)", with: "public init(frame: borrowing Frame)")
+            c = c.replacingOccurrences(
+                of: "public func peekFirstFrame<GenericA>(_ arg1: (Frame) -> GenericA)",
+                with: "public func peekFirstFrame<GenericA>(_ arg1: (borrowing Frame) -> GenericA)")
+            c = c.replacingOccurrences(
+                of: "public func iterateImmutableFrames(_ arg1: (Frame) -> Swift.Bool)",
+                with: "public func iterateImmutableFrames(_ arg1: (borrowing Frame) -> Swift.Bool)")
             // Fix 6: `NWBrowser`, `NWConnection`, and `NWParameters` are NSObject subclasses.
             // Their first extension blocks emit `public final var debugDescription` without
             // `override`, and `NWParameters` emits `convenience init()` without `override`.
