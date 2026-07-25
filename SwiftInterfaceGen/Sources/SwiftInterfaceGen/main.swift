@@ -2281,6 +2281,20 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(
                 of: "public static func receive<GenericA>(connection: GenericA) async throws -> (content: Any, metadata: JSON<Any>.Metadata) where GenericA: ConnectionProtocol { fatalError() }",
                 with: "public static func receive<GenericA>(connection: GenericA) async throws -> (content: A, metadata: JSON<A>.Metadata) where GenericA: ConnectionProtocol { fatalError() }")
+            // StreamDeserializationBuilder is the @resultBuilder type for StreamDeserializer.
+            // The generator emitted it as a plain non-generic struct, but its sole extension
+            // uses `A` and `C` freely (as in StreamDeserializer<A, Any, C>), producing 20
+            // "cannot find type 'A' in scope" errors.  Fix: add `@resultBuilder` and make
+            // the declaration generic <A: ~Copyable, C: ~Copyable & ~Escapable> to match.
+            c = c.replacingOccurrences(
+                of: "public struct StreamDeserializationBuilder: Codable, Hashable, @unchecked Sendable {",
+                with: "@resultBuilder public struct StreamDeserializationBuilder<A: ~Copyable, C: ~Copyable & ~Escapable>: Codable, Hashable, @unchecked Sendable {")
+            c = c.replacingOccurrences(
+                of: "public static func ==(_ lhs: StreamDeserializationBuilder, _ rhs: StreamDeserializationBuilder) -> Bool { fatalError() }",
+                with: "public static func ==(_ lhs: StreamDeserializationBuilder<A, C>, _ rhs: StreamDeserializationBuilder<A, C>) -> Bool { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "extension StreamDeserializationBuilder {",
+                with: "extension StreamDeserializationBuilder where A: StreamDeserializerState {")
             // ProtocolLinkage's `associatedtype PairedLinkage` is narrowed at every level of the
             // Inbound/Outbound/Upper/Lower/Listener/Flow linkage hierarchy (confirmed via
             // `swift-demangle` on each protocol's "associated conformance descriptor" symbol,
