@@ -2295,6 +2295,48 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(
                 of: "extension StreamDeserializationBuilder {",
                 with: "extension StreamDeserializationBuilder where A: StreamDeserializerState {")
+            // Fix 6: `NWBrowser`, `NWConnection`, and `NWParameters` are NSObject subclasses.
+            // Their first extension blocks emit `public final var debugDescription` without
+            // `override`, and `NWParameters` emits `convenience init()` without `override`.
+            // Use a brace-depth-aware pass to only patch inside the FIRST matching extension.
+            do {
+                var lines = c.components(separatedBy: "\n")
+                var inNWClass = ""
+                var depth = 0
+                var firstSeenForClass = Set<String>()
+                for i in 0..<lines.count {
+                    let line = lines[i]
+                    let stripped = line.trimmingCharacters(in: .whitespaces)
+                    // Track entering/leaving extension blocks
+                    let opens = line.filter { $0 == "{" }.count
+                    let closes = line.filter { $0 == "}" }.count
+                    if depth == 0 {
+                        if stripped.hasPrefix("extension NWBrowser") { inNWClass = "NWBrowser"; depth += opens - closes; continue }
+                        if stripped.hasPrefix("extension NWConnection") { inNWClass = "NWConnection"; depth += opens - closes; continue }
+                        if stripped.hasPrefix("extension NWParameters") { inNWClass = "NWParameters"; depth += opens - closes; continue }
+                        inNWClass = ""
+                    } else {
+                        depth += opens - closes
+                        if depth <= 0 { depth = 0; inNWClass = "" }
+                    }
+                    guard !inNWClass.isEmpty else { continue }
+                    // Only patch the first occurrence of debugDescription in each class
+                    if line.contains("public final var debugDescription: Swift.String") && !line.contains("override") {
+                        if !firstSeenForClass.contains(inNWClass + ".debugDescription") {
+                            firstSeenForClass.insert(inNWClass + ".debugDescription")
+                            lines[i] = line.replacingOccurrences(
+                                of: "public final var debugDescription:",
+                                with: "public final override var debugDescription:")
+                        }
+                    }
+                    if line.contains("@nonobjc public convenience init()") && !line.contains("override") {
+                        lines[i] = line.replacingOccurrences(
+                            of: "@nonobjc public convenience init()",
+                            with: "@nonobjc public override convenience init()")
+                    }
+                }
+                c = lines.joined(separator: "\n")
+            }
             // Three protocols use `Self.UpperProtocol` without declaring the associatedtype,
             // and member ordering in the generated output varies across runs so we can't match
             // the full protocol body. Use stable anchor strings instead.
