@@ -1825,6 +1825,56 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                     searchStart = matchRange.lowerBound
                 }
             }
+            // Strip a spurious ", Self: ~Copyable" tacked onto an otherwise-valid constrained
+            // extension (e.g. "extension TopProtocolHandler where Self.LowerProtocol ==
+            // OutboundDatagramLinkage,  Self: ~Copyable {") — unlike the bare "where Self:
+            // ~Copyable" case above, these extensions' base protocols (TopProtocolHandler,
+            // OneToOneProtocolHandler, BottomProtocolHandler) were never declared `~Copyable` in
+            // the first place, so the whole extension is valid once this one clause is dropped;
+            // stripping the entire extension here would throw away real default-method bodies.
+            c = c.replacingOccurrences(of: ",  Self: ~Copyable {", with: " {")
+            c = c.replacingOccurrences(of: ", Self: ~Copyable {", with: " {")
+            // Deserializer<A>/SerializerSpanFactory/InPlaceSerializer<A>: several extensions and
+            // static methods relax their generic parameter to `~Copyable`/`~Escapable` (e.g.
+            // "extension Deserializer where A: ~Copyable, A: ~Escapable", Serializer.serialize's
+            // "where GenericA: ~Copyable, GenericA: ~Escapable" — confirmed as real ABI via
+            // `swift-demangle -expand` on Serializer.serialize's mangled symbol), but the
+            // generic parameter these relax was declared as a plain unconstrained placeholder
+            // (implicitly Copyable & Escapable), making the relaxation self-contradictory. Add
+            // `~Copyable & ~Escapable` directly to the declarations so the relaxation is valid.
+            c = c.replacingOccurrences(
+                of: "public struct Deserializer<A>: Codable, Hashable, @unchecked Sendable {",
+                with: "public struct Deserializer<A: ~Copyable & ~Escapable>: Codable, Hashable, @unchecked Sendable {")
+            c = c.replacingOccurrences(
+                of: "public struct InPlaceSerializer<A>: Codable, Hashable, @unchecked Sendable {",
+                with: "public struct InPlaceSerializer<A: ~Copyable & ~Escapable>: Codable, Hashable, @unchecked Sendable {")
+            c = c.replacingOccurrences(
+                of: "public protocol SerializerSpanFactory {",
+                with: "public protocol SerializerSpanFactory: ~Copyable, ~Escapable {")
+            c = c.replacingOccurrences(
+                of: "public protocol DeserializerSpanFactory {",
+                with: "public protocol DeserializerSpanFactory: ~Copyable, ~Escapable {")
+            // Once ~Escapable is on the protocol, a method returning a ~Escapable type
+            // (RawSpan?/MutableRawSpan?) needs an explicit lifetime-dependence attribute — the
+            // compiler can't infer one for a protocol requirement. "borrow self" matches the
+            // real semantics (the returned span only stays valid while the factory instance
+            // does); conformers don't need to redeclare the attribute themselves.
+            c = c.replacingOccurrences(
+                of: "    func nextSpan() -> RawSpan?",
+                with: "    @_lifetime(borrow self)\n    func nextSpan() -> RawSpan?")
+            c = c.replacingOccurrences(
+                of: "    func nextMutableSpan() -> MutableRawSpan?",
+                with: "    @_lifetime(borrow self)\n    func nextMutableSpan() -> MutableRawSpan?")
+            // Same class of bug as Deserializer/Serializer above: StreamDeserializer<A, B, C>'s
+            // A and C are both relaxed to ~Copyable/~Escapable by its own extensions (never B),
+            // and StreamDeserializerState (used as a constraint on A in one of those
+            // extensions) needs the same ~Copyable relaxation for the same reason.
+            c = c.replacingOccurrences(
+                of: "public struct StreamDeserializer<A, B, C>: Codable, Hashable, @unchecked Sendable {",
+                with: "public struct StreamDeserializer<A: ~Copyable, B, C: ~Copyable & ~Escapable>: Codable, Hashable, @unchecked Sendable {")
+            c = c.replacingOccurrences(
+                of: "public protocol StreamDeserializerState {",
+                with: "public protocol StreamDeserializerState: ~Copyable {")
         }
 
         // Fix: MetricKit `AverageStatistics<A>` and `Histogram<A>` require `A: Unit`
