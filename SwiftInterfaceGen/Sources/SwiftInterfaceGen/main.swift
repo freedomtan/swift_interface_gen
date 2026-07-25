@@ -2295,6 +2295,18 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(
                 of: "extension StreamDeserializationBuilder {",
                 with: "extension StreamDeserializationBuilder where A: StreamDeserializerState {")
+            // Fix 8: The demangler emits `Self.Flow.MultiplexedFlow.ParentProtocol` (and the
+            // `SecondaryFlow` variant) as extension constraints.  `MultiplexedFlow` here is the
+            // *protocol* the flow conforms to, not a nested type — Swift can't resolve it as a
+            // member type on `Self.Flow`.  The real semantic is `Self == Self.Flow.ParentProtocol`
+            // (since `MultiplexedFlow` declares `associatedtype ParentProtocol: ManyToManyProtocolHandler`).
+            // Strip the spurious `.MultiplexedFlow` path component from both variants.
+            c = c.replacingOccurrences(
+                of: "Self == Self.Flow.MultiplexedFlow.ParentProtocol",
+                with: "Self == Self.Flow.ParentProtocol")
+            c = c.replacingOccurrences(
+                of: "Self == Self.SecondaryFlow.MultiplexedFlow.ParentProtocol",
+                with: "Self == Self.SecondaryFlow.ParentProtocol")
             // Fix 7: `Frame` is `~Copyable`, so all parameters of type `Frame` must specify
             // ownership.  Three sites omit the keyword:
             //   1. `init(frame: Frame)` — borrowing (init just reads the frame to copy data)
