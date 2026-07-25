@@ -2295,6 +2295,34 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(
                 of: "extension StreamDeserializationBuilder {",
                 with: "extension StreamDeserializationBuilder where A: StreamDeserializerState {")
+            // Three protocols use `Self.UpperProtocol` without declaring the associatedtype,
+            // and member ordering in the generated output varies across runs so we can't match
+            // the full protocol body. Use stable anchor strings instead.
+            // 1. BottomProtocolHandler: its extensions constrain `Self.UpperProtocol == Inbound*`
+            //    but the protocol body only has `var upper: Any`.  Insert the associatedtype
+            //    right after the opening brace, and retype `var upper: Any` → `Self.UpperProtocol`.
+            c = c.replacingOccurrences(
+                of: "public protocol BottomProtocolHandler: OutboundDataHandler {\n",
+                with: "public protocol BottomProtocolHandler: OutboundDataHandler {\n    associatedtype UpperProtocol: UpperProtocolLinkage\n")
+            // Replace the erased `var upper: Any` with the properly typed version.
+            // Use AllowMultiple=false equivalent via a targeted anchor: this exact string only
+            // appears once (inside BottomProtocolHandler's body) in the generated output.
+            c = c.replacingOccurrences(
+                of: "protocol BottomProtocolHandler: OutboundDataHandler {\n    associatedtype UpperProtocol: UpperProtocolLinkage\n    func teardown() -> ()\n    func connect() -> ()\n    var upper: Any { get set }",
+                with: "protocol BottomProtocolHandler: OutboundDataHandler {\n    associatedtype UpperProtocol: UpperProtocolLinkage\n    func teardown() -> ()\n    func connect() -> ()\n    var upper: Self.UpperProtocol { get set }")
+            // 2. MultiplexedFlow: insert `associatedtype UpperProtocol` after the opening brace.
+            c = c.replacingOccurrences(
+                of: "public protocol MultiplexedFlow: LoggableProtocol {\n",
+                with: "public protocol MultiplexedFlow: LoggableProtocol {\n    associatedtype UpperProtocol: UpperProtocolLinkage\n")
+            // 3. ManyToManyProtocolHandler: insert `associatedtype UpperProtocol` right after
+            //    its opening brace (stable position, not dependent on member order).
+            c = c.replacingOccurrences(
+                of: "public protocol ManyToManyProtocolHandler: ListenerHandler, LoggableProtocol {\n",
+                with: "public protocol ManyToManyProtocolHandler: ListenerHandler, LoggableProtocol {\n    associatedtype UpperProtocol: UpperProtocolLinkage\n")
+            // OneToOneProtocolHandler extensions also constrain Self.UpperProtocol — same fix.
+            c = c.replacingOccurrences(
+                of: "public protocol OneToOneProtocolHandler: InboundDataHandler, LoggableProtocol, OutboundDataHandler {\n",
+                with: "public protocol OneToOneProtocolHandler: InboundDataHandler, LoggableProtocol, OutboundDataHandler {\n    associatedtype UpperProtocol: UpperProtocolLinkage\n")
             // ProtocolLinkage's `associatedtype PairedLinkage` is narrowed at every level of the
             // Inbound/Outbound/Upper/Lower/Listener/Flow linkage hierarchy (confirmed via
             // `swift-demangle` on each protocol's "associated conformance descriptor" symbol,
