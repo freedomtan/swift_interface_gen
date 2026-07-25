@@ -2502,22 +2502,36 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
                     of: "public struct \(resultName): Distributed.DistributedTargetInvocationResultHandler {",
                     with: "public struct \(resultName): Distributed.DistributedTargetInvocationResultHandler {\n    public typealias SerializationRequirement = Codable")
             }
+            // `@escaping @isolated(any) @Sendable` on a closure parameter is rejected by
+            // Swift 6 with "'@escaping' only applies to function types" — the `@isolated(any)`
+            // attribute makes the closure type non-function from the compiler's perspective in
+            // this position. Strip `@isolated(any)` globally from Network (our stubs don't need
+            // isolation semantics, and the ABI shape is preserved without it).
+            c = c.replacingOccurrences(of: "@escaping @isolated(any) @Sendable", with: "@escaping @Sendable")
+            c = c.replacingOccurrences(of: "@isolated(any) @Sendable", with: "@Sendable")
             // nw_storage_* are free C-wrapper functions. Their closure parameters were
             // emitted with two problems:
             // 1. Double `@escaping @escaping` (generator adds @escaping, C demangle adds another)
-            // 2. `@convention(block) (OS_nw_array) -> ()` — OS_nw_array is a pure Swift class,
-            //    not @objc, so it's not representable in ObjC and can't be a block parameter.
-            // Fix: remove both the duplicate @escaping and @convention(block) from these
-            // particular functions so the closure is a plain Swift function type.
+            // 2. `@convention(block) (...)` — some params (OS_nw_array, DispatchData, etc.) are
+            //    not ObjC-representable so they can't be block params.
+            // Fix: strip @escaping @convention(block) broadly from any @escaping @escaping pattern
+            // so the closure becomes a plain Swift function type.
             if let regex = try? NSRegularExpression(
-                pattern: #"@escaping @escaping @convention\(block\) (\([^)]*OS_nw_array[^)]*\) -> \(\))"#,
+                pattern: #"@escaping @escaping @convention\(block\) "#,
                 options: [])
             {
                 c = regex.stringByReplacingMatches(
                     in: c,
                     range: NSRange(c.startIndex..<c.endIndex, in: c),
-                    withTemplate: "$1")
+                    withTemplate: "")
             }
+            // Also strip standalone double @escaping (without @convention(block))
+            c = c.replacingOccurrences(of: "@escaping @escaping ", with: "@escaping ")
+            // NetworkBrowser.run<GenericA> takes an `async throws` closure — `@escaping` on
+            // an `async` closure parameter is invalid in Swift 6 in this position.  Drop it.
+            c = c.replacingOccurrences(
+                of: "@escaping @Sendable ([Any]) async throws ->",
+                with: "@Sendable ([Any]) async throws ->")
             c += """
             
             // --- Auto-generated stubs for C/system types ---
