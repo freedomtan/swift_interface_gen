@@ -2266,6 +2266,95 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
                     c.insert(contentsOf: "\n    public typealias PairedLinkage = \(paired)", at: braceEnd.upperBound)
                 }
             }
+            // Configuration/Connection1-5/Listener1-6's second generic parameter `B` is a real
+            // parameter pack, not a plain type — confirmed via `swift-demangle -expand` on their
+            // ABI symbols (e.g. Connection1.init(to:using:) demangles to
+            // "Configuration<A, Pack{repeat B}>", and the == operator to
+            // "(Connection1<A, Pack{repeat B}>, Connection1<A, Pack{repeat B}>) -> Bool"). The
+            // generator emitted the declaration as plain `<A, B>` and every use of "repeat B"
+            // without the required "each" binding — hence "pack expansion 'B' must contain at
+            // least one pack reference". Also erased every *bound* two-argument use site's
+            // second slot to a bare `Any` (e.g. "Connection1<A, Any>", "Connection1<TLV, Any>")
+            // since a pack argument list can't collapse to one placeholder name the same way a
+            // plain generic can.
+            for name in ["Configuration", "Connection1", "Connection2", "Connection3", "Connection4", "Connection5", "Listener1", "Listener2", "Listener3", "Listener4", "Listener5", "Listener6", "Listener7", "SendProgress"] {
+                c = c.replacingOccurrences(of: "\(name)<A, B>", with: "\(name)<A, each B>")
+                // Bound two-argument use sites: "<X, Any>" -> "<X, repeat each B>" for any first
+                // argument (the class's own `A`, or a concrete type substituted for it, e.g.
+                // "Connection1<TLV, Any>" inside a `where A == TLV` method).
+                if let regex = try? NSRegularExpression(pattern: "\(name)<([^,<>]+), Any>", options: []) {
+                    c = regex.stringByReplacingMatches(
+                        in: c, range: NSRange(c.startIndex..<c.endIndex, in: c),
+                        withTemplate: "\(name)<$1, repeat each B>")
+                }
+            }
+            c = c.replacingOccurrences(of: "repeat B)", with: "repeat each B)")
+            c = c.replacingOccurrences(of: "repeat B,", with: "repeat each B,")
+            // NWParametersBuilder<A, B>'s `B` is also a pack (its own init(auto:)/init(_:) use
+            // "repeat B", fixed by the two global replacements above). Its declaration and its
+            // own two static `parameters(...)` factory methods (which return
+            // "NWParametersBuilder<A, Any>" from *inside* NWParametersBuilder's own body, where
+            // `B` is in scope) need "<A, each B>"/"<A, repeat each B>" respectively — but the 26
+            // other "NWParametersBuilder<A, Any>" occurrences are all *external* call sites
+            // (e.g. inside Connection6<A>/Connection7<A>/NWListener<A>) that each declare their
+            // own local pack under a different name, always "A1" per a sibling
+            // "() -> (A, repeat A1)" init in the very same type — confirmed by checking every
+            // occurrence's surrounding declaration. Fix the struct's own declaration and its
+            // two internal call sites first (unique strings), then treat every remaining
+            // occurrence as an external call site using "A1".
+            c = c.replacingOccurrences(of: "NWParametersBuilder<A, B>", with: "NWParametersBuilder<A, each B>")
+            c = c.replacingOccurrences(
+                of: "public static func parameters(initialParameters: NWParameters, _: () -> (A, repeat each B)) -> NWParametersBuilder<A, Any> { fatalError() }",
+                with: "public static func parameters(initialParameters: NWParameters, _: () -> (A, repeat each B)) -> NWParametersBuilder<A, repeat each B> { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public static func parameters(_ arg1: () -> (A, repeat each B)) -> NWParametersBuilder<A, Any> { fatalError() }",
+                with: "public static func parameters(_ arg1: () -> (A, repeat each B)) -> NWParametersBuilder<A, repeat each B> { fatalError() }")
+            // Of the remaining call sites, only lines that also declare a local `<A1>` pack (a
+            // sibling "() -> (A, repeat A1)" init in the same type) can use "repeat A1"; the
+            // rest (NetworkListener<A>, withNetworkConnection<A>, NetworkConnection<A>
+            // extensions — none of which declare any pack at all) collapse the argument to a
+            // plain "NWParametersBuilder<A>", matching the already-valid empty-pack usage seen
+            // elsewhere (e.g. "Configuration<A>").
+            // A pre-existing bug (present in the raw generator output before any of this file's
+            // Network fixes): these `init<A1>(..., using: () -> (A, repeat A1)) where A1: ...`
+            // overloads already used "repeat A1" without ever binding "<A1>" as "<each A1>" —
+            // the per-signature pack-detection pass in Model.swift didn't catch it because A1
+            // isn't one of the placeholders ["A"..."G"] it scans for. Fix both the generic
+            // parameter list and the repeat-expression on any line matching this pattern before
+            // deciding whether a given NWParametersBuilder<A, Any> call site can reuse "A1".
+            let networkParamsBuilderLines = c.components(separatedBy: "\n").map { line -> String in
+                var fixedLine = line
+                if fixedLine.contains("<A1>") && fixedLine.contains("repeat A1") {
+                    fixedLine = fixedLine.replacingOccurrences(of: "<A1>", with: "<each A1>")
+                    fixedLine = fixedLine.replacingOccurrences(of: "repeat A1", with: "repeat each A1")
+                    // The `where A1: Protocol` constraint also references the pack itself and
+                    // needs the same "repeat each" expansion keyword as any other pack
+                    // reference — "where A1: X" is invalid once A1 is a pack, it must read
+                    // "where repeat each A1: X".
+                    fixedLine = fixedLine.replacingOccurrences(of: "where A1: ", with: "where repeat each A1: ")
+                }
+                guard fixedLine.contains("NWParametersBuilder<A, Any>") else { return fixedLine }
+                if fixedLine.contains("<each A1>") {
+                    return fixedLine.replacingOccurrences(of: "NWParametersBuilder<A, Any>", with: "NWParametersBuilder<A, repeat each A1>")
+                }
+                return fixedLine.replacingOccurrences(of: "NWParametersBuilder<A, Any>", with: "NWParametersBuilder<A>")
+            }
+            c = networkParamsBuilderLines.joined(separator: "\n")
+            // Same pre-existing "repeat X without each" bug as above, on the `GenericA,
+            // GenericB` placeholder pair Model.swift's generic-rename pass produces for
+            // originally-anonymous type parameters, plus ProtocolStackBuilder.buildBlock where
+            // the pack name itself was erased to a bare "Any" (confirmed via `swift-demangle
+            // -expand`: real signature is "buildBlock<A, each B>(A, repeat each B) -> (A, repeat
+            // each B)").
+            c = c.replacingOccurrences(
+                of: "public final func prependProtocols<GenericA, GenericB>(_ arg1: () -> (GenericA, repeat GenericB)) -> Connection7<GenericA> where GenericA: OneToOneProtocol,  GenericB: NetworkProtocolOptions { fatalError() }",
+                with: "public final func prependProtocols<GenericA, each GenericB>(_ arg1: () -> (GenericA, repeat each GenericB)) -> Connection7<GenericA> where GenericA: OneToOneProtocol, repeat each GenericB: NetworkProtocolOptions { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public static func template<GenericA, GenericB>(_ arg1: @escaping () -> (GenericA, repeat GenericB)) -> () -> NWParametersBuilder<GenericA, Any> where GenericA: NetworkProtocolOptions,  GenericB: NetworkProtocolOptions { fatalError() }",
+                with: "public static func template<GenericA, each GenericB>(_ arg1: @escaping () -> (GenericA, repeat each GenericB)) -> () -> NWParametersBuilder<GenericA, repeat each GenericB> where GenericA: NetworkProtocolOptions, repeat each GenericB: NetworkProtocolOptions { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public static func buildBlock(_ arg1: Any, _ arg2: repeat Any) -> (Any, repeat Any) { fatalError() }",
+                with: "public static func buildBlock<GenericA, each GenericB>(_ arg1: GenericA, _ arg2: repeat each GenericB) -> (GenericA, repeat each GenericB) { fatalError() }")
             // NWActorID/NetworkActorID: DistributedActorSystem.ActorID requires `Hashable,
             // Sendable`; the generator only sees the demangled Codable/CustomStringConvertible/
             // Hashable conformances (Sendable is implicit-only in the ABI, no witness table
