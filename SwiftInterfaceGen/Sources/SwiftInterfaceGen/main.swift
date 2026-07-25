@@ -2168,6 +2168,52 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(of: "NSURLSessionTask", with: "URLSessionTask")
             c = c.replacingOccurrences(of: "NSURLSessionConfiguration", with: "URLSessionConfiguration")
             c = c.replacingOccurrences(of: "OS_dispatch_data", with: "__DispatchData")
+            // MessageProtocol's real ABI declares `associatedtype Metadata` and every
+            // requirement uses `Self.Metadata` (confirmed via `swift-demangle -expand` on the
+            // protocol's dispatch-thunk symbols — e.g. send's witness type is literally
+            // "metadata: A.Metadata"), but the generic-placeholder eraser replaced every
+            // `Self.Metadata` in the protocol's own declaration with `Any` (it can't tell an
+            // associated-type-of-Self reference from an unresolvable demangler path — same
+            // class of bug as the ActorSystem `Self.ActorID == Act.ID` fix above). The
+            // extension's default implementations already use the correct `Self.Metadata`
+            // form, so once the protocol itself declares the associated type, every conformer's
+            // ContentType/Metadata/LegacyMessage becomes inferable from receive/map alone, and
+            // the extension's defaults satisfy send/makeIncomingMessage/mapLegacy even where a
+            // conformer's own overloads (using `Any` or a concrete non-Metadata type from a
+            // separate generator bug) don't match.
+            // Member order inside the protocol body is not stable across generator runs
+            // (dictionary iteration order), so a whole-block exact-string match is fragile —
+            // scope the "metadata: Any" -> "metadata: Self.Metadata" replacement and the
+            // associatedtype insertion to just this protocol's brace range instead.
+            if let headerRange = c.range(of: "public protocol MessageProtocol: OneToOneProtocol {") {
+                var depth = 1
+                var idx = headerRange.upperBound
+                var bodyEnd = idx
+                while idx < c.endIndex {
+                    if c[idx] == "{" { depth += 1 }
+                    else if c[idx] == "}" { depth -= 1; if depth == 0 { bodyEnd = idx; break } }
+                    idx = c.index(after: idx)
+                }
+                var body = String(c[headerRange.upperBound..<bodyEnd])
+                body = body.replacingOccurrences(of: "metadata: Any", with: "metadata: Self.Metadata")
+                body += "    associatedtype Metadata\n"
+                c.replaceSubrange(headerRange.upperBound..<bodyEnd, with: body)
+            }
+            // JSON's generic-parameter discovery missed its own declaration — every member
+            // (map/receive/send/mapLegacy/Metadata) references "JSON<A>" but the struct itself
+            // was emitted non-generic ("public struct JSON: MessageProtocol, ..."), confirmed
+            // generic via the ABI (every real use site is "JSON<A>", e.g. Connection1's
+            // receiveOnce/receiveMessage symbols demangle to JSON<A>).
+            c = c.replacingOccurrences(
+                of: "public struct JSON: MessageProtocol, OneToOneProtocol {",
+                with: "public struct JSON<A>: MessageProtocol, OneToOneProtocol {")
+            // JSON.receive's real ABI returns "content: A" (JSON's own generic parameter, per
+            // `swift-demangle`), not a second unrelated `Any` — same generic-placeholder-erasure
+            // bug as elsewhere in this file, just on a bound-generic-self reference instead of
+            // an associated type.
+            c = c.replacingOccurrences(
+                of: "public static func receive<GenericA>(connection: GenericA) async throws -> (content: Any, metadata: JSON<Any>.Metadata) where GenericA: ConnectionProtocol { fatalError() }",
+                with: "public static func receive<GenericA>(connection: GenericA) async throws -> (content: A, metadata: JSON<A>.Metadata) where GenericA: ConnectionProtocol { fatalError() }")
             // NWActorID/NetworkActorID: DistributedActorSystem.ActorID requires `Hashable,
             // Sendable`; the generator only sees the demangled Codable/CustomStringConvertible/
             // Hashable conformances (Sendable is implicit-only in the ABI, no witness table
