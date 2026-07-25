@@ -2407,6 +2407,26 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
                 return fixedLine.replacingOccurrences(of: "NWParametersBuilder<A, Any>", with: "NWParametersBuilder<A>")
             }
             c = networkParamsBuilderLines.joined(separator: "\n")
+            // After the NWParametersBuilder<A, Any> → NWParametersBuilder<A> collapse above,
+            // lines like `init<A1>(to:, using: NWParametersBuilder<A>) where A1: NetworkProtocolOptions`
+            // now have an orphaned `<A1>` generic param that never appears in the parameter
+            // types — only in the (now-stale) where clause.  The compiler flags these as
+            // [#NoUsage].  Strip the param and where clause entirely.
+            c = c.components(separatedBy: "\n").map { line -> String in
+                guard line.contains("<A1>") && line.contains("NWParametersBuilder") &&
+                      !line.contains("repeat") && line.contains("where A1:") else { return line }
+                var l = line
+                l = l.replacingOccurrences(of: "<A1>", with: "")
+                // Strip trailing " where A1: SomeProtocol" or " where A1: P1,  A1: P2"
+                if let whereRange = l.range(of: " where A1:") {
+                    l = String(l[..<whereRange.lowerBound]) + " { fatalError() }"
+                    // Remove duplicate " { fatalError() } { fatalError() }" if present
+                    l = l.replacingOccurrences(of: " { fatalError() } { fatalError() }", with: " { fatalError() }")
+                    // Same for throws variants
+                    l = l.replacingOccurrences(of: " throws { fatalError() } { fatalError() }", with: " throws { fatalError() }")
+                }
+                return l
+            }.joined(separator: "\n")
             // Same pre-existing "repeat X without each" bug as above, on the `GenericA,
             // GenericB` placeholder pair Model.swift's generic-rename pass produces for
             // originally-anonymous type parameters, plus ProtocolStackBuilder.buildBlock where
