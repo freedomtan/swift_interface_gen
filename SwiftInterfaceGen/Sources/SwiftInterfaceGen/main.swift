@@ -2295,6 +2295,30 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(
                 of: "extension StreamDeserializationBuilder {",
                 with: "extension StreamDeserializationBuilder where A: StreamDeserializerState {")
+            // Fix 9: `TLVFramer` is a non-final class conforming to `NWProtocolFramerImplementation`
+            // which requires `init(framer:)`.  Protocol init requirements must be `required` in
+            // non-final classes.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class TLVFramer: NWProtocolFramerImplementation {\n    public init(framer: NWProtocolFramer.Instance)",
+                with: "@_fixed_layout public class TLVFramer: NWProtocolFramerImplementation {\n    public required init(framer: NWProtocolFramer.Instance)")
+            // Fix 10: `NetworkBrowser<A>.RunResult` is a plain (non-generic) enum, but the
+            // `run<GenericA>` method was emitted with `RunResult<GenericA>` — strip the type arg.
+            c = c.replacingOccurrences(
+                of: "NetworkBrowser<A>.RunResult<GenericA>",
+                with: "NetworkBrowser<A>.RunResult")
+            // Fix 11: `QUIC.TLS` (nested) and top-level `TLS` are two different structs.
+            // `PeerAuthentication` lives in the top-level `TLS`; methods inside `QUIC.TLS` reference
+            // `TLS.PeerAuthentication` which Swift resolves as `QUIC.TLS.PeerAuthentication` — but
+            // that nested type doesn't exist.  The struct declaration line is stable and unique;
+            // inject a typealias right after the opening brace.
+            c = c.replacingOccurrences(
+                of: "    public struct TLS: Codable, Hashable, @unchecked Sendable {\n",
+                with: "    public struct TLS: Codable, Hashable, @unchecked Sendable {\n        public typealias PeerAuthentication = Network.TLS.PeerAuthentication\n")
+            // Fix 12: Same demangler artifact as fix 8 but for `MultiplexingPath`.
+            // `Self.Path.MultiplexingPath.ParentProtocol` → `Self.Path.ParentProtocol`.
+            c = c.replacingOccurrences(
+                of: "Self == Self.Path.MultiplexingPath.ParentProtocol",
+                with: "Self == Self.Path.ParentProtocol")
             // Fix 8: The demangler emits `Self.Flow.MultiplexedFlow.ParentProtocol` (and the
             // `SecondaryFlow` variant) as extension constraints.  `MultiplexedFlow` here is the
             // *protocol* the flow conforms to, not a nested type — Swift can't resolve it as a
