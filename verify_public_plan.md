@@ -7,11 +7,11 @@
 uses a curated 18-framework baseline (`--frameworks` to pick specific ones, `--all` for
 all ~193 discovered).
 
-**Status as of branch `using_public_framework_as_groundtruth`**: **16/18 PASS**.
+**Status as of branch `using_public_framework_as_groundtruth`**: **17/18 PASS**.
 
 ---
 
-## ✅ PASSING (16/18)
+## ✅ PASSING (17/18)
 
 Sorted by TBD symbol count (smallest/easiest first):
 
@@ -31,6 +31,7 @@ Sorted by TBD symbol count (smallest/easiest first):
 - GameKit (4680)
 - HealthKit (5087)
 - Vision (10163)
+- Network (13028)
 
 Each of these was root-rooted and fixed via real-tbd-vs-real-swiftinterface comparison —
 see git log on this branch for the individual fix commits and their detailed messages
@@ -79,7 +80,24 @@ Fixes multiple distinct root causes, all found via TBD symbol demangling (Vision
    `"repeat X"` -> `"repeat each X"` string replace with no awareness of a trailing member
    access; added a parenthesization pass for `repeat each X.` -> `repeat (each X).`.
 
-## ❌ REMAINING (2/18), smallest first
+### Network fix detail
+Fixed via ~20 individually-committed root causes (see git log, commits with "Network fix N"
+in the message, on this branch), spanning: regex bugs in conformance-stripping
+(missing-brace/modifier-order), `Distributed` stdlib module shadowed by a local empty stub,
+ActorSystem family (`mutating`, `GenericA.ID` constraints, explicit typealiases),
+`MessageProtocol`/`JSON` associatedtype/generic-parameter gaps, the `ProtocolLinkage` family
+(`PairedLinkage`/`DataLinkage` typealiases moved out of orphaned nested wrapper structs),
+parameter packs (`<A, B>` -> `<A, each B>` across `Connection1-7`/`Configuration`/`Listener1-7`/
+`NWParametersBuilder`, plus a pre-existing `<A1>`-pack-detection gap in `Model.swift`),
+`~Copyable`/`~Escapable` suppression propagation and `@_lifetime(borrow self)` annotations,
+`ConnectionProtocol.ApplicationProtocolType` (synthesized a `_NoApplicationProtocolOptions`
+stub since no real conformer exists), `NetworkCoder` retroactive conformances for Foundation's
+JSON/PropertyList en/decoders, and finally `QUICConnection`/`QUICStreamInstance`/
+`QUICDatagramFlow`/`QUICPath` (internal SPI helper classes with no public
+`.swiftinterface` entry, needing synthesized `MultiplexedFlow`/`MultiplexingPath`
+conformances so `QUICConnection` could infer its own associated types). Network now PASSes.
+
+## ❌ REMAINING (1/18)
 
 ### Charts (2021 symbols)
 **Mostly fixed** (commit `2509588`): all ~15 first-pass compile errors are resolved (shadowed
@@ -97,12 +115,6 @@ conformances (the witness thunk's mangled name uses the protocol's own generic p
 `x` rather than `AnyChartContent`, and gets dropped entirely once the exports allowlist is
 applied) — investigated but not resolved; needs deeper linker/ABI investigation or an
 upstream Swift bug report. Charts still reports ERROR, not PASS.
-
-### Network (13024 symbols)
-Largest framework in the curated set; already has substantial special-casing in
-`main.swift`'s `postProcess` (`NetworkProtocolOptions`/`BottomProtocolHandler` conformance
-stripping, `~Copyable` extension stripping, ~25 stub declarations for `OS_nw_*`/`OS_sec_*`/
-`tls_*` C types). Not yet passing — needs a fresh root-cause pass to see what's left.
 
 ---
 
