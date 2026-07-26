@@ -2718,8 +2718,91 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             public struct tls_ciphersuite_group_t {}
             public struct tls_ciphersuite_t {}
             public struct tls_protocol_version_t {}
-            
+
             """
+            // DatagramUpperHarness/StreamUpperHarness/UpperHarness<A> conform to the
+            // Top(Datagram|Stream)Protocol/TopDatapathProtocol/TopProtocolHandler/
+            // InboundDataHandler/UpperProtocolHandler hierarchy, but the generator only
+            // discovered the members that are actually exported for each class — several
+            // requirements (context/eventManager/reference on ProtocolInstance, the
+            // ProtocolInstanceReference-taking overloads of handleConnectedEvent/
+            // handleDisconnectedEvent/handleNetworkProtocolEvent/handleInboundDataAvailableEvent/
+            // handleOutboundRoomAvailableEvent on UpperProtocolHandler/InboundDataHandler, plus
+            // attachLowerProtocol and associatedtype LowerProtocol) have no ABI symbol of their
+            // own on these specific classes (same root cause as elsewhere in this file: a
+            // protocol requirement satisfied only via default behavior with nothing exported per
+            // conforming type). Add the missing stub members, matching the exact signatures used
+            // by every other working conformer of the same protocols in this file.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class DatagramUpperHarness: InboundDatagramHandler, TopDatagramProtocol {",
+                with: """
+                @_fixed_layout public class DatagramUpperHarness: InboundDatagramHandler, TopDatagramProtocol {
+                    public typealias LowerProtocol = OutboundDatagramLinkage
+                    public final var context: NetworkContext { get { fatalError() } }
+                    public final var eventManager: ProtocolEventManager { get { fatalError() } set {} }
+                    public final var reference: ProtocolInstanceReference { get { fatalError() } }
+                    public final var lower: OutboundDatagramLinkage { get { fatalError() } set {} }
+                    public func handleConnectedEvent() -> () {}
+                    public func handleConnectedEvent(_ arg1: ProtocolInstanceReference) -> () {}
+                    public func handleDisconnectedEvent(error: NetworkError?) -> () {}
+                    public func handleDisconnectedEvent(_ arg1: ProtocolInstanceReference, error: NetworkError?) -> () {}
+                    public func handleNetworkProtocolEvent(_ arg1: NetworkProtocolEvent) -> () {}
+                    public func handleNetworkProtocolEvent(_ arg1: ProtocolInstanceReference, event: NetworkProtocolEvent) -> () {}
+                    public func handleInboundDataAvailableEvent() -> () {}
+                    public func handleInboundDataAvailableEvent(_ arg1: ProtocolInstanceReference) -> () {}
+                    public func handleOutboundRoomAvailableEvent() -> () {}
+                    public func handleOutboundRoomAvailableEvent(_ arg1: ProtocolInstanceReference) -> () {}
+                    public func attachLowerProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
+                    public func attachLowerDatagramProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
+                """)
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class StreamUpperHarness: InboundStreamHandler, TopStreamProtocol {",
+                with: """
+                @_fixed_layout public class StreamUpperHarness: InboundStreamHandler, TopStreamProtocol {
+                    public typealias LowerProtocol = OutboundStreamLinkage
+                    public final var context: NetworkContext { get { fatalError() } }
+                    public final var eventManager: ProtocolEventManager { get { fatalError() } set {} }
+                    public final var reference: ProtocolInstanceReference { get { fatalError() } }
+                    public final var lower: OutboundStreamLinkage { get { fatalError() } set {} }
+                    public func handleConnectedEvent() -> () {}
+                    public func handleConnectedEvent(_ arg1: ProtocolInstanceReference) -> () {}
+                    public func handleDisconnectedEvent(error: NetworkError?) -> () {}
+                    public func handleDisconnectedEvent(_ arg1: ProtocolInstanceReference, error: NetworkError?) -> () {}
+                    public func handleNetworkProtocolEvent(_ arg1: NetworkProtocolEvent) -> () {}
+                    public func handleNetworkProtocolEvent(_ arg1: ProtocolInstanceReference, event: NetworkProtocolEvent) -> () {}
+                    public func handleInboundDataAvailableEvent() -> () {}
+                    public func handleInboundDataAvailableEvent(_ arg1: ProtocolInstanceReference) -> () {}
+                    public func handleOutboundRoomAvailableEvent() -> () {}
+                    public func handleOutboundRoomAvailableEvent(_ arg1: ProtocolInstanceReference) -> () {}
+                    public func handleInboundAbortedEvent(_ arg1: ProtocolInstanceReference, error: NetworkError?) -> () {}
+                    public func handleOutboundAbortedEvent(_ arg1: ProtocolInstanceReference, error: NetworkError?) -> () {}
+                    public func attachLowerProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
+                    public func attachLowerStreamProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
+                """)
+            // UpperHarness<A>'s lowerProtocol init parameter and `lower` property are both
+            // typed `A.PairedLinkage` in the real ABI (`swift-demangle -expand` on the init
+            // symbol resolves the parameter type to exactly that dependent member type), so `A`
+            // must conform to ProtocolLinkage; the generated code instead used a bare `Any`
+            // for both, and (same root cause as DatagramUpperHarness/StreamUpperHarness above)
+            // is missing the ProtocolInstanceReference-taking overloads and LowerProtocol.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class UpperHarness<A>: InboundDataHandler, LoggableProtocol, ProtocolInstance, TopDatapathProtocol, TopProtocolHandler, UpperHarnessProtocol, UpperProtocolHandler {",
+                with: """
+                @_fixed_layout public class UpperHarness<A: UpperProtocolLinkage>: InboundDataHandler, LoggableProtocol, ProtocolInstance, TopDatapathProtocol, TopProtocolHandler, UpperHarnessProtocol, UpperProtocolHandler {
+                    public typealias LowerProtocol = A.PairedLinkage
+                    public func handleConnectedEvent(_ arg1: ProtocolInstanceReference) -> () {}
+                    public func handleDisconnectedEvent(_ arg1: ProtocolInstanceReference, error: NetworkError?) -> () {}
+                    public func handleNetworkProtocolEvent(_ arg1: ProtocolInstanceReference, event: NetworkProtocolEvent) -> () {}
+                    public func handleInboundDataAvailableEvent(_ arg1: ProtocolInstanceReference) -> () {}
+                    public func handleOutboundRoomAvailableEvent(_ arg1: ProtocolInstanceReference) -> () {}
+                    public func attachLowerProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
+                """)
+            c = c.replacingOccurrences(
+                of: "public init?(identifier: Swift.String, local: Endpoint, remote: Endpoint, parameters: Parameters, path: PathProperties, context: NetworkContext, lowerProtocol: Any) { fatalError() }",
+                with: "public init?(identifier: Swift.String, local: Endpoint, remote: Endpoint, parameters: Parameters, path: PathProperties, context: NetworkContext, lowerProtocol: A.PairedLinkage) { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public final var lower: Any { get { fatalError() } set {} }",
+                with: "public final var lower: A.PairedLinkage { get { fatalError() } set {} }")
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
