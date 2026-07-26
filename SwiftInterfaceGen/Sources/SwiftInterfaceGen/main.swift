@@ -2854,6 +2854,31 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             extension PropertyListEncoder: NetworkEncoder {}
 
             """
+            // InboundFlowLinkage adds `associatedtype DataLinkage: OutboundDataLinkage` on top of
+            // its parent InboundFlowLinkage's own PairedLinkage requirement; both concrete
+            // conformers are missing the DataLinkage typealias (the generator only discovered
+            // PairedLinkage's exported symbol, not DataLinkage's, since it has no separate
+            // per-type ABI representation).
+            c = c.replacingOccurrences(
+                of: """
+                public struct InboundDatagramFlowLinkage: InboundFlowLinkage, ProtocolLinkage, UpperProtocolLinkage {
+                    public typealias PairedLinkage = DatagramListenerLinkage
+                """,
+                with: """
+                public struct InboundDatagramFlowLinkage: InboundFlowLinkage, ProtocolLinkage, UpperProtocolLinkage {
+                    public typealias PairedLinkage = DatagramListenerLinkage
+                    public typealias DataLinkage = OutboundDatagramLinkage
+                """)
+            c = c.replacingOccurrences(
+                of: """
+                public struct InboundStreamFlowLinkage: InboundFlowLinkage, ProtocolLinkage, UpperProtocolLinkage {
+                    public typealias PairedLinkage = StreamListenerLinkage
+                """,
+                with: """
+                public struct InboundStreamFlowLinkage: InboundFlowLinkage, ProtocolLinkage, UpperProtocolLinkage {
+                    public typealias PairedLinkage = StreamListenerLinkage
+                    public typealias DataLinkage = OutboundStreamLinkage
+                """)
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
