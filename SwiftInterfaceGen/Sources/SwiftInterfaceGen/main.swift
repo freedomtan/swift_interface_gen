@@ -2929,6 +2929,21 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
                     public func handleNetworkProtocolEvent(_: ProtocolInstanceReference, event: NetworkProtocolEvent) -> () {}
                     public func handleDisconnectedEvent(_: ProtocolInstanceReference, error: NetworkError?) -> () {}
                 """)
+            // NewFlowHarness<A, B> conforms to UpperProtocolHandler; its `listenerProtocol` init
+            // parameter is typed `A.PairedLinkage` in the real ABI (confirmed via
+            // `swift-demangle -expand` on the init symbol, same dependent-member pattern as the
+            // UpperHarness<A> fix in Network fix 13), which requires `A: UpperProtocolLinkage`
+            // (so A.PairedLinkage conforms to LowerProtocolLinkage) and supplies the missing
+            // LowerProtocol typealias.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class NewFlowHarness<A, B>: InboundFlowHandler, LoggableProtocol, ProtocolInstance, UpperProtocolHandler {",
+                with: """
+                @_fixed_layout public class NewFlowHarness<A: UpperProtocolLinkage, B>: InboundFlowHandler, LoggableProtocol, ProtocolInstance, UpperProtocolHandler {
+                    public typealias LowerProtocol = A.PairedLinkage
+                """)
+            c = c.replacingOccurrences(
+                of: "public init?(identifier: Swift.String, local: Endpoint, remote: Endpoint, parameters: Parameters, path: PathProperties, context: NetworkContext, listenerProtocol: Any) { fatalError() }",
+                with: "public init?(identifier: Swift.String, local: Endpoint, remote: Endpoint, parameters: Parameters, path: PathProperties, context: NetworkContext, listenerProtocol: A.PairedLinkage) { fatalError() }")
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
