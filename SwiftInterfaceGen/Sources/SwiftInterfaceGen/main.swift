@@ -2879,6 +2879,18 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
                     public typealias PairedLinkage = StreamListenerLinkage
                     public typealias DataLinkage = OutboundStreamLinkage
                 """)
+            // Coder<A, B, C> conforms to NetworkProtocolOptions but is missing BelowProtocol and
+            // ProtocolStorage typealiases (no per-type exported ABI symbol for either). Its own
+            // `belowProtocol` property is already typed `any NetworkProtocolOptions`, so
+            // BelowProtocol matches that; ProtocolStorage reuses the same DefaultProtocolStorage
+            // stub used by every other NetworkProtocolOptions conformer.
+            c = c.replacingOccurrences(
+                of: "public struct Coder<A, B, C>: MessageProtocol, NetworkProtocolOptions, OneToOneProtocol {",
+                with: """
+                public struct Coder<A, B, C>: MessageProtocol, NetworkProtocolOptions, OneToOneProtocol {
+                    public typealias BelowProtocol = any NetworkProtocolOptions
+                    public typealias ProtocolStorage = DefaultProtocolStorage
+                """)
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
