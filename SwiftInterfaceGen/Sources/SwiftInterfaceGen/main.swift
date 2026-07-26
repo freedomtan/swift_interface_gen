@@ -2803,6 +2803,44 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(
                 of: "public final var lower: Any { get { fatalError() } set {} }",
                 with: "public final var lower: A.PairedLinkage { get { fatalError() } set {} }")
+            // ConnectionProtocol requires `associatedtype ApplicationProtocolType: NetworkProtocolOptions`,
+            // but no concrete type in the generated output conforms to NetworkProtocolOptions (it's only
+            // ever used as a generic constraint), and the classes' own generic param `A` is bound to types
+            // (WebSocket, TLV, JSON<GenericA>, UDP, DTLS, ...) that don't conform either. Since there's no
+            // real per-instance application-protocol-options value being modeled here (the ABI doesn't
+            // surface one), synthesize a trivial always-absent conformer and alias every ConnectionProtocol
+            // conformer's ApplicationProtocolType to it.
+            c += """
+
+            public struct _NoApplicationProtocolOptions: NetworkProtocolOptions {
+                public typealias BelowProtocol = Never
+                public typealias ProtocolStorage = DefaultProtocolStorage
+                public typealias Metadata = _NoApplicationProtocolMetadata
+                public var belowProtocol: Never { fatalError() }
+                public func configure(parameters: OS_nw_parameters) -> () {}
+                public func configureNestedStack(parameters: OS_nw_parameters) -> () {}
+                public func reconfigureNestedStack(connection: OS_nw_connection) -> () {}
+            }
+            public struct _NoApplicationProtocolMetadata: NetworkMetadataProtocol {
+                public static func fromContentContext(context: NWConnection.ContentContext?, isComplete: Swift.Bool) -> Self? { return nil }
+                public func toContentContext() -> NWConnection.ContentContext { fatalError() }
+            }
+
+            """
+            for decl in [
+                "@_fixed_layout public class Connection1<A, each B>: ConnectionProtocol, Hashable, Identifiable {",
+                "@_fixed_layout public class Connection2<A, each B>: ConnectionProtocol, Hashable, Identifiable {",
+                "@_fixed_layout public class Connection3<A, each B>: ConnectionProtocol, Hashable, Identifiable {",
+                "@_fixed_layout public class Connection4<A, each B>: ConnectionProtocol, Hashable, Identifiable {",
+                "@_fixed_layout public class Connection5<A, each B>: ConnectionProtocol, Hashable, Identifiable {",
+                "@_fixed_layout public class Connection6<A>: ConnectionProtocol, Hashable, Identifiable {",
+                "@_fixed_layout public class Connection7<A>: ConnectionProtocol, Hashable, Identifiable {",
+                "@_fixed_layout public class NetworkChannel<A>: ConnectionProtocol, CustomDebugStringConvertible, Hashable, Identifiable {",
+            ] {
+                c = c.replacingOccurrences(
+                    of: decl,
+                    with: decl + "\n    public typealias ApplicationProtocolType = _NoApplicationProtocolOptions")
+            }
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
