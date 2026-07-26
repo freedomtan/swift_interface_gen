@@ -2944,6 +2944,100 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(
                 of: "public init?(identifier: Swift.String, local: Endpoint, remote: Endpoint, parameters: Parameters, path: PathProperties, context: NetworkContext, listenerProtocol: Any) { fatalError() }",
                 with: "public init?(identifier: Swift.String, local: Endpoint, remote: Endpoint, parameters: Parameters, path: PathProperties, context: NetworkContext, listenerProtocol: A.PairedLinkage) { fatalError() }")
+            // QUICDatagramFlow/QUICPath are internal SPI helper classes (no public .swiftinterface
+            // entry) referenced only via QUICConnection's multiplexedSecondaryFlows/
+            // multiplexingPaths dictionaries; the generator captured only their exported members,
+            // not their conformances to MultiplexedFlow/MultiplexingPath (needed for
+            // QUICConnection's own HeterogeneousManyToManyProtocolHandler/ManyToManyProtocolHandler
+            // conformance to be able to infer SecondaryFlow/Path). Added the missing conformances
+            // and stub members, matching the shape of every other MultiplexedFlow/MultiplexingPath
+            // conformer already fixed elsewhere in this file.
+            // Header-only matches (not the whole class body) since member declaration order
+            // inside these classes isn't guaranteed stable across generator runs.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout final public class QUICDatagramFlow {",
+                with: """
+                @_fixed_layout final public class QUICDatagramFlow: MultiplexedDatapathFlow {
+                    public typealias UpperProtocol = InboundDatagramLinkage
+                    public final var context: NetworkContext { get { fatalError() } }
+                    public var eventManager: ProtocolEventManager { get { fatalError() } set {} }
+                    public var log: NetworkLoggerState { get { fatalError() } set {} }
+                    public final var parentProtocol: QUICConnection { get { fatalError() } set {} }
+                    public final var identifier: MultiplexedFlowIdentifier { get { fatalError() } }
+                    public final var upper: InboundDatagramLinkage { get { fatalError() } set {} }
+                    public var upperReceiveQueue: FrameArray { get { fatalError() } set {} }
+                    public var upperSendQueue: FrameArray { get { fatalError() } set {} }
+                """)
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout final public class QUICPath: Equatable {",
+                with: """
+                @_fixed_layout final public class QUICPath: Equatable, MultiplexingDatapathPath {
+                    public typealias LowerProtocol = OutboundDatagramLinkage
+                    public final var context: NetworkContext { get { fatalError() } }
+                    public var eventManager: ProtocolEventManager { get { fatalError() } set {} }
+                    public final var identifier: Swift.Int { get { fatalError() } }
+                    public final var lower: OutboundDatagramLinkage { get { fatalError() } set {} }
+                    public final var parentProtocol: QUICConnection { get { fatalError() } }
+                    public final var pathIsPrimary: Swift.Bool { get { fatalError() } set {} }
+                    public func attachLowerProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
+                    public func handleConnectedEvent(_ arg1: ProtocolInstanceReference) -> () {}
+                    public func handleNetworkProtocolEvent(_: ProtocolInstanceReference, event: NetworkProtocolEvent) -> () {}
+                    public func handleDisconnectedEvent(_: ProtocolInstanceReference, error: NetworkError?) -> () {}
+                    public required init(parent: QUICConnection) { fatalError() }
+                """)
+            // QUICConnection conforms to HeterogeneousManyToManyProtocolHandler/
+            // ManyToManyProtocolHandler/StreamListenerHandler/HeterogeneousListenerHandler.
+            // Its Flow/SecondaryFlow/Path/UpperProtocol/SecondaryUpperProtocol associatedtypes
+            // are inferable now that QUICStreamInstance/QUICDatagramFlow/QUICPath conform to the
+            // right protocols, but still need explicit typealiases (the properties alone leave
+            // ambiguity between candidate inferences), plus the ListenerHandler/
+            // StreamListenerHandler/ManyToManyProtocolHandler requirements that have no per-type
+            // exported ABI symbol (they're satisfied only via default/inherited behavior on the
+            // real type).
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class QUICConnection: HeterogeneousListenerHandler, HeterogeneousManyToManyProtocolHandler, ListenerHandler, LoggableProtocol, ManyToManyApplicationDatagramProtocol, ManyToManyApplicationStreamProtocol, ManyToManyDatapathProtocol, ManyToManyOutboundDatagramProtocol, ManyToManyProtocolHandler, ProtocolInstance, ProtocolInstanceContainer, StreamListenerHandler, TimerSchedulable {",
+                with: """
+                @_fixed_layout public class QUICConnection: HeterogeneousListenerHandler, HeterogeneousManyToManyProtocolHandler, ListenerHandler, LoggableProtocol, ManyToManyApplicationDatagramProtocol, ManyToManyApplicationStreamProtocol, ManyToManyDatapathProtocol, ManyToManyOutboundDatagramProtocol, ManyToManyProtocolHandler, ProtocolInstance, ProtocolInstanceContainer, StreamListenerHandler, TimerSchedulable {
+                    public typealias UpperProtocol = InboundStreamFlowLinkage
+                    public typealias SecondaryUpperProtocol = InboundDatagramFlowLinkage
+                    public typealias Flow = QUICStreamInstance
+                    public typealias SecondaryFlow = QUICDatagramFlow
+                    public typealias Path = QUICPath
+                    public func attachUpperProtocolToExistingFlow<GenericA>(_: ProtocolInstanceReference, flowReference: ProtocolInstanceReference) throws(NetworkError) -> GenericA where GenericA: LowerProtocolLinkage { fatalError() }
+                    public func attachUpperProtocolToNewFlow<GenericA>(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> GenericA where GenericA: LowerProtocolLinkage { fatalError() }
+                    public func handleDisconnectedEvent(path: Swift.Int, error: NetworkError?) -> () {}
+                    public func performInitialSetupIfNeeded(remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
+                    public func handleNetworkProtocolEvent(path: Swift.Int, event: NetworkProtocolEvent) -> HandleNetworkEventResult { fatalError() }
+                    public func teardownIfPossible() -> () {}
+                    public func handleConnectedEvent(path: Swift.Int) -> () {}
+                    public func attachLowerProtocolForNewPath(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
+                    public func validate(inbound: ProtocolInstanceReference, _: Swift.String) throws(ProtocolInstanceError) -> () {}
+                    public func attachNewStreamFlowProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> StreamListenerLinkage { fatalError() }
+                    public func attachUpperStreamProtocolToExistingFlow(_: ProtocolInstanceReference, flowReference: ProtocolInstanceReference) throws(NetworkError) -> OutboundStreamLinkage { fatalError() }
+                    public func attachUpperStreamProtocolToNewFlow(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> OutboundStreamLinkage { fatalError() }
+                """)
+            // QUICStreamInstance conforms to EarlyDataStreamFlow/UnidirectionalAbortingStreamFlow,
+            // which pull in MultiplexedFlow/LoggableProtocol/ProtocolInstance/
+            // OutboundStreamEarlyDataHandler requirements that have no per-type exported ABI
+            // symbol on this specific class.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout final public class QUICStreamInstance: EarlyDataStreamFlow, OutboundStreamEarlyDataHandler, OutboundStreamUnidirectionalAbortHandler, UnidirectionalAbortingStreamFlow {\n    public init(parent: QUICConnection, inbound: Swift.Bool) { fatalError() }",
+                with: """
+                @_fixed_layout final public class QUICStreamInstance: EarlyDataStreamFlow, OutboundStreamEarlyDataHandler, OutboundStreamUnidirectionalAbortHandler, UnidirectionalAbortingStreamFlow {
+                    public typealias UpperProtocol = InboundStreamLinkage
+                    public init(parent: QUICConnection, inbound: Swift.Bool) { fatalError() }
+                    public final var context: NetworkContext { get { fatalError() } }
+                    public var eventManager: ProtocolEventManager { get { fatalError() } set {} }
+                    public var log: NetworkLoggerState { get { fatalError() } set {} }
+                    public final var parentProtocol: QUICConnection { get { fatalError() } set {} }
+                    public final var identifier: MultiplexedFlowIdentifier { get { fatalError() } }
+                    public final var upper: InboundStreamLinkage { get { fatalError() } set {} }
+                    public var upperReceiveQueue: FrameArray { get { fatalError() } set {} }
+                    public var upperSendQueue: FrameArray { get { fatalError() } set {} }
+                    public func sendEarlyStreamData(_: ProtocolInstanceReference, streamData: __owned FrameArray) throws(NetworkError) -> () {}
+                    public func abortOutbound(_: ProtocolInstanceReference, error: NetworkError?) -> () {}
+                    public func abortInbound(_: ProtocolInstanceReference, error: NetworkError?) -> () {}
+                """)
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
