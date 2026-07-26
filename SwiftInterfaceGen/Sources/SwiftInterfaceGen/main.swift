@@ -2891,6 +2891,44 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
                     public typealias BelowProtocol = any NetworkProtocolOptions
                     public typealias ProtocolStorage = DefaultProtocolStorage
                 """)
+            // MultiplexedDatagramFlow/MultiplexedStreamFlow<A> conform to MultiplexedFlow, which
+            // declares `associatedtype ParentProtocol: ManyToManyProtocolHandler` inferred from
+            // the `parent` init parameter and `parentProtocol` property (both typed `A`) — so `A`
+            // itself must be constrained to ManyToManyProtocolHandler. Also missing `context`
+            // (ProtocolInstance, no per-type ABI symbol) and `required` on the memberwise init
+            // (a protocol initializer requirement can only be satisfied by a required init on a
+            // non-final class).
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class MultiplexedDatagramFlow<A>: AutomaticUpperDatagramProcessing, LoggableProtocol, MultiplexedDatapathFlow, MultiplexedFlow, OutboundDataHandler, ProtocolInstance, ProtocolInstanceContainer {\n    public init(parent: A, inbound: Swift.Bool) { fatalError() }",
+                with: """
+                @_fixed_layout public class MultiplexedDatagramFlow<A: ManyToManyProtocolHandler>: AutomaticUpperDatagramProcessing, LoggableProtocol, MultiplexedDatapathFlow, MultiplexedFlow, OutboundDataHandler, ProtocolInstance, ProtocolInstanceContainer {
+                    public required init(parent: A, inbound: Swift.Bool) { fatalError() }
+                    public final var context: NetworkContext { get { fatalError() } }
+                """)
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class MultiplexedStreamFlow<A>: AutomaticUpperStreamProcessing, LoggableProtocol, MultiplexedDatapathFlow, MultiplexedFlow, OutboundDataHandler, ProtocolInstance, ProtocolInstanceContainer {\n    public init(parent: A, inbound: Swift.Bool) { fatalError() }",
+                with: """
+                @_fixed_layout public class MultiplexedStreamFlow<A: ManyToManyProtocolHandler>: AutomaticUpperStreamProcessing, LoggableProtocol, MultiplexedDatapathFlow, MultiplexedFlow, OutboundDataHandler, ProtocolInstance, ProtocolInstanceContainer {
+                    public required init(parent: A, inbound: Swift.Bool) { fatalError() }
+                    public final var context: NetworkContext { get { fatalError() } }
+                """)
+            // MultiplexingDatagramPath<A> conforms to MultiplexingPath/UpperProtocolHandler:
+            // same ParentProtocol-inference issue on `A` as above, plus missing `context`,
+            // `LowerProtocol` typealias, and the UpperProtocolHandler handle*/attachLowerProtocol
+            // requirements (only the Datagram-specific attachLowerDatagramProtocol overload had
+            // its own exported symbol).
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class MultiplexingDatagramPath<A>: AutomaticLowerDatagramProcessing, InboundDataHandler, InboundDatagramHandler, MultiplexingDatapathPath, MultiplexingPath, ProtocolInstance, ProtocolInstanceContainer, UpperProtocolHandler {\n    public init(parent: A) { fatalError() }",
+                with: """
+                @_fixed_layout public class MultiplexingDatagramPath<A: ManyToManyProtocolHandler>: AutomaticLowerDatagramProcessing, InboundDataHandler, InboundDatagramHandler, MultiplexingDatapathPath, MultiplexingPath, ProtocolInstance, ProtocolInstanceContainer, UpperProtocolHandler {
+                    public typealias LowerProtocol = OutboundDatagramLinkage
+                    public required init(parent: A) { fatalError() }
+                    public final var context: NetworkContext { get { fatalError() } }
+                    public func attachLowerProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
+                    public func handleConnectedEvent(_ arg1: ProtocolInstanceReference) -> () {}
+                    public func handleNetworkProtocolEvent(_: ProtocolInstanceReference, event: NetworkProtocolEvent) -> () {}
+                    public func handleDisconnectedEvent(_: ProtocolInstanceReference, error: NetworkError?) -> () {}
+                """)
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
