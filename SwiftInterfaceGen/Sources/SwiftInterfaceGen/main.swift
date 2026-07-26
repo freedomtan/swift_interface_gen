@@ -1656,9 +1656,22 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             // implementation for them is never emitted by this generator (protocol-extension
             // defaults aren't reproduced, only concrete-type extensions), so AnyChartContent
             // itself needs the members explicitly.
+            //
+            // AnyChartContent is also ChartContent's `@_typeEraser` type (confirmed in the real
+            // .swiftinterface: `@_typeEraser(AnyChartContent) ... public protocol ChartContent`)
+            // and is declared `@frozen` there. Under library evolution, a non-@frozen resilient
+            // struct's protocol-witness thunks (for `_makeChartContent`/`body`, specifically) get
+            // compiled as indirect/resilient-access thunks that reference the *protocol's*
+            // generic-placeholder mangling rather than AnyChartContent's own — and those never
+            // make it into `-exported_symbols_list`, leaving them undefined at final-link time
+            // even though they compile fine into the first-pass (`-undefined dynamic_lookup`)
+            // dylib. Adding `@frozen` makes the compiler emit direct witness-thunk symbols
+            // instead, matching the real ABI. Verified via a minimal standalone repro: removing
+            // `@frozen` alone reproduces the exact 2 undefined "protocol witness for ..." symbols
+            // seen here; adding it back alone (no other change) fixes the link.
             c = c.replacingOccurrences(
                 of: "public struct AnyChartContent: ChartContent {",
-                with: "public struct AnyChartContent: ChartContent {\n    public var body: Never { fatalError() }\n    public static func _makeChartContent(content: SwiftUI._GraphValue<AnyChartContent>, inputs: _ChartContentInputs) -> _ChartContentOutputs { fatalError() }")
+                with: "@frozen\npublic struct AnyChartContent: ChartContent {\n    public var body: Never { fatalError() }\n    public static func _makeChartContent(content: SwiftUI._GraphValue<AnyChartContent>, inputs: _ChartContentInputs) -> _ChartContentOutputs { fatalError() }")
             // The real module declares `extension Optional: ChartContent/AxisMark/
             // Chart3DContent/ContourContent where Wrapped: <same protocol>` so that optional
             // chart content (`if let ... { SomeMark(...) }`) participates directly in the
@@ -1723,11 +1736,11 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             // Data.Element's Identifiable conformance), which the generic-placeholder-path
             // eraser can't resolve and erases to a self-contradictory bare `Any`.
             c = c.replacingOccurrences(
-                of: "where A == SwiftUI.ForEach<A1, Any, B1>, A1: RandomAccessCollection, B1: ChartContent, A1.Element: Identifiable",
-                with: "where A == SwiftUI.ForEach<A1, A1.Element.ID, B1>, A1: RandomAccessCollection, B1: ChartContent, A1.Element: Identifiable")
+                of: "where A == SwiftUI.ForEach<A1, Any, B1>,  A1: RandomAccessCollection,  B1: ChartContent,  A1.Element: Identifiable",
+                with: "where A == SwiftUI.ForEach<A1, A1.Element.ID, B1>,  A1: RandomAccessCollection,  B1: ChartContent,  A1.Element: Identifiable")
             c = c.replacingOccurrences(
-                of: "where A == SwiftUI.ForEach<A1, Any, B1>, A1: RandomAccessCollection, B1: Chart3DContent, A1.Element: Identifiable",
-                with: "where A == SwiftUI.ForEach<A1, A1.Element.ID, B1>, A1: RandomAccessCollection, B1: Chart3DContent, A1.Element: Identifiable")
+                of: "where A == SwiftUI.ForEach<A1, Any, B1>,  A1: RandomAccessCollection,  B1: Chart3DContent,  A1.Element: Identifiable",
+                with: "where A == SwiftUI.ForEach<A1, A1.Element.ID, B1>,  A1: RandomAccessCollection,  B1: Chart3DContent,  A1.Element: Identifiable")
             // ValueAlignedChartScrollTargetBehavior conforms to ChartScrollTargetBehavior, which
             // itself extends SwiftUI.ScrollTargetBehavior — the redundant explicit
             // `SwiftUI.ScrollTargetBehavior` conformance forces its `updateTarget(context:)`
