@@ -2841,6 +2841,19 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
                     of: decl,
                     with: decl + "\n    public typealias ApplicationProtocolType = _NoApplicationProtocolOptions")
             }
+            // NetworkJSONCoder/NetworkPropertyListCoder conform to NetworkCoder, whose
+            // makeDecoder()/makeEncoder() requirements return associatedtypes constrained to
+            // NetworkDecoder/NetworkEncoder. Foundation's JSONDecoder/JSONEncoder/
+            // PropertyListDecoder/PropertyListEncoder satisfy those protocols' requirements
+            // structurally but have no declared conformance in the generated output.
+            c += """
+
+            extension JSONDecoder: NetworkDecoder {}
+            extension JSONEncoder: NetworkEncoder {}
+            extension PropertyListDecoder: NetworkDecoder {}
+            extension PropertyListEncoder: NetworkEncoder {}
+
+            """
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
