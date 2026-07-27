@@ -715,6 +715,7 @@ class Parser {
                 let cleaned = cleanType(typePath)
                 if !cleaned.isEmpty {
                     let node = findOrCreateType(name: cleaned)
+                    node.hasDeinit = true
                     if originalMangled.contains("VfD") {
                         setKind("struct", for: node, force: true)
                         node.conformances.insert("~Copyable")

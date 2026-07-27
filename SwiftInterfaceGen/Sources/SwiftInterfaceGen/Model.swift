@@ -27,6 +27,7 @@ class TypeNode {
     var rawType: String?
     var finalMembers: Set<String> = []
     var isObjcBridged: Bool = false  // true when this is an ObjC class extended in Swift (So-prefix symbols)
+    var hasDeinit: Bool = false  // true when the ABI has a "...deinit" (VfD/Cfd) symbol for this type
     weak var parent: TypeNode? = nil
     // Names of protocol requirements this type is KNOWN to implement via a "protocol witness
     // for ... in conformance" ABI thunk, even though that thunk's demangled text isn't itself
@@ -2146,6 +2147,9 @@ class TypeNode {
             }
         }
         
+        if hasDeinit && !isObjcBridged && (actualKind == "class" || (actualKind == "struct" && hasConformance("~Copyable"))) {
+            lines.append("\(nextIndent)deinit {}")
+        }
         lines.append("\(indent)}")
         if isObjcBridged && actualKind == "class" {
             lines.append("\(indent)// --- End ObjC Extension ---")
