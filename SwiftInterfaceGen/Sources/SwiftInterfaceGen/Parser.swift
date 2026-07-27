@@ -158,8 +158,43 @@ class Parser {
         }
         return result
     }
+
+    // Finds the function's own top-level " -> " (the one right after its own parameter
+    // list closes, at paren/angle/bracket depth 0) rather than the LAST " -> " in the
+    // string, which is wrong whenever the return type is itself a function type (e.g.
+    // `(Int) -> (String) -> Bool` — searching backwards would find the inner arrow and
+    // truncate the signature's own return type down to just "Bool").
+    static func topLevelArrowRange(in s: String) -> Range<String.Index>? {
+        var depth = 0
+        var idx = s.startIndex
+        while idx < s.endIndex {
+            let ch = s[idx]
+            if ch == "(" || ch == "[" { depth += 1 }
+            else if ch == ")" || ch == "]" { depth -= 1 }
+            else if ch == "<" { depth += 1 }
+            else if ch == ">" {
+                let isArrowHead = idx > s.startIndex && s[s.index(before: idx)] == "-"
+                if !isArrowHead { depth -= 1 }
+            }
+            if depth == 0, ch == "-", s.index(after: idx) < s.endIndex, s[s.index(after: idx)] == ">" {
+                let arrowStart = idx > s.startIndex && s[s.index(before: idx)] == " " ? s.index(before: idx) : idx
+                let arrowEnd = s.index(idx, offsetBy: 2)
+                return arrowStart..<arrowEnd
+            }
+            idx = s.index(after: idx)
+        }
+        return nil
+    }
+
     private var scannedLocalSwiftFiles = false
     var tbdSymbols = Set<String>()
+    // Symbols that belong to the primary target's OWN .tbd document specifically (depth 0
+    // in processSymbols), excluding symbols pulled in from `reexported-libraries:` (depth 1+).
+    // A reexporting framework's real Mach-O binary satisfies those via an LC_REEXPORT_DYLIB
+    // load command forwarding to the actual dependency dylib — it never locally defines them
+    // — so the exports file (which becomes -exported_symbols_list) must only demand the
+    // target's own symbols, not the flattened union of everything it reexports.
+    var ownTbdSymbols = Set<String>()
     var nonFinalClasses = Set<String>()
     // "TypeName:ProtocolName" entries for Mc conformance descriptors found in TBD symbols.
     var conformancesFromTBD = Set<String>()
@@ -469,7 +504,7 @@ class Parser {
                     if funcPart.hasPrefix("static ") {
                         funcPart = String(funcPart.dropFirst(7))
                     }
-                    if let arrowRange = funcPart.range(of: " -> ", options: .backwards) {
+                    if let arrowRange = Parser.topLevelArrowRange(in: funcPart) {
                         funcPart = String(funcPart[..<arrowRange.lowerBound])
                     }
                     
@@ -2480,7 +2515,7 @@ class Parser {
                     cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
                     cleanedSig = Parser.fixUnnamedParameters(cleanedSig)
                     var returnType = "Void"
-                    if let arrowRange = cleanedSig.range(of: " -> ", options: .backwards) {
+                    if let arrowRange = Parser.topLevelArrowRange(in: cleanedSig) {
                         returnType = String(cleanedSig[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
                     }
                     let defaultVal = TypeNode.defaultReturnValue(for: returnType)

@@ -8,6 +8,8 @@ TARGET_FRAMEWORKS = {
     "ModelCatalogRuntime",
     "CoreAICommon",
     "CoreAICompiler",
+    "CoreAIAsset",
+    "CoreAIRuntime",
     "ModelCatalog",
     "ODIE",
     "TokenGenerationCore",

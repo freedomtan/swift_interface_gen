@@ -25,7 +25,15 @@ struct SwiftInterfaceGen {
         }
 
         let currentModule = (tbdPath as NSString).lastPathComponent.replacingOccurrences(of: ".tbd", with: "")
-        let symbols = extractSymbols(from: content)
+        // A .tbd for a framework with `reexported-libraries:` is a multi-document file: its
+        // own `--- !tapi-tbd` document, followed by one more per reexported library (Apple
+        // flattens each dependency's full symbol table into the same file at .tbd-generation
+        // time). Scanning the whole file for symbols would double-count those reexported
+        // symbols as if they were this target's own — they're already fetched separately,
+        // correctly, via extractReexportedLibraries()'s explicit per-library .tbd lookup below
+        // (depth 1). Only the first document is this target's own ABI.
+        let ownDocument = content.components(separatedBy: "--- !tapi-tbd").dropFirst().first.map { "--- !tapi-tbd" + $0 } ?? content
+        let symbols = extractSymbols(from: ownDocument)
         
         let parser = Parser()
         parser.defaultModule = currentModule
@@ -89,7 +97,7 @@ struct SwiftInterfaceGen {
         let stdlibExtPrefixes = ["_$ss", "_$sSf", "_$sSd", "_$sSi", "_$sSu", "_$sSb",
                                  "_$sSS", "_$sSs",  // Float/Double/Int/UInt/Bool/String/Substring
                                  "_$sSo"]           // ObjC class extensions (So = Swift ObjC bridge)
-        let filteredExports = parser.tbdSymbols.sorted().filter { sym in
+        let filteredExports = parser.ownTbdSymbols.sorted().filter { sym in
             !stdlibExtPrefixes.contains(where: { sym.hasPrefix($0) })
         }
 
@@ -279,6 +287,9 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             if symbol.contains("UAF") { fputs("Processing symbol: \(symbol)\n", stderr) }
         }
         parser.tbdSymbols.formUnion(symbols)
+        if depth == 0 {
+            parser.ownTbdSymbols.formUnion(symbols)
+        }
         if parser.processedModules.contains(module) { return }
         parser.processedModules.insert(module)
         
@@ -1196,8 +1207,6 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         // Clean up protocols that were mistakenly made generic
         c = c.stripGenericFromProtocol()
         
-        // Clean up invalid nested generic applications
-        c = c.stripGenericFromView()
         
         if !parser.defaultModule.isEmpty {
             c = c.replacingOccurrences(of: "___SHIELDED_\(parser.defaultModule)___", with: parser.defaultModule)
@@ -2225,7 +2234,47 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c += "    public var metadataURL: URL { get { fatalError() } }\n"
             c += "}\n"
         }
-        
+
+        if parser.defaultModule == "CoreAIRuntime" {
+            // _AllRange conforms to NDArray.RangeExpression (confirmed via a real conformance
+            // descriptor symbol, `_$s13CoreAIRuntime9_AllRangeVAA7NDArrayV0D10ExpressionAAMc`)
+            // but has no `relative(to:)` witness anywhere in the ABI at all — not on _AllRange
+            // itself, nor on any of RangeExpression's other conformers (Int, ClosedRange<Int>),
+            // meaning the real implementation is satisfied by an `@inline(__always)`/generic
+            // default that never emits its own exported symbol. Give the protocol a default
+            // implementation instead of guessing at per-conformer bodies: `_AllRange`
+            // represents "the entire range" so returning the input unchanged is the only
+            // semantically valid default reachable at all sites (each real conformer's actual
+            // behavior differs, but none of it is ABI-visible to reconstruct).
+            c += "\nextension NDArray.RangeExpression {\n    public func relative(to range: Range<Swift.Int>) -> Range<Swift.Int> { return range }\n}\n"
+
+            // InferenceFunction.Inputs.insert<A>/MutableViews.insert<A> take an
+            // A: ViewRepresentable/MutableViewRepresentable generic parameter that is ALSO
+            // constrained `A: ~Copyable` (confirmed via swift-demangle -expand on the real
+            // symbol: "insert<A where A: ...ViewRepresentable, A: ~Swift.Copyable>"). Two
+            // gaps against that ABI:
+            // 1. ViewRepresentable/MutableViewRepresentable are declared plain (implicitly
+            //    `: Copyable`), so a conformer can never also be `~Copyable` — the protocols
+            //    themselves must opt out of the implicit Copyable requirement.
+            // 2. A noncopyable-typed parameter needs an explicit ownership convention
+            //    (borrowing/consuming/inout); the demangled signature text doesn't carry
+            //    calling-convention detail, so the generator emits a bare, unannotated
+            //    parameter, which Swift rejects for any ~Copyable type. The real convention here
+            //    is by-value read-only access (insert() doesn't mutate the argument, only the
+            //    receiver), so `borrowing` is used for insert()'s immutable `A: ~Copyable` param,
+            //    matching every other read-only Span/PixelBuffer-family
+            //    noncopyable-parameter fixup already applied elsewhere in this generator.
+            c = c.replacingOccurrences(
+                of: "public protocol ViewRepresentable: Sendable {",
+                with: "public protocol ViewRepresentable: Sendable, ~Copyable {")
+            c = c.replacingOccurrences(
+                of: "public protocol MutableViewRepresentable: Sendable {",
+                with: "public protocol MutableViewRepresentable: Sendable, ~Copyable {")
+            c = c.replacingOccurrences(
+                of: "public func insert<GenericA>(_: GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable,  GenericA: ~Copyable {}",
+                with: "public func insert<GenericA>(_: borrowing GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable,  GenericA: ~Copyable {}")
+        }
+
         if parser.defaultModule == "Network" {
             // Fix Swift 3 renamed types used in __C_ typealiases
             c = c.replacingOccurrences(of: "NSURLSessionTask", with: "URLSessionTask")
@@ -3085,7 +3134,21 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             cleanedLines.append(line)
         }
         c = cleanedLines.joined(separator: "\n")
-        
+
+        // A closure-typed parameter whose type is itself a function returning a function
+        // (e.g. `(A) throws -> B` returned from another closure, as in resolver-wrapping
+        // functions like CoreAIRuntime.wrapCoreAIResolver/wrapCoreAIOwnedResolver) gets
+        // `@escaping` added twice by Parser.escapeClosures: once by the outer
+        // isTopLevelParameter branch, and again by the inner enclosing-parens branch for
+        // the same parameter, since the recursion has no way to know the prefix was
+        // already applied one level up. Global, module-agnostic collapse — first spotted
+        // and fixed only for Network's nw_storage_* C-wrapper functions (see the
+        // Network-specific block above), generalized here since the same generator
+        // recursion bug reproduces in other frameworks (e.g. CoreAIRuntime) too. Placed
+        // last so it runs after any module-specific `@escaping @escaping @convention(block)`
+        // handling that expects to see the un-collapsed pattern.
+        c = c.replacingOccurrences(of: "@escaping @escaping ", with: "@escaping ")
+
         return c
     }
 

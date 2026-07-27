@@ -1809,15 +1809,6 @@ extension String {
         return regex.stringByReplacingMatches(in: self, options: [], range: NSRange(location: 0, length: nsString.length), withTemplate: "$1")
     }
 
-    // 25. stripGenericFromView: replaces `.View<...>` with `.View`
-    func stripGenericFromView() -> String {
-        guard let regex = try? NSRegularExpression(pattern: "(?<!Tensor)\\.View<[^>]+>", options: []) else {
-            return self
-        }
-        let nsString = self as NSString
-        return regex.stringByReplacingMatches(in: self, options: [], range: NSRange(location: 0, length: nsString.length), withTemplate: ".View")
-    }
-
     // 26. replaceMissingNestedTypes: handles fallbacks for missing nested types
     func replaceMissingNestedTypes(missingName: String) -> String {
         var result = self
