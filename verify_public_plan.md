@@ -7,11 +7,11 @@
 uses a curated 18-framework baseline (`--frameworks` to pick specific ones, `--all` for
 all ~193 discovered).
 
-**Status as of branch `using_public_framework_as_groundtruth`**: **17/18 PASS**.
+**Status as of branch `using_public_framework_as_groundtruth`**: **18/18 PASS**.
 
 ---
 
-## ✅ PASSING (17/18)
+## ✅ PASSING (18/18 — COMPLETE)
 
 Sorted by TBD symbol count (smallest/easiest first):
 
@@ -32,6 +32,7 @@ Sorted by TBD symbol count (smallest/easiest first):
 - HealthKit (5087)
 - Vision (10163)
 - Network (13028)
+- Charts (2021)
 
 Each of these was root-rooted and fixed via real-tbd-vs-real-swiftinterface comparison —
 see git log on this branch for the individual fix commits and their detailed messages
@@ -97,24 +98,34 @@ JSON/PropertyList en/decoders, and finally `QUICConnection`/`QUICStreamInstance`
 `.swiftinterface` entry, needing synthesized `MultiplexedFlow`/`MultiplexingPath`
 conformances so `QUICConnection` could infer its own associated types). Network now PASSes.
 
-## ❌ REMAINING (1/18)
+### Charts fix detail
+**Fully resolved** (commit `b50f214`): the link-stage `@_typeEraser` witness-thunk blocker is
+fixed. Charts now PASSes. The earlier compile fixes (commit `2509588`: shadowed `body`/`Body`
+types, missing `Never`/`Optional` conformances, `nonisolated` fixes, associated-type and
+generic-parameter gaps, `Chart<Content>.init`'s associated-type-chain erasure) handled all
+first-pass errors, leaving only the final-link issue.
 
-### Charts (2021 symbols)
-**Mostly fixed** (commit `2509588`): all ~15 first-pass compile errors are resolved (shadowed
-`body`/`Body` types on AreaMark/LineMark/PointMark/etc. retyped to `Swift.Never`, missing
-`Never`/`Optional` ChartContent-family conformances added, `nonisolated` fixes for
-ChartSymbolShape, `SPAngle`/`ChartBinRange`/`NumberBins`/`BuilderTuple`/Vectorized*PlotContent
-associated-type and generic-parameter fixes, `ValueAlignedChartScrollTargetBehavior`'s
-redundant-conformance conflict, `Chart<Content>.init`'s associated-type-chain erasure).
+**Root cause**: `AnyChartContent` is ChartContent's `@_typeEraser` type (confirmed in the
+real `.swiftinterface`: `@_typeEraser(AnyChartContent) ... public protocol ChartContent`),
+and the real declaration is `@frozen`. Without `@frozen`, AnyChartContent is a resilient
+(ABI-non-fixed-layout) struct, and under library evolution its protocol-witness thunks for
+`_makeChartContent(content:inputs:)` and the `body` getter get compiled as resilient-access
+thunks whose mangled names route through the protocol's own generic-placeholder type rather
+than AnyChartContent directly — those two specific thunks then never make it into
+`-exported_symbols_list` and come up undefined at final-link time, even though the same code
+compiles fine into the first-pass (`-undefined dynamic_lookup`) dylib. This explains why
+`verify_public.py`'s first-pass stub count was 0 (no missing symbols detected
+pre-export-filtering) while the final link still failed — the symptom was link-stage only,
+invisible to the ordinary first-pass-vs-exports comparison.
 
-**Remaining blocker**: `AnyChartContent` (ChartContent's `@_typeEraser` type) compiles fine
-into the first-pass dylib but its `_makeChartContent`/`body` witness-thunk symbols vanish
-under `-exported_symbols_list` at the final-link stage, leaving 2 undefined symbols. This
-looks like a Swift compiler ABI-emission quirk specific to `@_typeEraser`-synthesized
-conformances (the witness thunk's mangled name uses the protocol's own generic placeholder
-`x` rather than `AnyChartContent`, and gets dropped entirely once the exports allowlist is
-applied) — investigated but not resolved; needs deeper linker/ABI investigation or an
-upstream Swift bug report. Charts still reports ERROR, not PASS.
+**Fix**: Added `@frozen` to the generated `AnyChartContent` declaration (alongside the
+pre-existing `body`/`_makeChartContent` explicit-member fix from commit `2509588`, still
+required separately since protocol-extension defaults aren't reproduced by this generator).
+Verified via a minimal standalone repro isolating exactly one variable: compiled a trimmed
+ChartContent/AnyChartContent pair matching the generated shape, first without `@frozen`
+(reproduced the exact 2 undefined "protocol witness for ..." symbols against a real exports
+list extracted from Charts.tbd), then with `@frozen` added and nothing else changed (link
+succeeded cleanly).
 
 ---
 
