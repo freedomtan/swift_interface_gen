@@ -16,7 +16,9 @@ TARGET_FRAMEWORKS = {
     "CoreAIDelegates",
     "AppleIntelligenceReporting",
     "FeatureFlags",
-    "UnifiedAssetFramework"
+    "UnifiedAssetFramework",
+    "InternalSwiftProtobuf",
+    "PromptKit",
 }
 
 # Pre-defined system modules that are part of standard SDK
@@ -492,10 +494,32 @@ def build_framework(name, is_target=False):
     built.add(name)
     building.remove(name)
 
+# Tracks which stub-module source file (if any) actually got compiled for each name, so a
+# later, richer stub request for the same module (e.g. GenerativeModelsFoundation needed only
+# as an empty placeholder by TokenGenerationCore's own --generate-stubs scan, but needed with
+# real declarations by PromptKit's separately-scoped scan, since each target's --generate-stubs
+# run only knows about the types ITS OWN interface references) can detect that the previously
+# built stub is a strict subset and rebuild with the union instead of silently keeping the
+# narrower one — `built`/`is_framework_fully_built`-style caching alone can't tell "already
+# built" apart from "already built, but too narrow for this new caller".
+stub_sources_built = {}
+
 def build_framework_stub(name, swift_source):
     if name in built:
-        return
+        with open(swift_source, "r") as f:
+            new_content = f.read()
+        prior_source = stub_sources_built.get(name)
+        if prior_source is not None:
+            with open(prior_source, "r") as f:
+                prior_content = f.read()
+            if new_content == prior_content or len(new_content) <= len(prior_content):
+                return
+            print(f"--- Rebuilding stub {name}: new reference scope ({swift_source}) is richer than the one already built ({prior_source}) ---")
+            built.discard(name)
+        else:
+            return
     compile_framework(name, swift_source, is_stub=True)
+    stub_sources_built[name] = swift_source
     built.add(name)
 
 def compile_test(target_name, test_file):

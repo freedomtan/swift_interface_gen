@@ -620,11 +620,33 @@ class TypeNode {
         }
         
         var hasCases = false
+        var hasPayloadCase = false
         for member in members.values {
-            if case .enumCase(_, _, _) = member { hasCases = true; break }
+            if case .enumCase(_, let payload, _) = member {
+                hasCases = true
+                if payload != nil { hasPayloadCase = true }
+            }
         }
 
-        if isEnum, let raw = rawType {
+        // A `rawValue` member alone doesn't mean the enum has a compiler-synthesized raw
+        // type: real protobuf-style enums (e.g. InternalSwiftProtobuf's
+        // Google_Protobuf_NullValue) declare a case with an associated value (`UNRECOGNIZED
+        // (_: Int)`) alongside a manually-implemented `rawValue`/`init(rawValue:)` pair —
+        // Swift rejects `: Int, RawRepresentable` on such an enum outright ("enum with raw
+        // type cannot have cases with arguments"), since raw-type inheritance requires EVERY
+        // case to carry no payload. Confirmed via the real ABI: Google_Protobuf_NullValue's
+        // conformance-descriptor set has no RawRepresentable witness table at all — rawValue
+        // there is just an ordinary computed property.
+        if isEnum, hasPayloadCase, let raw = rawType {
+            conformances.remove(raw)
+            let rawValueName = "rawValue"
+            if !members.values.contains(where: {
+                if case .property(let n, _, _, _) = $0 { return n == rawValueName }
+                return false
+            }) {
+                members[rawValueName] = .property(name: rawValueName, type: raw, isReadOnly: true, isStatic: false)
+            }
+        } else if isEnum, let raw = rawType {
             var cleanRaw = raw.trimmingCharacters(in: .whitespaces)
             if cleanRaw.hasPrefix("any ") {
                 cleanRaw = String(cleanRaw.dropFirst(4)).trimmingCharacters(in: .whitespaces)
@@ -1246,8 +1268,20 @@ class TypeNode {
                 if generatedProperties.contains(propKey) { continue }
                 generatedProperties.insert(propKey)
                 
-                if n == "allCases" && isEnum { continue }
-                if n == "rawValue" && isEnum { continue }
+                // Like rawValue below: allCases is normally compiler-synthesized for a
+                // CaseIterable enum, but that synthesis requires every case to carry no
+                // associated value — for a payload-carrying enum (see hasPayloadCase above)
+                // it must be a real, manually-implemented static member instead (confirmed via
+                // the real ABI: Google_Protobuf_NullValue exports both an allCases getter AND
+                // its property descriptor, which wouldn't exist for compiler-synthesized code).
+                if n == "allCases" && isEnum && !hasPayloadCase { continue }
+                // Normally `rawValue`/`init(rawValue:)` are compiler-synthesized from the
+                // `: Int`-style raw-type inheritance and shouldn't be redeclared. But when the
+                // enum has a payload-carrying case (see hasPayloadCase above), the raw type is
+                // deliberately NOT in the inheritance list — Swift disallows raw-type
+                // inheritance on such enums — so `rawValue` must be rendered as a real,
+                // manually-implemented member instead, matching the real ABI.
+                if n == "rawValue" && isEnum && !hasPayloadCase { continue }
                 // NSObject already declares description/hash/debugDescription; a Swift
                 // extension on an ObjC-bridged class can't override them (extensions can't
                 // override at all), and re-declaring them without `override` conflicts with the

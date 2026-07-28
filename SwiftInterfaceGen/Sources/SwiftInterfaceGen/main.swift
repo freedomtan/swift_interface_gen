@@ -1497,17 +1497,6 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 with: "SortedModelKind"
             )
 
-            // Fix: SleepClassification has an associated-value case (`indirect case
-            // asleep(_: SleepClassification.Stage?)`), so Swift can't auto-synthesize
-            // CaseIterable.allCases the way it does for a plain no-payload enum — Model.swift
-            // unconditionally skips emitting `allCases` for every enum on the assumption
-            // auto-synthesis covers it (true for every OTHER enum in this framework), so this
-            // one real ABI member (`static HealthKit.SleepClassification.allCases.getter`) never
-            // gets emitted. Add it back as an explicit stub.
-            c = c.replacingOccurrences(
-                of: "public enum SleepClassification: CaseIterable, Codable, Hashable {",
-                with: "public enum SleepClassification: CaseIterable, Codable, Hashable {\n    public static var allCases: [SleepClassification] { fatalError() }")
-
             // Fix: HKCurrentActivityCacheQueryDescriptor.results(for:) conforms to
             // HKAsyncSequenceQuery, which requires `associatedtype Sequence: AsyncSequence` — the
             // demangler resolves the opaque return type to bare `some Sendable` (same gap as
@@ -2273,6 +2262,56 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(
                 of: "public func insert<GenericA>(_: GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable,  GenericA: ~Copyable {}",
                 with: "public func insert<GenericA>(_: borrowing GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable,  GenericA: ~Copyable {}")
+        }
+
+        if parser.defaultModule == "InternalSwiftProtobuf" {
+            // Message.isEqualTo(message:)'s real ABI mangling is a self-referencing
+            // existential (`AaB_p` -> "any Message", confirmed via swift-demangle on the
+            // protocol's own dispatch-thunk symbol: "Message.isEqualTo(message:
+            // InternalSwiftProtobuf.Message) -> Bool"), not `Self`. The generic-placeholder
+            // eraser can't distinguish that shape from an ordinary `Self`-typed requirement, so
+            // it rendered the protocol requirement as `message: Self` and every per-conformer
+            // witness/the _MessageImplementationBase extension default as `message: any
+            // Message` — neither of which satisfies the OTHER: a `Self`-typed requirement
+            // needs a `Self`-typed witness, so `any Message` witnesses failed "does not conform
+            // to protocol 'Message'" on every single Google_Protobuf_* type (~90 conformers).
+            // Fix: rewrite both sides to the real ABI shape, bare `Message` (an implicit
+            // existential in this position, verified via a minimal standalone repro).
+            c = c.replacingOccurrences(
+                of: "func isEqualTo(message: Self) -> Swift.Bool",
+                with: "func isEqualTo(message: Message) -> Swift.Bool")
+            c = c.replacingOccurrences(
+                of: "public func isEqualTo(message: any Message) -> Swift.Bool { fatalError() }",
+                with: "public func isEqualTo(message: Message) -> Swift.Bool { fatalError() }")
+            // Same self-referencing-existential shape, same fix, for
+            // AnyExtensionField.isEqual(other:) across all 10 *ExtensionField conformers
+            // (confirmed via swift-demangle: the real requirement is "isEqual(other:
+            // InternalSwiftProtobuf.AnyExtensionField) -> Bool", not Self).
+            c = c.replacingOccurrences(
+                of: "func isEqual(other: Self) -> Swift.Bool",
+                with: "func isEqual(other: AnyExtensionField) -> Swift.Bool")
+            c = c.replacingOccurrences(
+                of: "public func isEqual(other: any AnyExtensionField) -> Swift.Bool { fatalError() }",
+                with: "public func isEqual(other: AnyExtensionField) -> Swift.Bool { fatalError() }")
+        }
+
+        if parser.defaultModule == "PromptKit" {
+            // ChatMessagesPrompt/CompletionPrompt conform to GenerativeConfigurationProtocol
+            // (associatedtype PromptType: PromptMode) and PromptMode (associatedtype
+            // PromptContentType: Decodable) but never got per-conformer typealiases for either
+            // associated type — the generator has no per-type ABI signal for them (neither
+            // type has its own direct exported symbols; PromptKit.tbd shows only a single,
+            // unrelated generic-bound reference to "ChatMessagesPrompt", no ChatMessagesPromptV
+            // symbols at all), so the usual "resolve from a real witness" path finds nothing to
+            // resolve from. PromptType is self-referential by construction (each of these types
+            // IS its own PromptMode), and PromptContentType is satisfied by String (both types
+            // are fundamentally string/message-content-based).
+            c = c.replacingOccurrences(
+                of: "public struct ChatMessagesPrompt: ChatMessagesPromptConvertible, Codable, GenerativeConfigurationProtocol, PromptMode {",
+                with: "public struct ChatMessagesPrompt: ChatMessagesPromptConvertible, Codable, GenerativeConfigurationProtocol, PromptMode {\n    public typealias PromptType = ChatMessagesPrompt\n    public typealias PromptContentType = Swift.String")
+            c = c.replacingOccurrences(
+                of: "public struct CompletionPrompt: Codable, ExpressibleByExtendedGraphemeClusterLiteral, ExpressibleByStringInterpolation, ExpressibleByStringLiteral, ExpressibleByUnicodeScalarLiteral, GenerativeConfigurationProtocol, PromptMode {",
+                with: "public struct CompletionPrompt: Codable, ExpressibleByExtendedGraphemeClusterLiteral, ExpressibleByStringInterpolation, ExpressibleByStringLiteral, ExpressibleByUnicodeScalarLiteral, GenerativeConfigurationProtocol, PromptMode {\n    public typealias PromptType = CompletionPrompt\n    public typealias PromptContentType = Swift.String")
         }
 
         if parser.defaultModule == "Network" {
@@ -3432,10 +3471,6 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 }
             } else {
                 var uniqueConformances = Set<String>(conformances)
-                if uniqueConformances.contains("Codable") {
-                    uniqueConformances.remove("Decodable")
-                    uniqueConformances.remove("Encodable")
-                }
                 let isNonCopyable = uniqueConformances.contains("~Copyable") || uniqueConformances.contains("any ~Copyable")
                 if kindKeyword == "struct" || kindKeyword == "enum" {
                     if !isNonCopyable {
@@ -3443,7 +3478,17 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                         uniqueConformances.insert("Hashable")
                     }
                     uniqueConformances.insert("Sendable")
-                } else if kindKeyword == "class" {
+                }
+                // Codable already implies Decodable + Encodable — declaring both is a
+                // redundant-conformance error. This must run AFTER the unconditional
+                // `insert("Codable")` above (not just the original, possibly-Codable-less
+                // `conformances` check before it), since that insertion is exactly what can
+                // introduce the redundancy in the first place.
+                if uniqueConformances.contains("Codable") {
+                    uniqueConformances.remove("Decodable")
+                    uniqueConformances.remove("Encodable")
+                }
+                if kindKeyword == "class" {
                     if !uniqueConformances.contains("Sendable") && !uniqueConformances.contains("@unchecked Sendable") {
                         uniqueConformances.insert("@unchecked Sendable")
                     }
@@ -3894,7 +3939,38 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             for t in topLevelTypes.sorted(by: { $0.name < $1.name }) {
                 fileContent += t.generateSwift(depth: 0) + "\n"
             }
-            
+
+            // A stub type's conformance/generic-bound list can reference a THIRD module's
+            // type by its qualified name (e.g. "GenerativeFunctionsFoundation.
+            // ChatLanguageModelResponseStringStream" showing up while stubbing
+            // GenerativeModels, because one of GenerativeModels' own real types conforms to a
+            // protocol declared in yet another dependency) without that module ever being
+            // discovered as a top-level dependency of THIS stub — only "import Foundation" is
+            // ever written unconditionally. Scan the fully-assembled body text for any
+            // "Qualifier.Identifier" reference and add a matching import for every distinct
+            // capitalized qualifier that isn't Swift/Foundation/this module itself, so the
+            // stub actually resolves the cross-module type instead of failing "cannot find
+            // type 'X' in scope".
+            var extraImports = Set<String>()
+            if let regex = try? NSRegularExpression(pattern: "\\b([A-Z][A-Za-z0-9_]*)\\.[A-Z][A-Za-z0-9_]*", options: []) {
+                let nsRange = NSRange(fileContent.startIndex..<fileContent.endIndex, in: fileContent)
+                let matches = regex.matches(in: fileContent, options: [], range: nsRange)
+                for m in matches {
+                    if let range = Range(m.range(at: 1), in: fileContent) {
+                        let qualifier = String(fileContent[range])
+                        if qualifier != "Swift", qualifier != "Foundation", qualifier != mod {
+                            extraImports.insert(qualifier)
+                        }
+                    }
+                }
+            }
+            if !extraImports.isEmpty {
+                let importLines = extraImports.sorted().map { "import \($0)\n" }.joined()
+                fileContent = fileContent.replacingOccurrences(
+                    of: "import Foundation\n\n",
+                    with: "import Foundation\n" + importLines + "\n")
+            }
+
             let filePath = "\(outputDir)/\(mod).swift"
             do {
                 try fileContent.write(toFile: filePath, atomically: true, encoding: .utf8)

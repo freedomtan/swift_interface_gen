@@ -1602,6 +1602,11 @@ class Parser {
         }
         t = t.replacingOccurrences(of: "CVBufferRef", with: "CVBuffer")
         t = t.replacingOccurrences(of: "CMSampleBufferRef", with: "CMSampleBuffer")
+        // Demangled text carries this as "__C.NSInputStream"/"__C.NSOutputStream" (the __C.
+        // qualifier is stripped later in this function, further down), so this rename must
+        // tolerate a preceding dot to actually match.
+        t = t.replaceWord("NSInputStream", with: "InputStream", allowPrecededByDot: true)
+        t = t.replaceWord("NSOutputStream", with: "OutputStream", allowPrecededByDot: true)
         t = t.replaceWord("Decoder", with: "Swift.Decoder", allowPrecededByDot: false)
         t = t.replaceWord("Encoder", with: "Swift.Encoder", allowPrecededByDot: false)
         t = t.replaceWord("FormatStyle", with: "Foundation.FormatStyle", allowPrecededByDot: false)
@@ -2507,10 +2512,21 @@ class Parser {
                 switch member {
                 case .method(_, let sig, _):
                     var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
+                    // `prefix`/`postfix` are real declaration-site keywords Swift requires on
+                    // a unary operator function (e.g. `prefix func -(_: Duration) -> Duration`
+                    // for negation) — unlike `infix`, which needs no keyword since it's the
+                    // default. Demangled text carries " prefix(...)"/" postfix(...)" as part of
+                    // the function name/signature text, not as a separate declaration modifier,
+                    // so it must be extracted and re-emitted as a `public prefix func .../public
+                    // postfix func ...` declaration instead of being silently dropped (dropping
+                    // it produces "prefix unary operator missing 'prefix' modifier").
+                    var operatorModifier = ""
                     if cleanedSig.contains(" prefix(") {
                         cleanedSig = cleanedSig.replacingOccurrences(of: " prefix(", with: "(")
+                        operatorModifier = "prefix "
                     } else if cleanedSig.contains(" postfix(") {
                         cleanedSig = cleanedSig.replacingOccurrences(of: " postfix(", with: "(")
+                        operatorModifier = "postfix "
                     }
                     cleanedSig = cleanedSig.replaceGenericPlaceholderPathsWithAny()
                     cleanedSig = Parser.fixUnnamedParameters(cleanedSig)
@@ -2521,7 +2537,7 @@ class Parser {
                     let defaultVal = TypeNode.defaultReturnValue(for: returnType)
                     let body = defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }"
                     let finalBody = defaultVal == "fatalError()" ? "{ fatalError() }" : body
-                    output += "public func \(cleanedSig) \(finalBody)\n\n"
+                    output += "public \(operatorModifier)func \(cleanedSig) \(finalBody)\n\n"
                     
                 case .property(let n, let t, let isReadOnly, _):
                     var cleanT = t.replaceGenericPlaceholderPathsWithAny()
