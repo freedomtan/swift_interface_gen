@@ -1352,7 +1352,18 @@ class Parser {
                 } else {
                     node.members[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                 }
-                if !tbdSymbols.contains(mangled + "Tj") {
+                // "property descriptor for ..." symbols (mangled suffix "pMV") carry the
+                // property's key-path metadata, not a dispatch entry — they NEVER have a
+                // corresponding "Tj" dispatch-thunk variant, even for a genuinely non-final
+                // class property whose real getter/setter/modify accessors DO have one. Since
+                // `finalMembers` is only ever added to (never removed from) across every
+                // symbol naming this same property, letting the descriptor symbol run this
+                // check would unconditionally mark the property final — poisoning it even when
+                // every accessor symbol correctly determined otherwise. Confirmed via a live
+                // trace on ModelCatalog's CoreMLRankingModelBundle.Builder.rankingModel: vg/vs/vM
+                // (getter/setter/modify) all correctly saw hasTj=true (their own dispatch thunks
+                // exist), but vpMV (the descriptor) saw hasTj=false and forced `final` anyway.
+                if !originalMangled.hasSuffix("pMV") && !tbdSymbols.contains(mangled + "Tj") {
                     node.finalMembers.insert(storageKey)
                 }
             }
