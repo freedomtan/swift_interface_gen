@@ -20,6 +20,7 @@ class TypeNode {
     var members: [String: MemberKind] = [:]
     var extensionMembers: [String: MemberKind] = [:]
     var constrainedExtensions: [String: [String: MemberKind]] = [:]
+    var originallyDefinedInExtensions: [String: [String: MemberKind]] = [:]
     var nestedTypes: [String: TypeNode] = [:]
     var conformances: Set<String> = []
     var isGeneric: Bool = false
@@ -2735,6 +2736,15 @@ class TypeNode {
                 if !filteredMembersMap.isEmpty {
                     output += generateOneExtension(membersList: Array(filteredMembersMap.values), constraint: dropConstraint ? nil : finalConstraint)
                 }
+            }
+        }
+        
+        let sortedOrigModules = originallyDefinedInExtensions.keys.sorted()
+        for origModule in sortedOrigModules {
+            if let membersMap = originallyDefinedInExtensions[origModule], !membersMap.isEmpty {
+                output += "@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)\n"
+                output += "@_originallyDefinedIn(module: \"\(origModule)\", macOS 10.15)\n"
+                output += generateOneExtension(membersList: Array(membersMap.values), constraint: nil)
             }
         }
         

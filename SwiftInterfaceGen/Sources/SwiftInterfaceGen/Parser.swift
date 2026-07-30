@@ -1154,6 +1154,8 @@ class Parser {
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
                             if symbolModule == primaryTargetModule {
                                 node.extensionMembers[initFull] = .initializer(initFull)
+                            } else if ownTbdSymbols.contains(mangled) && extensionModule == nil {
+                                node.originallyDefinedInExtensions[symbolModule, default: [:]][initFull] = .initializer(initFull)
                             }
                         } else {
                             node.members[initFull] = .initializer(initFull)
@@ -1173,6 +1175,8 @@ class Parser {
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
                             if symbolModule == primaryTargetModule {
                                 node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
+                            } else if ownTbdSymbols.contains(mangled) && extensionModule == nil {
+                                node.originallyDefinedInExtensions[symbolModule, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                             }
                         } else {
                             node.members[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
@@ -1361,6 +1365,8 @@ class Parser {
                 } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
                     if symbolModule == primaryTargetModule {
                         node.extensionMembers[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
+                    } else if ownTbdSymbols.contains(mangled) && extensionModule == nil {
+                        node.originallyDefinedInExtensions[symbolModule, default: [:]][storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                     }
                 } else {
                     node.members[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
