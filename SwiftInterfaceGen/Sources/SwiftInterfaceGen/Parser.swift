@@ -591,7 +591,20 @@ class Parser {
         var d = demangled
         let d_orig = demangled
         var constraints: String? = nil
-        
+        // "(extension in Module):Type.member" tells us which module the extension itself is
+        // declared in — this is NOT the same as the module encoded at the front of the mangled
+        // name, which always names the module of the TYPE being extended (e.g. "CoreAIRuntime"
+        // for an extension on CoreAIRuntime.AIModel), regardless of where the extension body
+        // lives. Falling back to the mangled name's own module for `symbolModule` therefore
+        // silently misattributes every cross-module extension member to the extended type's
+        // module instead of the extending module, causing the primaryTargetModule gate below to
+        // drop the member entirely instead of routing it into extensionMembers.
+        var extensionModule: String? = nil
+        if let extRange = demangled.range(of: "(extension in "),
+           let closeParenIdx = demangled[extRange.upperBound...].firstIndex(of: ")") {
+            extensionModule = String(demangled[extRange.upperBound..<closeParenIdx]).trimmingCharacters(in: .whitespaces)
+        }
+
         if d_orig.starts(with: "associated type descriptor for ") {
             let fullPath = d_orig.replacingOccurrences(of: "associated type descriptor for ", with: "").trimmingCharacters(in: .whitespaces)
             let (typeName, assocName) = splitPath(fullPath)
@@ -1133,7 +1146,7 @@ class Parser {
                             initFull += methodWhereClause
                         }
                         let isExternal = getTopLevelModule(for: node) != primaryTargetModule
-                        let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
+                        let symbolModule = extensionModule ?? Parser.getMangledModule(mangled) ?? currentModule
                         if let constraints = constraints {
                             if symbolModule == primaryTargetModule {
                                 node.constrainedExtensions[constraints, default: [:]][initFull] = .initializer(initFull)
@@ -1152,7 +1165,7 @@ class Parser {
                             fixedSignature += methodWhereClause
                         }
                         let isExternal = getTopLevelModule(for: node) != primaryTargetModule
-                        let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
+                        let symbolModule = extensionModule ?? Parser.getMangledModule(mangled) ?? currentModule
                         if let constraints = constraints {
                             if symbolModule == primaryTargetModule {
                                 node.constrainedExtensions[constraints, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
@@ -1340,7 +1353,7 @@ class Parser {
                     storageKey = escapedMemberName
                 }
                 let isExternal = getTopLevelModule(for: node) != primaryTargetModule
-                let symbolModule = Parser.getMangledModule(mangled) ?? currentModule
+                let symbolModule = extensionModule ?? Parser.getMangledModule(mangled) ?? currentModule
                 if let constraints = constraints {
                     if symbolModule == primaryTargetModule {
                         node.constrainedExtensions[constraints, default: [:]][storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
@@ -2579,31 +2592,46 @@ class Parser {
                 "CoreAI", "Dispatch", "os", "Metal", "CoreGraphics", "CoreVideo", "IOSurface",
                 "MetricKit", "Combine", "Synchronization", "CoreMedia"
             ]
-            if systemAndStandardModules.contains(moduleName) { continue }
-            // For external available modules, only emit extensions when they contain
-            // read-only computed properties (toX converters) — not operators or methods,
-            // which can fail when the external type turns out to be a protocol.
+            // Constrained extensions (e.g. "extension Dictionary where Key == OS, Value ==
+            // SemanticVersion") on a stdlib/system type are always safe to emit even though the
+            // module itself is in the skip set above — the "could be a protocol" risk that
+            // motivated skipping these modules doesn't apply to well-known stdlib structs/enums
+            // like Swift.Dictionary.
+            let hasConstrainedExtensions = module.nestedTypes.values.contains { !$0.constrainedExtensions.isEmpty }
+            if systemAndStandardModules.contains(moduleName) && !hasConstrainedExtensions { continue }
+            // For external available modules, only emit extensions when they contain read-only
+            // computed properties (toX converters) — not operators or methods, which can fail
+            // when the external type turns out to be a protocol — UNLESS the type's real kind
+            // is already known (struct/class/enum), in which case that risk doesn't apply (see
+            // the matching, more detailed comment on the per-type check below).
             let hasReadOnlyPropertyExtensions = module.nestedTypes.values.contains { node in
+                node.kind == "struct" || node.kind == "class" || node.kind == "enum" ||
                 node.extensionMembers.values.contains {
                     if case .property(_, _, let isReadOnly, _) = $0 { return isReadOnly }
                     return false
                 }
             }
-            if moduleName != defaultModule && isModuleAvailable(moduleName) && !hasReadOnlyPropertyExtensions {
+            if moduleName != defaultModule && isModuleAvailable(moduleName) && !hasReadOnlyPropertyExtensions && !hasConstrainedExtensions {
                 continue
             }
             let isExternalAvailable = moduleName != defaultModule && isModuleAvailable(moduleName)
             let sortedTypes = module.nestedTypes.values.sorted(by: { $0.name < $1.name })
             for type in sortedTypes {
-                // For external available modules, only emit types that have read-only property extensions
-                if isExternalAvailable {
+                // For external available modules, only emit types that have read-only property
+                // extensions — UNLESS the type's real kind has already been discovered
+                // (struct/class/enum, from parsing the dependency module's own ABI symbols, as
+                // happens for an explicitly declared dependency like CoreAIRuntime for
+                // CoreAIDelegates). The read-only-property-only restriction guards against
+                // emitting operators/methods/inits when the external type's kind is unknown to
+                // us and could turn out to be a protocol, where those forms don't compile — see
+                // commit 24a767e — but that risk doesn't apply once the kind is known.
+                let kindIsKnown = type.kind == "struct" || type.kind == "class" || type.kind == "enum"
+                if isExternalAvailable && !kindIsKnown && type.constrainedExtensions.isEmpty {
                     let hasROP = type.extensionMembers.values.contains {
                         if case .property(_, _, let isReadOnly, _) = $0 { return isReadOnly }
                         return false
                     }
                     if !hasROP { continue }
-                    // Strip non-property extension members to avoid emitting operators/methods
-                    // that may not compile against the external module's actual type kind.
                     type.extensionMembers = type.extensionMembers.filter {
                         if case .property(_, _, let isReadOnly, _) = $0.value { return isReadOnly }
                         return false
@@ -2611,7 +2639,18 @@ class Parser {
                 }
                 let flattenedName = "\(moduleName)_\(type.name)"
                 if !definedTypes.contains(flattenedName) && type.extensionMembers.isEmpty && type.constrainedExtensions.isEmpty { continue }
-                
+
+                // Emitting "extension Module.Type" requires the module to have a real,
+                // compilable .swiftinterface confirming Type actually exists there (e.g.
+                // Coherence ships only a .tbd with ABI symbols, no .swiftinterface — its types
+                // can't be confirmed real, and "extension Coherence.CRContext" then fails with
+                // "no type named 'CRContext' in module 'Coherence'"). Skip such a module/type
+                // entirely rather than guessing.
+                if isExternalAvailable && moduleName != "Swift" && moduleName != "__C" &&
+                   !isTypeDefinedInFramework(module: moduleName, typeName: type.name) {
+                    continue
+                }
+
                 let pathPrefix: String
                 if moduleName == "Swift" {
                     pathPrefix = "Swift"

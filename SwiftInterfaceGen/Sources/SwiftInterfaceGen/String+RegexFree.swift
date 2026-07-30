@@ -397,8 +397,13 @@ extension String {
                 let matchedPath = String(result[range.lowerBound..<endPathIdx])
                 let components = matchedPath.components(separatedBy: ".")
                 let lastComponent = components.last ?? ""
-                if ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "SchedulerTimeType", "Stride"].contains(lastComponent) {
-                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "SchedulerTimeType", "Stride"]
+                // "Output"/"Failure" cover Combine's own associated types (Publisher.Output,
+                // Publisher.Failure) — multi-hop chains like "Self.Output.Failure" are valid,
+                // expressible Swift syntax (not the truly-unresolvable case this eraser exists
+                // for), so they belong on the allow-list rather than getting collapsed to Any.
+                let multiHopAllowList = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "SchedulerTimeType", "Stride", "Output", "Failure"]
+                if multiHopAllowList.contains(lastComponent) {
+                    let allowedTypes = multiHopAllowList
                     let suffixComponents = Array(components.dropFirst())
                     let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
                     if allAllowed {

@@ -1476,17 +1476,18 @@ class TypeNode {
                 cleanedSig = cleanedSig.replaceSelfPattern(parentName: self.name, enclosingPath: self.getEnclosingPath(), replaceWith: selfReplaceWith, defaultModule: parser?.defaultModule ?? "")
                 cleanedSig = cleanedSig.replaceWordWithoutGeneric(self.name, with: selfReplaceWith, allowPrecededByDot: false)
                 
-                var shouldReplaceA = true
-                if cleanedSig.hasGenericPlaceholderInBrackets(p: "A") || cleanedSig.hasGenericPlaceholderInBrackets(p: "A1") {
-                    shouldReplaceA = false
-                }
+                // Only a method generic param literally named bare "A" can collide with the
+                // protocol's own "A" == Self placeholder — see the matching, more detailed
+                // comment where this same guard is used in generateOneExtension. Checking for
+                // "A1" here was a false positive: replaceWord already word-boundary-skips it.
+                let shouldReplaceA = !cleanedSig.hasGenericPlaceholderInBrackets(p: "A")
                 if isProtocol {
                     cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf(validAssoc: getAllAssociatedTypes(parser: parser))
                     if shouldReplaceA {
                         cleanedSig = cleanedSig.replaceWord("A", with: "Self")
                     }
                     cleanedSig = cleanedSig.replaceMultiSegmentSelfPathsWithAny()
-                    
+
                     // Remove "A" and "Self" from the method generic parameter list (it represents Self)
                     if let openIdx = cleanedSig.firstIndex(of: "<"),
                        let parenIdx = cleanedSig.firstIndex(of: "("),
@@ -2247,7 +2248,13 @@ class TypeNode {
         let currentPath = path.isEmpty ? escapedName : path + separator + escapedName
         
         var inScope = Set<String>()
-        let isProtocol = kind == "protocol"
+        // Well-known stdlib protocols (AsyncSequence, Sequence, Collection, ...) referenced only
+        // via an extension constraint (e.g. "extension AsyncSequence where A.Element: X") never
+        // get their own "protocol descriptor" ABI symbol parsed when they belong to Swift itself
+        // rather than the framework being generated — so `kind` stays "unknown" and the "A" ==
+        // Self placeholder rename below would otherwise never fire for them.
+        let wellKnownStdlibProtocols: Set<String> = ["AsyncSequence", "Sequence", "Collection", "IteratorProtocol"]
+        let isProtocol = kind == "protocol" || (path == "Swift" && wellKnownStdlibProtocols.contains(name))
         var assocTypes = [String]()
         for member in members.values {
             if case .associatedType(let code) = member {
@@ -2317,19 +2324,41 @@ class TypeNode {
                 return res
             }
 
+            // `isGeneric` reflects whether THIS type declares its own generic parameters, but a
+            // constrained extension can legitimately exist on a type with none of its own —
+            // e.g. Combine.Record.Recording introduces no new generic params (it just inherits
+            // A/B from its parent Record<A, B>), yet still has a real conditional-conformance
+            // extension ("extension Record.Recording where A: Decodable, ..."). `isGeneric` is
+            // also never set for stdlib collection types (Array/Dictionary/Set) — see
+            // Parser.precompute — even though "extension Dictionary where Key == X, ..." is a
+            // legitimate constrained extension on them too. In both cases the presence of a
+            // real, already-derived `constraint` is itself sufficient proof the extension needs
+            // it; only synthesize the empty-suffix fallback when there's no constraint to lose.
             var constraintSuffix = constraint != nil ? " " + constraint! : ""
-            if kind != "protocol" && !isGeneric {
+            if kind != "protocol" && !isGeneric && constraint == nil {
                 constraintSuffix = ""
             }
+            // Stdlib collection types don't use "A"/"B" placeholders in their real generic
+            // parameter lists (Array<Element>, Dictionary<Key, Value>, Range<Bound>, ...) — this
+            // rename must apply not just to the extension's own where-clause (constraintSuffix)
+            // but to every member's signature/type text too, since a member can freely reference
+            // the bare placeholder (e.g. "init(_ arg1: MLDataColumn<A>)" on an Array extension,
+            // where A means Element).
+            let stdlibPlaceholderRename: (String) -> String
             if name == "Array" && path == "Swift" {
-                constraintSuffix = constraintSuffix.replaceWord("A", with: "Element")
+                stdlibPlaceholderRename = { $0.replaceWord("A", with: "Element") }
             } else if name == "Dictionary" && path == "Swift" {
-                constraintSuffix = constraintSuffix.replaceWord("A", with: "Key").replaceWord("B", with: "Value")
+                stdlibPlaceholderRename = { $0.replaceWord("A", with: "Key").replaceWord("B", with: "Value") }
             } else if name == "Set" && path == "Swift" {
-                constraintSuffix = constraintSuffix.replaceWord("A", with: "Element")
+                stdlibPlaceholderRename = { $0.replaceWord("A", with: "Element") }
+            } else if (name == "Range" || name == "PartialRangeUpTo" || name == "PartialRangeFrom" || name == "PartialRangeThrough" || name == "ClosedRange") && path == "Swift" {
+                stdlibPlaceholderRename = { $0.replaceWord("A", with: "Bound") }
             } else if name == "Optional" && path == "Swift" {
-                constraintSuffix = constraintSuffix.replaceWord("A", with: "Wrapped")
+                stdlibPlaceholderRename = { $0.replaceWord("A", with: "Wrapped") }
+            } else {
+                stdlibPlaceholderRename = { $0 }
             }
+            constraintSuffix = stdlibPlaceholderRename(constraintSuffix)
             let isObjcExt = (parser?.getTopLevelModule(for: self) == "__C")
             if isObjcExt {
                 extLines.append("// --- ObjC Extension (bridge-header required) ---")
@@ -2434,10 +2463,17 @@ class TypeNode {
                         isStatic = true
                     }
                     cleanedSig = injectDefaultArguments(signature: cleanedSig, methodName: cleanN, isStatic: isStatic, parser: parser)
-                    var shouldReplaceA = true
-                    if cleanedSig.hasGenericPlaceholderInBrackets(p: "A") || cleanedSig.hasGenericPlaceholderInBrackets(p: "A1") {
-                        shouldReplaceA = false
-                    }
+                    // Only a method generic param literally named bare "A" can collide with the
+                    // protocol's own "A" == Self placeholder — replaceWord("A", with: "Self")
+                    // already word-boundary-skips "A1"/"A2" etc (isWordCharAfter treats a
+                    // trailing digit as part of the same word), so checking for "A1" here was
+                    // needlessly disabling the Self-substitution for every method that merely
+                    // HAS an A1 generic param, even though A1 was never actually at risk. That
+                    // false positive left bare "A" (meaning Self) unresolved in the method body,
+                    // which then fell out of `inScope` and got erased to `Any` downstream —
+                    // e.g. Combine's `Publisher.flatMap<A1>(...) -> Publishers.FlatMap<A1, A>`
+                    // needs the trailing "A" turned into "Self", not erased to "Any".
+                    let shouldReplaceA = !cleanedSig.hasGenericPlaceholderInBrackets(p: "A")
                     if isProtocol {
                         cleanedSig = cleanedSig.replacePlaceholderDotsWithSelf(validAssoc: getAllAssociatedTypes(parser: parser))
                         if shouldReplaceA {
@@ -2613,7 +2649,9 @@ class TypeNode {
             if isObjcExt {
                 extLines.append("// --- End ObjC Extension ---")
             }
-            return extLines.joined(separator: "\n") + "\n\n"
+            // Apply the stdlib placeholder rename to member bodies too, not just the
+            // already-renamed extension header — see stdlibPlaceholderRename above.
+            return stdlibPlaceholderRename(extLines.joined(separator: "\n")) + "\n\n"
         }
 
         if !extensionMembers.isEmpty {
@@ -2624,7 +2662,21 @@ class TypeNode {
         for constraint in sortedConstraints {
             if let membersMap = constrainedExtensions[constraint] {
                 var finalConstraint = constraint
-                if kind == "protocol" {
+                // Depth-suffixed placeholders (A1, B1, ...) name a generic parameter belonging
+                // to a NESTED type one level deeper than the type this extension is declared on
+                // (e.g. HealthKit.SleepSessionQuery<A>.Descriptor<A1> — "A1" is Descriptor's own
+                // param, distinct from the outer SleepSessionQuery's "A"). Our generic-param
+                // rendering is single-level and has no placeholder for that nested param, so a
+                // constraint referencing one (e.g. "where A == A1") can't be expressed — emitting
+                // it verbatim produces an unresolvable "cannot find type 'A1'"/conflicting-
+                // constraint error. Render the extension unconstrained instead, matching prior
+                // behavior before constrained extensions on such nested generics were emitted.
+                let depthSuffixedPlaceholderPattern = "\\b[A-G][0-9]+\\b"
+                var dropConstraint = false
+                if finalConstraint.range(of: depthSuffixedPlaceholderPattern, options: .regularExpression) != nil {
+                    dropConstraint = true
+                }
+                if isProtocol {
                     finalConstraint = finalConstraint.replacingOccurrences(of: "where A:", with: "where Self:")
                     finalConstraint = finalConstraint.replacingOccurrences(of: "where A ", with: "where Self ")
                     finalConstraint = finalConstraint.replacingOccurrences(of: ", A:", with: ", Self:")
@@ -2632,7 +2684,34 @@ class TypeNode {
                     // Replace A.member with Self.member for associated type constraints
                     finalConstraint = finalConstraint.replaceWord("A", with: "Self")
                 }
-                output += generateOneExtension(membersList: Array(membersMap.values), constraint: finalConstraint)
+                // The real ABI can carry a conditional-conformance witness (e.g. Hashable only
+                // "where A: ~Copyable, ...") separately from the type's own unconditional
+                // conformance list. We don't currently model that distinction and instead render
+                // Hashable/Codable/Equatable as always-unconditional on the type itself — so a
+                // constrained extension re-declaring the exact same synthesized witness names
+                // (==, hash(into:), hashValue, encode(to:), init(from:)) is a real duplicate-
+                // declaration risk, not a second, independently-needed conformance. Drop those
+                // specific names from the constrained extension when the base type already
+                // declares the matching conformance unconditionally.
+                let hashableWitnessNames: Set<String> = ["==", "hash", "hashValue"]
+                let codableWitnessNames: Set<String> = ["encode", "init(from:)"]
+                let alreadyConformsHashable = hasConformance("Hashable") || hasConformance("Equatable")
+                let alreadyConformsCodable = hasConformance("Codable") || hasConformance("Decodable") || hasConformance("Encodable")
+                let filteredMembersMap = membersMap.filter { _, member in
+                    let memberName: String
+                    switch member {
+                    case .method(let n, _, _): memberName = n
+                    case .property(let n, _, _, _): memberName = n
+                    case .initializer: memberName = "init(from:)"
+                    default: return true
+                    }
+                    if hashableWitnessNames.contains(memberName) && alreadyConformsHashable { return false }
+                    if codableWitnessNames.contains(memberName) && alreadyConformsCodable { return false }
+                    return true
+                }
+                if !filteredMembersMap.isEmpty {
+                    output += generateOneExtension(membersList: Array(filteredMembersMap.values), constraint: dropConstraint ? nil : finalConstraint)
+                }
             }
         }
         
