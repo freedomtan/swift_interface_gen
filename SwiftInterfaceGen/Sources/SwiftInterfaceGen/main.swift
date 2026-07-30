@@ -1785,8 +1785,15 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             // put final before public) — a fixed-order alternation missed those lines entirely,
             // leaving their BottomProtocolHandler/LowerProtocolHandler/etc. conformances
             // unstripped (manifested as "does not conform to protocol" errors).
+            // The type-name group must swallow a generic parameter list's own "<...>" as one
+            // unit (e.g. "LowerHarness<A: LowerProtocolLinkage>") — a bare "\S+" stops at the
+            // FIRST colon in the line, which is the one inside "<A: LowerProtocolLinkage>" once a
+            // constrained generic param is present, not the real inheritance-list colon that
+            // follows the closing ">". That misparse leaves the inheritance list's first entry
+            // reading "LowerProtocolLinkage>: BottomProtocolHandler" instead of
+            // "BottomProtocolHandler", which then fails to match networkConformancesToStrip.
             let typeHeaderRegex = try? NSRegularExpression(
-                pattern: "^(\\s*(?:@_fixed_layout\\s+|public\\s+|open\\s+|final\\s+)+(?:struct|class|protocol|enum|actor|extension)\\s+\\S+)(:)(.*?)( \\{.*|$)", options: [])
+                pattern: "^(\\s*(?:@_fixed_layout\\s+|public\\s+|open\\s+|final\\s+)+(?:struct|class|protocol|enum|actor|extension)\\s+[^\\s:<]+(?:<[^>]*>)?)(:)(.*?)( \\{.*|$)", options: [])
             for line in networkLines {
                 var fixedLine = line
                 if let regex = typeHeaderRegex,
@@ -2496,12 +2503,19 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             c = c.replacingOccurrences(
                 of: "public protocol BottomProtocolHandler: OutboundDataHandler {\n",
                 with: "public protocol BottomProtocolHandler: OutboundDataHandler {\n    associatedtype UpperProtocol: UpperProtocolLinkage\n")
-            // Replace the erased `var upper: Any` with the properly typed version.
-            // Use AllowMultiple=false equivalent via a targeted anchor: this exact string only
-            // appears once (inside BottomProtocolHandler's body) in the generated output.
-            c = c.replacingOccurrences(
-                of: "protocol BottomProtocolHandler: OutboundDataHandler {\n    associatedtype UpperProtocol: UpperProtocolLinkage\n    func teardown() -> ()\n    func connect() -> ()\n    var upper: Any { get set }",
-                with: "protocol BottomProtocolHandler: OutboundDataHandler {\n    associatedtype UpperProtocol: UpperProtocolLinkage\n    func teardown() -> ()\n    func connect() -> ()\n    var upper: Self.UpperProtocol { get set }")
+            // Replace the erased `var upper: Any` with the properly typed version. Member
+            // ordering in the generated output varies across runs, so locate the protocol body's
+            // own brace span first and only replace `var upper: Any` WITHIN that span — a plain
+            // whole-file replacingOccurrences would also hit LowerHarness's real class property
+            // (same "var upper: Any" text, different declaration) elsewhere in the file.
+            if let bodyStart = c.range(of: "public protocol BottomProtocolHandler: OutboundDataHandler {\n"),
+               let bodyEnd = c.range(of: "\n}", range: bodyStart.upperBound..<c.endIndex) {
+                let body = String(c[bodyStart.upperBound..<bodyEnd.lowerBound])
+                let fixedBody = body.replacingOccurrences(
+                    of: "var upper: Any { get set }",
+                    with: "var upper: Self.UpperProtocol { get set }")
+                c.replaceSubrange(bodyStart.upperBound..<bodyEnd.lowerBound, with: fixedBody)
+            }
             // 2. MultiplexedFlow: insert `associatedtype UpperProtocol` after the opening brace.
             c = c.replacingOccurrences(
                 of: "public protocol MultiplexedFlow: LoggableProtocol {\n",
@@ -2882,12 +2896,15 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
                 """)
             // UpperHarness<A>'s lowerProtocol init parameter and `lower` property are both
             // typed `A.PairedLinkage` in the real ABI (`swift-demangle -expand` on the init
-            // symbol resolves the parameter type to exactly that dependent member type), so `A`
-            // must conform to ProtocolLinkage; the generated code instead used a bare `Any`
-            // for both, and (same root cause as DatagramUpperHarness/StreamUpperHarness above)
-            // is missing the ProtocolInstanceReference-taking overloads and LowerProtocol.
+            // symbol resolves the parameter type to exactly that dependent member type) — the
+            // generator's own generic-constraint inference (Model.swift's
+            // placeholdersNeedingProtocolLinkage) now derives `A: UpperProtocolLinkage` and
+            // renders the init param/`lower` property with the correct type directly, so this
+            // anchor only needs to add the ProtocolInstanceReference-taking overloads and
+            // LowerProtocol typealias that have no ABI symbol of their own on this class (same
+            // root cause as DatagramUpperHarness/StreamUpperHarness above).
             c = c.replacingOccurrences(
-                of: "@_fixed_layout public class UpperHarness<A>: InboundDataHandler, LoggableProtocol, ProtocolInstance, TopDatapathProtocol, TopProtocolHandler, UpperHarnessProtocol, UpperProtocolHandler {",
+                of: "@_fixed_layout public class UpperHarness<A: UpperProtocolLinkage>: InboundDataHandler, LoggableProtocol, ProtocolInstance, TopDatapathProtocol, TopProtocolHandler, UpperHarnessProtocol, UpperProtocolHandler {",
                 with: """
                 @_fixed_layout public class UpperHarness<A: UpperProtocolLinkage>: InboundDataHandler, LoggableProtocol, ProtocolInstance, TopDatapathProtocol, TopProtocolHandler, UpperHarnessProtocol, UpperProtocolHandler {
                     public typealias LowerProtocol = A.PairedLinkage
@@ -2898,12 +2915,6 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
                     public func handleOutboundRoomAvailableEvent(_ arg1: ProtocolInstanceReference) -> () {}
                     public func attachLowerProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
                 """)
-            c = c.replacingOccurrences(
-                of: "public init?(identifier: Swift.String, local: Endpoint, remote: Endpoint, parameters: Parameters, path: PathProperties, context: NetworkContext, lowerProtocol: Any) { fatalError() }",
-                with: "public init?(identifier: Swift.String, local: Endpoint, remote: Endpoint, parameters: Parameters, path: PathProperties, context: NetworkContext, lowerProtocol: A.PairedLinkage) { fatalError() }")
-            c = c.replacingOccurrences(
-                of: "public final var lower: Any { get { fatalError() } set {} }",
-                with: "public final var lower: A.PairedLinkage { get { fatalError() } set {} }")
             // ConnectionProtocol requires `associatedtype ApplicationProtocolType: NetworkProtocolOptions`,
             // but no concrete type in the generated output conforms to NetworkProtocolOptions (it's only
             // ever used as a generic constraint), and the classes' own generic param `A` is bound to types
@@ -3033,18 +3044,18 @@ extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.Appl
             // NewFlowHarness<A, B> conforms to UpperProtocolHandler; its `listenerProtocol` init
             // parameter is typed `A.PairedLinkage` in the real ABI (confirmed via
             // `swift-demangle -expand` on the init symbol, same dependent-member pattern as the
-            // UpperHarness<A> fix in Network fix 13), which requires `A: UpperProtocolLinkage`
-            // (so A.PairedLinkage conforms to LowerProtocolLinkage) and supplies the missing
-            // LowerProtocol typealias.
+            // UpperHarness<A> fix in Network fix 13). The generator's own generic-constraint
+            // inference (Model.swift's placeholdersNeedingProtocolLinkage) now derives
+            // `A: UpperProtocolLinkage` and renders the init param with the correct type
+            // directly, so this anchor only needs to supply the missing LowerProtocol typealias
+            // (no ABI symbol of its own on this class — same root cause as UpperHarness<A>
+            // above).
             c = c.replacingOccurrences(
-                of: "@_fixed_layout public class NewFlowHarness<A, B>: InboundFlowHandler, LoggableProtocol, ProtocolInstance, UpperProtocolHandler {",
+                of: "@_fixed_layout public class NewFlowHarness<A: UpperProtocolLinkage, B>: InboundFlowHandler, LoggableProtocol, ProtocolInstance, UpperProtocolHandler {",
                 with: """
                 @_fixed_layout public class NewFlowHarness<A: UpperProtocolLinkage, B>: InboundFlowHandler, LoggableProtocol, ProtocolInstance, UpperProtocolHandler {
                     public typealias LowerProtocol = A.PairedLinkage
                 """)
-            c = c.replacingOccurrences(
-                of: "public init?(identifier: Swift.String, local: Endpoint, remote: Endpoint, parameters: Parameters, path: PathProperties, context: NetworkContext, listenerProtocol: Any) { fatalError() }",
-                with: "public init?(identifier: Swift.String, local: Endpoint, remote: Endpoint, parameters: Parameters, path: PathProperties, context: NetworkContext, listenerProtocol: A.PairedLinkage) { fatalError() }")
             // QUICDatagramFlow/QUICPath are internal SPI helper classes (no public .swiftinterface
             // entry) referenced only via QUICConnection's multiplexedSecondaryFlows/
             // multiplexingPaths dictionaries; the generator captured only their exported members,

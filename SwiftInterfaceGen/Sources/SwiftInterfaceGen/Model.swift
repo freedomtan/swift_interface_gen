@@ -921,6 +921,24 @@ class TypeNode {
             // text (the constraint lives in generic-requirement metadata swift-demangle doesn't
             // surface) — same inference approach as Publisher/Subscriber/Scheduler above.
             var placeholdersNeedingOptionalColumnProtocol = Set<String>()
+            // Network's UpperHarness<A>/LowerHarness<A> use A.PairedLinkage (the associated type
+            // declared on ProtocolLinkage) without a reconstructable `where A: ...` clause — same
+            // inference approach as Publisher/Subscriber/Scheduler above. Which protocol A must
+            // conform to depends on which handler protocol this type itself conforms to: a type
+            // conforming to UpperProtocolHandler needs its own PairedLinkage-referencing param to
+            // be UpperProtocolLinkage (UpperProtocolHandler.LowerProtocol: LowerProtocolLinkage is
+            // UpperProtocolLinkage.PairedLinkage), while LowerProtocolHandler/BottomProtocolHandler
+            // needs LowerProtocolLinkage (mirror relationship). Fall back to the common ancestor
+            // ProtocolLinkage when neither conformance is present.
+            let protocolLinkageBound: String
+            if hasConformance("UpperProtocolHandler") {
+                protocolLinkageBound = "UpperProtocolLinkage"
+            } else if hasConformance("LowerProtocolHandler") || hasConformance("BottomProtocolHandler") {
+                protocolLinkageBound = "LowerProtocolLinkage"
+            } else {
+                protocolLinkageBound = "ProtocolLinkage"
+            }
+            var placeholdersNeedingProtocolLinkage = Set<String>()
             let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
             let allRawSigs = collectRawSignatures(node: self)
             for rawSig in allRawSigs {
@@ -936,6 +954,9 @@ class TypeNode {
                     }
                     if rawSig.contains("\(p).WrappedElement") {
                         placeholdersNeedingOptionalColumnProtocol.insert(p)
+                    }
+                    if rawSig.contains("\(p).PairedLinkage") {
+                        placeholdersNeedingProtocolLinkage.insert(p)
                     }
                 }
             }
@@ -969,6 +990,8 @@ class TypeNode {
                             params.append("\(p): Scheduler")
                         } else if placeholdersNeedingOptionalColumnProtocol.contains(p) {
                             params.append("\(p): OptionalColumnProtocol")
+                        } else if placeholdersNeedingProtocolLinkage.contains(p) {
+                            params.append("\(p): \(protocolLinkageBound)")
                         } else if placeholdersNeedingError.contains(p) {
                             params.append("\(p): Error")
                         } else {
