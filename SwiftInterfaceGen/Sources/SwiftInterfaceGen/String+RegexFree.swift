@@ -1292,6 +1292,84 @@ extension String {
         return result
     }
 
+    // 20c-2. replaceSelfAssociatedTypeSameTypeAWithMarker: rewrites the demangler's
+    // `Self.<assoc> == A>` span inside a constrained existential (e.g. `any
+    // Source<Self.Stream == A>`) to `___SAME_TYPE_A___>` — main.swift's postProcess later
+    // resolves that marker to `A>`, reconstructing `any Source<A>` for primary-associated-type
+    // protocols. Only fires when the RHS is literally the bare placeholder `A` (the enclosing
+    // generic parameter name at every known use site); anything else (a concrete type, a
+    // different placeholder) is left alone for the existing erasure/stripping passes to handle.
+    // Also returns each (protocol short name, real associated-type name) pair found — e.g.
+    // ("Source", "Stream") — so the caller can record the real name for --generate-stubs, which
+    // otherwise has no way to know the primary associated type isn't literally named "A": the
+    // stub's mangled ABI symbol only matches the real one if the placeholder's declared name
+    // matches, not just its position.
+    func replaceSelfAssociatedTypeSameTypeAWithMarker() -> (result: String, foundAssocNames: [(proto: String, assocName: String)]) {
+        var result = self
+        var found = [(proto: String, assocName: String)]()
+        var startSearch = result.startIndex
+        while let selfRange = result.range(of: "Self.", range: startSearch..<result.endIndex) {
+            var idx = selfRange.upperBound
+            // Skip the associated-type identifier
+            while idx < result.endIndex, result[idx].isLetter || result[idx].isNumber || result[idx] == "_" {
+                idx = result.index(after: idx)
+            }
+            guard idx > selfRange.upperBound else {
+                startSearch = selfRange.upperBound
+                continue
+            }
+            let assocName = String(result[selfRange.upperBound..<idx])
+            var scan = idx
+            while scan < result.endIndex, result[scan] == " " {
+                scan = result.index(after: scan)
+            }
+            guard scan < result.endIndex, result[scan] == "=",
+                  result.index(after: scan) < result.endIndex, result[result.index(after: scan)] == "=" else {
+                startSearch = idx
+                continue
+            }
+            scan = result.index(scan, offsetBy: 2)
+            while scan < result.endIndex, result[scan] == " " {
+                scan = result.index(after: scan)
+            }
+            let rhsStart = scan
+            while scan < result.endIndex, result[scan].isLetter || result[scan].isNumber || result[scan] == "_" {
+                scan = result.index(after: scan)
+            }
+            let rhs = String(result[rhsStart..<scan])
+            guard rhs == "A", scan < result.endIndex, result[scan] == ">" else {
+                startSearch = idx
+                continue
+            }
+            // Find the protocol name immediately preceding "<Self." (the "<" right before
+            // selfRange.lowerBound, then walk back over the identifier/dotted-path before it).
+            if selfRange.lowerBound > result.startIndex {
+                let ltIdx = result.index(before: selfRange.lowerBound)
+                if result[ltIdx] == "<" {
+                    let protoEnd = ltIdx
+                    var protoStart = protoEnd
+                    while protoStart > result.startIndex {
+                        let prevIdx = result.index(before: protoStart)
+                        let c = result[prevIdx]
+                        if c.isLetter || c.isNumber || c == "_" || c == "." {
+                            protoStart = prevIdx
+                        } else {
+                            break
+                        }
+                    }
+                    if protoStart < protoEnd {
+                        let fullProto = String(result[protoStart..<protoEnd])
+                        let shortProto = fullProto.components(separatedBy: ".").last ?? fullProto
+                        found.append((proto: shortProto, assocName: assocName))
+                    }
+                }
+            }
+            result.replaceSubrange(selfRange.lowerBound...scan, with: "___SAME_TYPE_A___>")
+            startSearch = result.index(selfRange.lowerBound, offsetBy: "___SAME_TYPE_A___>".count)
+        }
+        return (result, found)
+    }
+
     // 20b. cleanAnyWhereConstraints: on declaration lines, removes where-clause same-type
     // constraints whose LHS is `Any` (e.g. `Any == Void`, `Any == (Any, Any)`).
     // Keeps conformance constraints (T: P) and same-type constraints where neither side is `Any`.

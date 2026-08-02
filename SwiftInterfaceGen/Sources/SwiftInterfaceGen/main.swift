@@ -1997,8 +1997,28 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
 
         // Fix constrained existential simplification artifacts: `any Mod.Source<Self.Stream>`
         // originates from `any Source<Self.Stream == A>` (a constrained existential where the
-        // protocol's associated type `Stream` equals the generic param `A`).  Outside a protocol
-        // body, `Self.Stream` is not meaningful – replace with `Any` so the class compiles.
+        // protocol's associated type `Stream` equals the generic param `A`). `Source<A>` IS
+        // declared with a primary associated type (see IntelligencePlatformLibrary's
+        // "public protocol Source<A> { associatedtype A }" stub/.swiftinterface), so the
+        // constraint reconstructs validly as `any Source<A>` when the enclosing member's own
+        // generic parameter is literally named "A" (true for every known use site — see
+        // BiomeEventReporter.lazySource<A>). Parser.swift's simplifyType preserves that as the
+        // "___SAME_TYPE_A___" marker instead of erasing it outright; resolve it here.
+        var postProcessedLines = [String]()
+        for line in c.components(separatedBy: "\n") {
+            if line.contains("___SAME_TYPE_A___") {
+                let hasGenericA = line.contains("<A>") || line.contains("<A,") || line.contains(", A>") || line.contains(", A,") || line.contains("where A")
+                let replacement = hasGenericA ? "A" : "Any"
+                postProcessedLines.append(line.replacingOccurrences(of: "___SAME_TYPE_A___", with: replacement))
+            } else {
+                postProcessedLines.append(line)
+            }
+        }
+        c = postProcessedLines.joined(separator: "\n")
+
+        // Outside a protocol body, `Self.Stream` (with no preserved same-type marker — the
+        // constraint was already destroyed by an earlier `== String>`/generic-placeholder pass)
+        // is not meaningful – replace with `Any` so the class compiles.
         if let regex = try? NSRegularExpression(
             pattern: #"(any\s+\S+Source)<Self\.Stream\s*>"#, options: []) {
             let matches = regex.matches(in: c, range: NSRange(c.startIndex..., in: c))
@@ -3536,7 +3556,19 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
     static func generateStubs(outputCode: String, currentModule: String, outputDir: String, parser: Parser) {
         try? outputCode.write(toFile: "/tmp/finalCode_\(currentModule)_first_run.swift", atomically: true, encoding: .utf8)
         var externalTypes = [String: [(typeName: String, isProtocol: Bool, genericCount: Int)]]()
-        
+
+        // Primary-associated-type protocols (e.g. "protocol Source<Stream>") mangle each
+        // constrained-existential use site with the associated type's REAL name (e.g. "any
+        // Source<Self.Stream == A>" mangles distinguishing "Stream", not just its position) —
+        // stubbing the protocol with a generic "associatedtype A" placeholder produces a
+        // same-position but differently-named associated type, which mangles differently and
+        // never matches the real ABI symbol. Parser.swift's simplifyType recovers the real name
+        // from "Self.<Name> == A>" while it's still present (before erasure/marker-replacement)
+        // and records it in parser.primaryAssociatedTypeNames, keyed by the protocol's short
+        // name — read it here so the stub declares "associatedtype <Name>" under the same
+        // placeholder position instead of a bare "A".
+        let primaryAssociatedTypeNames = parser.primaryAssociatedTypeNames
+
         var constraintTypes = Set<String>()
         // 1. Parse 'where' constraints
         let localWherePattern = "where\\s+([^\\{]+)"
@@ -3937,7 +3969,14 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 if proto.genericCount > 0 {
                     let placeholders = ["A", "B", "C", "D", "E"]
                     let count = min(proto.genericCount, placeholders.count)
-                    let names = Array(placeholders[..<count])
+                    var names = Array(placeholders[..<count])
+                    // A single-primary-associated-type protocol's real name (recovered from
+                    // real usage sites — see primaryAssociatedTypeNames) must be used verbatim:
+                    // the mangled ABI symbol encodes the associated type's actual declared name,
+                    // not just its position, so a bare "A" placeholder here would never match.
+                    if count == 1, let realName = primaryAssociatedTypeNames[proto.name] {
+                        names = [realName]
+                    }
                     genericDecl = "<" + names.joined(separator: ", ") + ">"
                     placeholderNames = Set(names)
                     for name in names {

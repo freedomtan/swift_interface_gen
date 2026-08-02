@@ -873,6 +873,9 @@ class TypeNode {
                 }
                 displayTypeName += "<\(params.joined(separator: ", "))>"
             }
+        } else if isProtocol && !displayTypeName.contains("<"), let parser = parser, let primaryAssoc = parser.primaryAssociatedTypeNames[name] ?? parser.primaryAssociatedTypeNames[name.components(separatedBy: ".").last ?? name] {
+            displayTypeName += "<\(primaryAssoc)>"
+            inScope.insert(primaryAssoc)
         } else if isGeneric && !isProtocol && !displayTypeName.contains("<") {
             let count = getGenericCount(parser: parser)
 

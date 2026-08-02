@@ -42,6 +42,12 @@ class Parser {
     // (main.swift's generateStubs), which would create a genuine ambiguous-lookup conflict
     // between the real stub and our own extension-injected declaration.
     var selfDeclaredExternalExtensionPaths = Set<String>()
+    // Real name of a primary-associated-type protocol's associated type (e.g. "Source" -> "Stream"),
+    // recovered from "any Source<Self.Stream == A>" constrained-existential usages by
+    // simplifyType before that text is erased/marker-replaced. --generate-stubs (main.swift) needs
+    // this because the stub's "associatedtype A" placeholder must be renamed to the real name —
+    // otherwise the stub's mangled ABI symbol never matches the real framework's.
+    var primaryAssociatedTypeNames = [String: String]()
     var processedModules = Set<String>()
     var currentPrecomputeModule = "ModelCatalog"
     var frameworkInterfaceCache: [String: String] = [:]
@@ -1875,7 +1881,21 @@ class Parser {
         }
         if t.contains("==") {
             t = t.replacingOccurrences(of: "== String>", with: ">")
-            t = t.replacingOccurrences(of: "== A>", with: ">")
+            // Constrained existentials against a primary-associated-type protocol (e.g. "any
+            // Source<Self.Stream == A>", from IntelligencePlatformLibrary.Source<Stream>) carry
+            // real information in "Self.<assoc> == A" — it says the existential's primary
+            // associated type equals the enclosing generic param A, so it reconstructs validly
+            // as "Source<A>". Stripping straight to "== A>" -> ">" (as used to happen) throws
+            // that away, leaving main.swift's postProcess erasure with nothing to reconstruct
+            // "Source<A>" from, so it always fell back to "Source<Any>" (compiles, but mismatches
+            // the real ABI symbol -> assembly stub). Replace the whole "Self.<assoc> == A>" span
+            // (not just "== A>") with a marker main.swift's postProcess resolves to "A>", since
+            // leaving "Self.<assoc> " in front of the marker would produce invalid syntax.
+            let (replaced, foundAssocNames) = t.replaceSelfAssociatedTypeSameTypeAWithMarker()
+            t = replaced
+            for (proto, assocName) in foundAssocNames {
+                primaryAssociatedTypeNames[proto] = assocName
+            }
         }
         if t.contains("some") {
             // `some` opaque-return types demangle with no reconstructable underlying-protocol
