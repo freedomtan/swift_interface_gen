@@ -6,12 +6,23 @@
 
 ## Supported Target Frameworks
 
+Regression suite (`run_regression_tests.py`), 9 targets — all `SUCCESS`. First-pass stub counts (symbols the generator couldn't produce from Swift source alone, before assembly-stub fallback; see [Two-Pass Compilation](#two-pass-compilation--assembly-stub-alignment) below):
+
 | Framework | First-pass stubs | Final missing symbols |
 |---|---|---|
 | ODIE | 0 | 0 |
 | CoreAICompiler | 0 | 0 |
 | CoreAICommon | 0 | 0 |
+| CoreAIDelegates | 0 | 0 |
 | ModelCatalog | 0 | 0 |
+| ModelCatalogRuntime | 0 | 0 |
+| UnifiedAssetFramework | 0 (pure ObjC, no Swift symbols) | 0 |
+| AppleIntelligenceReporting | 88 | 0 |
+| TokenGenerationCore | ~2168 | 0 |
+
+`AppleIntelligenceReporting`'s remaining stubs stem from `protocol Source<Stream>` — a primary-associated-type protocol the generator doesn't detect (see [Key Design Decisions](#key-design-decisions) — primary associated types), forcing constrained-existential usages like `any Source<Self.Stream == A>` to erase to `any Source<Any>` (assembly-stub territory) rather than the valid `any Source<A>`. `TokenGenerationCore`'s count reflects its size and deep dependency chain (InternalSwiftProtobuf/PromptKit) rather than a single root cause; see `TODO.md` for per-framework fix history.
+
+Public-framework ground-truth suite (`verify_public.py`), 18 curated SDK frameworks — 18/18 PASS (compiles cleanly against real SDK `.swiftinterface`/`.tbd`, independent of the regression suite above).
 
 Dependency frameworks (auto-generated as stubs by `orchestrate.py`): `AppleIntelligenceReporting`, `FeatureFlags`, `UnifiedAssetFramework`, `CoreAIDelegates`, `TokenGenerationCore`, `ModelCatalogRuntime`.
 
@@ -197,6 +208,12 @@ Subscripts share the member name `"subscript"` but can have multiple overloads (
 
 For protocol existentials, a sentinel struct `_Default_Protocol` is synthesised in a `// --- Protocol Default Sentinels ---` section of the interface file (stripped from Phase A module emit, kept for Phase B dylib compile). The struct body is auto-generated from the protocol's required members.
 
+### `@_originallyDefinedIn` cross-module extension members
+Some frameworks retroactively move a type's extension members into a *different* module via `@_originallyDefinedIn`, while the ABI symbol's own mangled-module prefix still names the original module — so the symbol is neither a same-module member nor a normal cross-module `(extension in X):` marker. `Parser.swift` detects these (present in `ownTbdSymbols` with no `extensionModule`) and routes them into a dedicated `originallyDefinedInExtensions[module]` bucket on `TypeNode`; `Model.swift` emits each bucket as its own `@_originallyDefinedIn(module: "...", macOS 10.15)`-annotated extension. This closed out CoreAIDelegates' last 3 first-pass stubs.
+
+### Primary associated types (not yet supported)
+The generator has no mechanism to detect or emit primary associated types (`protocol Source<Stream>`). Symbols using constrained-existential syntax against such a protocol (e.g. `any Source<Self.Stream == A>`) can't be reconstructed as `any Source<A>` without the protocol declaring `<Stream>` — `postProcess()` instead erases them to `any Source<Any>`, which is valid but doesn't match the real ABI symbol, so it falls back to an assembly stub. This is `AppleIntelligenceReporting`'s main remaining stub source (see the frameworks table above).
+
 ### `_$ss` / `_$sSf` stdlib-extension filtering
 ODIE defines extensions on `~Escapable` Swift stdlib types (`RawSpan`, `MutableRawSpan`) and on `Swift.Float` / `Swift.Double`. These use mangled prefixes `_$ss` and `_$sSf`. They are filtered from the exports list because our mock library cannot provide them — they require the real ODIE runtime. Assembly stubs cover them instead.
 
@@ -217,3 +234,9 @@ swift-interface-gen <tbd_path> --generate-stubs <output_dir>
 ```
 
 Generates minimal Swift stub source files for each dependency framework discovered in `<tbd_path>`'s reexported-libraries list. Used by `orchestrate.py` to auto-synthesise dependency stubs (e.g. `FeatureFlags.swift`, `UnifiedAssetFramework.swift`) without manual maintenance.
+
+### Dependency-stub rescan fixed point (`orchestrate.py`)
+
+`--generate-stubs`' scan only sees a type reference if `isTypeDefinedInFramework` can confirm that type against a dependency's `.swiftinterface` already sitting under `LocalFrameworks/` — which for a brand-new dependency doesn't exist until `orchestrate.py`'s own dependency-build loop just built it as a stub. So the very first scan (run before any dependency stub exists) misses any extension gated on a not-yet-built dependency, and the stub built from that first scan can end up missing members the target's real interface needs.
+
+`orchestrate.py` handles this by rescanning after the dependency-build loop and rebuilding any stub whose new reference scope is richer than what's already built (comparing the freshly-rescanned stub source against a preserved pre-rescan copy, since `build_framework_stub`'s own staleness check would otherwise compare the just-written file against itself). A single rescan pass is enough when the missing reference is a top-level type (e.g. `AppleIntelligenceReporting`'s `IntelligencePlatformLibrary_AppleInternal` types). It is **not** enough for a *nested* type (e.g. `TokenGeneration.PromptCompletion.Candidate`, needed by `TokenGenerationCore`): the dependency's stub must first be rebuilt to declare the nested type before a subsequent scan can see it as "defined," so the loop repeats — rescan, rebuild any richer stub, rescan again — until a full pass finds nothing new to rebuild (fixed point) or a safety cap of 6 passes is hit. `TokenGenerationCore` needs 2 passes to converge.

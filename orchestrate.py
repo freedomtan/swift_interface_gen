@@ -308,7 +308,65 @@ def build_framework(name, is_target=False):
                     build_framework_stub(sdep, f"{tmp_stubs_dir}/{sdep}.swift")
             # Now compile this stub framework itself
             build_framework_stub(dep, stub_src)
-            
+
+    # 6.4 Some extensions on purely-synthetic submodules (e.g. IntelligencePlatformLibrary_
+    # AppleInternal, which has no real .framework/.swiftinterface anywhere in the SDK) are only
+    # emitted once the generator's isTypeDefinedInFramework check can see that submodule's
+    # .swiftinterface under LocalFrameworks/ -- which doesn't exist until the loop above just
+    # built it as a stub. The FIRST --generate-stubs scan (step 2, before any dependency stub
+    # existed) therefore never saw those extensions and never stubbed the types they reference,
+    # so the stub built above can be missing members the target's real interface needs. Re-scan
+    # now that dependency stubs exist, and rebuild any stub whose new reference scope is richer
+    # (build_framework_stub already does this comparison).
+    #
+    # A single rescan pass isn't always enough: isTypeDefinedInFramework for a NESTED type (e.g.
+    # TokenGeneration.PromptCompletion.Candidate) checks that nested type's name against the
+    # dependency's stub .swiftinterface already on disk under LocalFrameworks/ -- but that stub
+    # was itself built from a scan that predates discovering "Candidate" is needed, so it doesn't
+    # declare "Candidate" yet, so the extension referencing it keeps getting dropped and the
+    # rescanned item list never grows to include it either. Rebuilding the stub with the richer
+    # scan output doesn't help until the SDK-driven generator step actually re-derives the target's
+    # own interface using this newly-rebuilt stub as its isTypeDefinedInFramework source. Loop:
+    # rescan, rebuild any richer stub, then rescan again against the just-rebuilt stubs, until a
+    # full pass finds nothing new to rebuild (fixed point) or a safety cap is hit.
+    max_rescan_passes = 6
+    for rescan_pass in range(max_rescan_passes):
+        stale_tmp_stubs_dir = f"{tmp_stubs_dir}_prescan"
+        if os.path.exists(stale_tmp_stubs_dir):
+            shutil.rmtree(stale_tmp_stubs_dir)
+        shutil.move(tmp_stubs_dir, stale_tmp_stubs_dir)
+        os.makedirs(tmp_stubs_dir, exist_ok=True)
+        subprocess.check_call([
+            "./swift-interface-gen", tbd_path, "--generate-stubs", tmp_stubs_dir
+        ])
+        rescanned_stub_files = [f for f in os.listdir(tmp_stubs_dir) if f.endswith(".swift")]
+        any_rebuilt = False
+        for f in rescanned_stub_files:
+            dep = f[:-6]
+            if dep not in stub_modules or dep not in built:
+                continue
+            new_path = f"{tmp_stubs_dir}/{f}"
+            old_path = f"{stale_tmp_stubs_dir}/{f}"
+            with open(new_path, "r") as nf:
+                new_content = nf.read()
+            old_content = ""
+            if os.path.exists(old_path):
+                with open(old_path, "r") as of:
+                    old_content = of.read()
+            # build_framework_stub's own staleness check compares against stub_sources_built[dep],
+            # which still points at THIS SAME path (tmp_stubs_dir was recreated in place, not
+            # renamed) -- so it would read the just-written NEW content as both "prior" and "new"
+            # and never detect a change. Compare against the preserved pre-rescan copy directly and
+            # force the rebuild here instead.
+            if new_content != old_content and len(new_content) > len(old_content):
+                print(f"--- Rebuilding stub {dep}: post-dependency rescan found a richer reference scope ({new_path}) [pass {rescan_pass + 1}] ---")
+                built.discard(dep)
+                build_framework_stub(dep, new_path)
+                any_rebuilt = True
+        shutil.rmtree(stale_tmp_stubs_dir)
+        if not any_rebuilt:
+            break
+
     # 6.5 Re-run generator to get final aligned interface with all dependencies present in LocalFrameworks
     print(f"--- Re-generating Aligned Interface for {name} ---")
     with open(interface_file, "w") as f:

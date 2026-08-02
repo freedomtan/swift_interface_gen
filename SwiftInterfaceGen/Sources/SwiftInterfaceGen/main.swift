@@ -3583,14 +3583,26 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             }
         }
         
-        let pathPattern = "\\b([A-Z][a-zA-Z0-9_$]*\\.[a-zA-Z0-9_$]+(?:\\.[a-zA-Z0-9_$]+)*)\\b"
+        // A nested type literally named `Type` (or another Swift keyword) demangles/renders
+        // backtick-escaped ("ToolDefinition.`Type`"), which the bare identifier character class
+        // below doesn't match — missing it here means it's never added to externalTypes and
+        // the dependency stub omits it entirely, e.g. "extension ...ToolDefinition.`Type` {"
+        // referencing a `Type` that was never stubbed. Allow an optional backtick-quoted segment
+        // anywhere in the dotted path.
+        let identifierSegment = "(?:[a-zA-Z0-9_$]+|`[a-zA-Z0-9_$]+`)"
+        // No trailing \b: a path ending in a backtick-quoted segment (e.g. "Foo.`Type`") has a
+        // non-word character on both sides of that final backtick, so \b never matches there.
+        let pathPattern = "\\b([A-Z][a-zA-Z0-9_$]*\\.\(identifierSegment)(?:\\.\(identifierSegment))*)"
         if let regex = try? NSRegularExpression(pattern: pathPattern, options: []) {
             let nsRange = NSRange(outputCode.startIndex..<outputCode.endIndex, in: outputCode)
             let matches = regex.matches(in: outputCode, options: [], range: nsRange)
             for m in matches {
                 if let range = Range(m.range(at: 1), in: outputCode) {
-                    let typeName = String(outputCode[range])
-                    
+                    // Strip backticks so a keyword-named segment ("`Type`") matches the plain
+                    // "Type"/"Protocol"/... names generateSwift()'s own escaping check looks for
+                    // — StubNode tree-building and re-escaping on emit stay in sync this way.
+                    let typeName = String(outputCode[range]).replacingOccurrences(of: "`", with: "")
+
                     var isProtocol = false
                     let startIdx = m.range(at: 1).location
                     if startIdx >= 4 {
