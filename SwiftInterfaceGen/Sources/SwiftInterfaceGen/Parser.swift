@@ -548,7 +548,36 @@ class Parser {
         }
         
 
-        if demangled.contains("unsafeMutableAddressor") || demangled.contains("unsafeAddressor") {
+        // "Module.Type.member.unsafeMutableAddressor : Type" (global/static stored properties
+        // without library evolution) and "direct field offset for Module.Type.member : Type"
+        // (instance stored properties) are pure ABI bookkeeping we don't emit code for, but
+        // they PROVE the member is a genuinely stored property, not the computed-property
+        // rendering Model.swift defaults to — record that so the property renderer downstream
+        // can emit a real "var"/"let" with no getter/setter body instead (see
+        // BiomeEventReporter.unifiedAssetFrameworkSource / Logging.assetBringUp: their real
+        // accessor set is getter+modify+setter+field-offset, or getter+addressor for statics,
+        // never the "get { fatalError() } set {}" computed shape).
+        if demangled.contains("unsafeMutableAddressor") || demangled.contains("unsafeAddressor") ||
+           demangled.contains("direct field offset for ") {
+            var storedPath = demangled
+            if let colonIdx = storedPath.range(of: " : ") {
+                storedPath = String(storedPath[..<colonIdx.lowerBound])
+            }
+            var isStoredStatic = storedPath.hasPrefix("static ")
+            if isStoredStatic { storedPath = String(storedPath.dropFirst("static ".count)) }
+            storedPath = storedPath.replacingOccurrences(of: "direct field offset for ", with: "")
+            for suffix in [".unsafeMutableAddressor", ".unsafeAddressor"] {
+                if storedPath.hasSuffix(suffix) {
+                    storedPath = String(storedPath.dropLast(suffix.count))
+                    isStoredStatic = true // addressor-based storage only occurs for static/global vars
+                }
+            }
+            let (typePath, memberName) = splitPath(storedPath)
+            if !typePath.isEmpty && !memberName.isEmpty {
+                let node = findOrCreateType(name: cleanType(typePath))
+                let escapedMemberName = escapeKeyword(memberName)
+                node.storedMembers.insert(isStoredStatic ? "static \(escapedMemberName)" : escapedMemberName)
+            }
             return
         }
 

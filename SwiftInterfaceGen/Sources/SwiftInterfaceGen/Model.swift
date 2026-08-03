@@ -37,6 +37,11 @@ class TypeNode {
     // Populated so inheritProtocolMembers (Parser.swift) doesn't think the requirement is
     // missing and copy the protocol's raw (unresolvable) signature onto this type.
     var satisfiedRequirementNames: Set<String> = []
+    // Property storage keys (matching .property's node.members key, e.g. "static foo" or "foo")
+    // confirmed genuinely stored by a "direct field offset for"/"unsafeMutableAddressor" ABI
+    // symbol (Parser.swift) — such a property must be emitted as a real stored var/let, not
+    // the default computed-property rendering, or its accessor/addressor ABI won't match.
+    var storedMembers: Set<String> = []
 
     private func isLifetimeSpanType(_ type: String) -> Bool {
         let clean = type.replacingOccurrences(of: "Optional<", with: "")
@@ -1458,7 +1463,25 @@ class TypeNode {
                     let hasLifetime = isReadOnly && isLifetimeSpanType(cleanT)
                     let getPrefix = hasLifetime ? "@_lifetime(borrow self) get" : "get"
                     let suffix = isReadOnly ? "{ \(getPrefix) \(getter) }" : "{ \(getPrefix) \(getter) set {} }"
-                    if cleanT.contains("Mutex<") || cleanT.contains("Synchronization.Mutex<") {
+                    // Instance properties confirmed genuinely stored by a "direct field offset
+                    // for" ABI symbol (see storedMembers, populated in Parser.swift) must be
+                    // emitted as a real stored "var", not the default computed-property
+                    // rendering — their real accessor set (getter+modify+setter+field-offset)
+                    // only matches a plain stored var. No initializer is needed: every
+                    // generated init() unconditionally calls fatalError() (Never-returning),
+                    // so Swift's definite-initialization check treats the property as
+                    // unreachable-but-required and accepts it uninitialized (see the existing
+                    // Mutex<> stored-let case below, which relies on the same property).
+                    // Static/global stored properties are excluded here: their real ABI needs
+                    // an "unsafeMutableAddressor" symbol, which Swift only emits when the whole
+                    // module is built WITHOUT -enable-library-evolution — a build-flag change
+                    // with much broader blast radius (confirmed: disabling it wholesale for
+                    // AppleIntelligenceReporting raised its stub count from 65 to 307 by
+                    // breaking unrelated witness-table/dispatch-thunk shapes), not something
+                    // fixable per-property here.
+                    if !isStatic && !isReadOnly && self.storedMembers.contains(n) {
+                        lines.append("\(nextIndent)public \(finalMod)\(overrideMod)var \(n): \(cleanT)")
+                    } else if cleanT.contains("Mutex<") || cleanT.contains("Synchronization.Mutex<") {
                         lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)let \(n): \(cleanT)")
                     } else {
                         // Actor's own `unownedExecutor` requirement is declared `nonisolated`
