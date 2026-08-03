@@ -2004,14 +2004,44 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         // generic parameter is literally named "A" (true for every known use site — see
         // BiomeEventReporter.lazySource<A>). Parser.swift's simplifyType preserves that as the
         // "___SAME_TYPE_A___" marker instead of erasing it outright; resolve it here.
+        //
+        // The enclosing generic parameter is usually declared on the type's own header line
+        // (e.g. "class lazySource<A> where A: ... {"), not on the member line carrying the
+        // marker (e.g. "public var source: (any Source<___SAME_TYPE_A___>)? { ... }") — a
+        // same-line-only scan never sees it and always falls back to "Any", silently erasing
+        // the constraint. Track the innermost enclosing generic type's parameter name via a
+        // brace-depth scope stack instead of scanning each marker line in isolation.
         var postProcessedLines = [String]()
+        var genericScopeStack: [(name: String, depth: Int)] = []
+        var braceDepth = 0
+        let genericHeaderRegex = try? NSRegularExpression(
+            pattern: #"\b(?:class|struct|enum)\s+\w+<([^>]+)>"#, options: [])
         for line in c.components(separatedBy: "\n") {
             if line.contains("___SAME_TYPE_A___") {
                 let hasGenericA = line.contains("<A>") || line.contains("<A,") || line.contains(", A>") || line.contains(", A,") || line.contains("where A")
+                    || genericScopeStack.contains(where: { $0.name == "A" })
                 let replacement = hasGenericA ? "A" : "Any"
                 postProcessedLines.append(line.replacingOccurrences(of: "___SAME_TYPE_A___", with: replacement))
             } else {
                 postProcessedLines.append(line)
+            }
+
+            let openCount = line.filter { $0 == "{" }.count
+            let closeCount = line.filter { $0 == "}" }.count
+            braceDepth += openCount
+            if openCount > 0, let regex = genericHeaderRegex,
+               let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+               let paramsRange = Range(match.range(at: 1), in: line) {
+                for param in line[paramsRange].split(separator: ",") {
+                    let name = param.split(separator: ":").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+                    if !name.isEmpty {
+                        genericScopeStack.append((name: name, depth: braceDepth))
+                    }
+                }
+            }
+            braceDepth -= closeCount
+            while let last = genericScopeStack.last, braceDepth < last.depth {
+                genericScopeStack.removeLast()
             }
         }
         c = postProcessedLines.joined(separator: "\n")
