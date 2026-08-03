@@ -2099,48 +2099,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         }
 
         if parser.defaultModule == "AppleIntelligenceReporting" {
-            c = c.replacingOccurrences(
-                of: "class lazySource<A> {",
-                with: "class lazySource<A> where A: IntelligencePlatformLibrary.Stream {"
-            )
-            c = c.replacingOccurrences(
-                of: "class lazySourceInternal<A> {",
-                with: "class lazySourceInternal<A> where A: IntelligencePlatformLibrary_AppleInternal.Stream {"
-            )
-            c += """
-
-extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.Availability: IntelligencePlatformLibrary.Stream {
-    public typealias EventType = Any
-}
-extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.Invocation.Step: IntelligencePlatformLibrary.Stream {
-    public typealias EventType = Any
-}
-extension IntelligencePlatformLibrary.Library.Streams.MobileAsset.LifeCycle.InstrumentationEvent: IntelligencePlatformLibrary.Stream {
-    public typealias EventType = Any
-}
-extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.Buddy: IntelligencePlatformLibrary.Stream {
-    public typealias EventType = Any
-}
-extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.MobileAsset: IntelligencePlatformLibrary.Stream {
-    public typealias EventType = Any
-}
-extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.MobileAssetVerbose: IntelligencePlatformLibrary.Stream {
-    public typealias EventType = Any
-}
-extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.ModelCatalog: IntelligencePlatformLibrary.Stream {
-    public typealias EventType = Any
-}
-extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.SoftwareUpdateController: IntelligencePlatformLibrary.Stream {
-    public typealias EventType = Any
-}
-extension IntelligencePlatformLibrary.Library.Streams.AppleIntelligence.Reporting.AssetDeliveryLog.UnifiedAssetFramework: IntelligencePlatformLibrary.Stream {
-    public typealias EventType = Any
-}
-extension IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.AppleIntelligence.Reporting.ModelIO: IntelligencePlatformLibrary_AppleInternal.Stream {
-    public typealias EventType = Any
-}
-
-"""
+            // Keep lazySource unconstrained to match real system framework binary
         }
 
         // Final cleanup of redundant newlines

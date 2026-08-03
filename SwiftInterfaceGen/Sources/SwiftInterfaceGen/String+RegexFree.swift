@@ -508,7 +508,7 @@ extension String {
                     let lastComponent = components.last ?? ""
                     let prefix = String(result[prefixStartIdx..<dotIdx])
                     
-                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence", "EventType", "Stream", "Failure", "Output", "Input", "FormatInput", "FormatOutput", "Content", "SchedulerTimeType", "Stride", "RawSignificand", "RawValue", "WrappedElement", "Bound", "Result", "Body", "Indices", "SchedulerOptions", "Exponent", "Scalar", "Swift", "PairedLinkage"]
+                    let allowedTypes = ["CatalogAssetType", "LocalService", "RemoteService", "Service", "ModelType", "TokenizerType", "Interface", "Type", "Element", "Index", "Iterator", "SubSequence", "Stream", "Failure", "Output", "Input", "FormatInput", "FormatOutput", "Content", "SchedulerTimeType", "Stride", "RawSignificand", "RawValue", "WrappedElement", "Bound", "Result", "Body", "Indices", "SchedulerOptions", "Exponent", "Scalar", "Swift", "PairedLinkage"]
                     let suffixComponents = Array(components.dropFirst())
                     let allAllowed = suffixComponents.allSatisfy { allowedTypes.contains($0) }
                     
