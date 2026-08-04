@@ -562,6 +562,62 @@ def build_framework(name, is_target=False):
 # built" apart from "already built, but too narrow for this new caller".
 stub_sources_built = {}
 
+def _split_top_level_decls(source_text):
+    """Split a generated stub source into (imports, {decl_name: decl_text}). Each top-level
+    decl is a contiguous run of lines starting at a `public protocol|struct|enum|class NAME`
+    header and ending when brace depth returns to 0. Two independent --generate-stubs scans
+    of the same dependency module (one per calling target, each only seeing the types ITS OWN
+    interface references) can produce two files with disjoint declarations -- e.g. one scan's
+    output declares `Schema`/`ToolDefinition` and never mentions `ChatLanguageModelResponse
+    StringStream`, while another's does the reverse. Neither is a subset of the other, so a
+    single file can't just be swapped for the "richer" one; the two must be merged by decl name."""
+    import re as _re3
+    imports = set()
+    decls = {}
+    lines = source_text.splitlines(keepends=True)
+    header_re = _re3.compile(r'^public (?:protocol|struct|enum|class|final class)\s+`?([A-Za-z_][A-Za-z0-9_]*)`?')
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("import "):
+            imports.add(line.strip())
+            i += 1
+            continue
+        m = header_re.match(line)
+        if m:
+            name = m.group(1)
+            start = i
+            depth = line.count("{") - line.count("}")
+            i += 1
+            while i < len(lines) and depth > 0:
+                depth += lines[i].count("{") - lines[i].count("}")
+                i += 1
+            decls[name] = "".join(lines[start:i])
+        else:
+            i += 1
+    return imports, decls
+
+def _merge_stub_sources(prior_text, new_text):
+    """Union two stub sources by top-level declaration name (see _split_top_level_decls).
+    When both sources declare the same name, keep whichever version is textually longer, as a
+    proxy for "more members scanned in"."""
+    prior_imports, prior_decls = _split_top_level_decls(prior_text)
+    new_imports, new_decls = _split_top_level_decls(new_text)
+    merged_imports = sorted(prior_imports | new_imports)
+    merged_decls = dict(prior_decls)
+    changed = False
+    for name, text in new_decls.items():
+        if name not in merged_decls:
+            merged_decls[name] = text
+            changed = True
+        elif len(text) > len(merged_decls[name]):
+            merged_decls[name] = text
+            changed = True
+    if not changed:
+        return None
+    body = "\n".join(merged_imports) + "\n\n" + "\n".join(merged_decls[n] for n in merged_decls)
+    return body
+
 def build_framework_stub(name, swift_source):
     if name in built:
         with open(swift_source, "r") as f:
@@ -570,10 +626,21 @@ def build_framework_stub(name, swift_source):
         if prior_source is not None:
             with open(prior_source, "r") as f:
                 prior_content = f.read()
-            if new_content == prior_content or len(new_content) <= len(prior_content):
+            if new_content == prior_content:
                 return
-            print(f"--- Rebuilding stub {name}: new reference scope ({swift_source}) is richer than the one already built ({prior_source}) ---")
+            merged = _merge_stub_sources(prior_content, new_content)
+            if merged is None:
+                return
+            # Written to a dedicated, stable directory rather than alongside either source --
+            # both tmp_stubs_<Target> dirs are transient and get moved/rmtree'd by the per-target
+            # rescan loop (see section 6.4 above), which would otherwise sweep this file away.
+            os.makedirs("tmp_stubs_merged", exist_ok=True)
+            merged_path = f"tmp_stubs_merged/{name}.merged.swift"
+            with open(merged_path, "w") as f:
+                f.write(merged)
+            print(f"--- Rebuilding stub {name}: merged reference scope from ({prior_source}) and ({swift_source}) into {merged_path} ---")
             built.discard(name)
+            swift_source = merged_path
         else:
             return
     compile_framework(name, swift_source, is_stub=True)
