@@ -3974,6 +3974,23 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                             "ModelIO"].contains(part) {
                             node.conformances.append("Stream")
                         }
+                        // IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.
+                        // AppleIntelligence.Reporting.ModelIO has zero real ABI ground truth
+                        // anywhere (this synthetic module has no real .tbd at all), so
+                        // parser.findTypeNode above never resolves a kind for it and it falls
+                        // through to StubNode's "struct" default — but the real symbol mangles
+                        // this whole namespace-only path as "O" (enum), matching the sibling
+                        // IntelligencePlatformLibrary module's real, ABI-confirmed convention
+                        // for the exact same "Library.Streams.AppleIntelligence.Reporting.*"
+                        // hierarchy (which DOES have real .tbd data proving it's enums). Match
+                        // that established convention for the corresponding _AppleInternal path
+                        // instead of defaulting to struct.
+                        if currentModule == "AppleIntelligenceReporting",
+                           mod == "IntelligencePlatformLibrary_AppleInternal",
+                           ["InternalLibrary", "Streams", "AppleIntelligence", "Reporting", "ModelIO"].contains(part),
+                           node.kind == "struct" {
+                            node.kind = "enum"
+                        }
                         current.nested[part] = node
                     }
                     current = current.nested[part]!
