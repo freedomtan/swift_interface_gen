@@ -2753,7 +2753,7 @@ class TypeNode {
                     switch member {
                     case .method(let n, _, _): memberName = n
                     case .property(let n, _, _, _): memberName = n
-                    case .initializer: memberName = "init(from:)"
+                    case .initializer(let sig): memberName = sig.hasPrefix("init(from:") ? "init(from:)" : sig
                     default: return true
                     }
                     if hashableWitnessNames.contains(memberName) && alreadyConformsHashable { return false }
