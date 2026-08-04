@@ -2086,7 +2086,8 @@ class Parser {
             var escapedType = Parser.escapeClosures(in: typePart, isTopLevelParameter: true, isEscaping: isEsc)
             
             let cleanType = escapedType.trimmingCharacters(in: .whitespaces)
-            let isNoncopyableType = cleanType.contains("Span") || cleanType.contains("Executable") || cleanType.contains("PixelBuffer")
+            let isSpanType = cleanType.contains("Span") && !cleanType.contains("SpanContext")
+            let isNoncopyableType = isSpanType || cleanType.contains("Executable") || cleanType.contains("PixelBuffer")
             let hasOwnership = cleanType.hasPrefix("borrowing ") || cleanType.hasPrefix("consuming ") || cleanType.hasPrefix("inout ") || cleanType.hasPrefix("__shared ") || cleanType.hasPrefix("__owned ")
             if isNoncopyableType && !hasOwnership {
                 escapedType = "borrowing " + escapedType

@@ -1479,8 +1479,9 @@ class TypeNode {
                     // AppleIntelligenceReporting raised its stub count from 65 to 307 by
                     // breaking unrelated witness-table/dispatch-thunk shapes), not something
                     // fixable per-property here.
-                    if !isStatic && !isReadOnly && self.storedMembers.contains(n) {
-                        lines.append("\(nextIndent)public \(finalMod)\(overrideMod)var \(n): \(cleanT)")
+                    if !isStatic && self.storedMembers.contains(n) {
+                        let kw = isReadOnly ? "let" : "var"
+                        lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(kw) \(n): \(cleanT)")
                     } else if cleanT.contains("Mutex<") || cleanT.contains("Synchronization.Mutex<") {
                         lines.append("\(nextIndent)public \(finalMod)\(overrideMod)\(staticMod)let \(n): \(cleanT)")
                     } else {
