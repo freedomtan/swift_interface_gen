@@ -2414,7 +2414,27 @@ class TypeNode {
             if isObjcExt {
                 extLines.append("// --- ObjC Extension (bridge-header required) ---")
             }
-            extLines.append("extension \(currentPath)\(constraintSuffix) {")
+            // Retroactive conformances discovered on an EXTERNAL type (e.g. "protocol
+            // conformance descriptor for ModelCatalog.CatalogClient : TokenGenerationCore.
+            // ModelCatalogClient in TokenGenerationCore") only ever populate this node's
+            // `conformances` set -- there is no separate "declaration" render pass for external
+            // types (generateCode, which normally emits a type's own conformance list, is never
+            // called on them), so without emitting them here the conformance itself is silently
+            // dropped even though its member witnesses render fine.
+            var retroactiveConformanceSuffix = ""
+            if parser?.getTopLevelModule(for: self) != defaultModule {
+                let wellKnownStdlib: Set<String> = ["Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Sendable", "Error", "CustomStringConvertible", "Comparable", "Sequence", "Collection", "Strideable", "Numeric", "SignedNumeric", "AdditiveArithmetic", "FloatingPoint", "BinaryFloatingPoint", "LosslessStringConvertible", "CaseIterable", "RawRepresentable", "CodingKey", "LocalizedError", "~Copyable"]
+                let retroactive = conformances.compactMap { conf -> String? in
+                    let clean = conf.replacingOccurrences(of: "any ", with: "")
+                    if clean.hasPrefix("Swift.") || clean.hasPrefix("Foundation.") { return nil }
+                    if wellKnownStdlib.contains(clean) { return nil }
+                    return clean
+                }
+                if !retroactive.isEmpty {
+                    retroactiveConformanceSuffix = ": " + retroactive.sorted().joined(separator: ", ")
+                }
+            }
+            extLines.append("extension \(currentPath)\(retroactiveConformanceSuffix)\(constraintSuffix) {")
             let extNextIndent = "    "
             
             let sortedExt = membersList.sorted(by: { 
