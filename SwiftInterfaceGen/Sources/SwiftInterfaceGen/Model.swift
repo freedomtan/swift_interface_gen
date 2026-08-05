@@ -226,7 +226,7 @@ class TypeNode {
         pathComponents.append(self.name)
         let fullTypeName = pathComponents.joined(separator: ".")
         let methodKey = "\(fullTypeName).\(methodName)(\(labels.joined(separator: ":"))\(labels.isEmpty ? "" : ":"))"
-        
+
         guard let indices = parser.defaultArguments[methodKey] else {
             return signature
         }

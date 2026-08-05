@@ -515,7 +515,30 @@ class Parser {
                     }
                     
                     if let openParen = funcPart.firstIndex(of: "("), let closeParen = funcPart.lastIndex(of: ")") {
-                        let funcName = String(funcPart[..<openParen]).trimmingCharacters(in: .whitespaces)
+                        var funcName = String(funcPart[..<openParen]).trimmingCharacters(in: .whitespaces)
+                        // A generic method's demangled name carries its full generic clause,
+                        // including the "where" constraints, right before the parameter list
+                        // (e.g. "Npy.makeArray<A where A: Swift.BinaryFloatingPoint>") -- but the
+                        // lookup key built later in Model.swift's injectDefaultArguments only ever
+                        // has the bare placeholder list ("makeArray<A>"), since that key comes from
+                        // methodGenericsPart, which already strips "where" clauses into a separate
+                        // methodWhereClause. Drop the "where ..." part here too so both keys match.
+                        if let openAngle = funcName.firstIndex(of: "<"), let whereRange = funcName.range(of: " where ") {
+                            var depth = 0
+                            var idx = openAngle
+                            var closeAngle: String.Index? = nil
+                            while idx < funcName.endIndex {
+                                if funcName[idx] == "<" { depth += 1 }
+                                else if funcName[idx] == ">" {
+                                    depth -= 1
+                                    if depth == 0 { closeAngle = idx; break }
+                                }
+                                idx = funcName.index(after: idx)
+                            }
+                            if let close = closeAngle, whereRange.lowerBound > openAngle, whereRange.lowerBound < close {
+                                funcName = String(funcName[..<whereRange.lowerBound]) + ">" + String(funcName[funcName.index(after: close)...])
+                            }
+                        }
                         let paramsStr = String(funcPart[funcPart.index(after: openParen)..<closeParen])
                         
                         let params = splitTopLevelCommas(paramsStr)
