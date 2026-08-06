@@ -69,6 +69,34 @@ extension String {
         return result
     }
 
+    // 2b. containsWord: true if `word` occurs as a standalone word (not glued to adjacent
+    // letters/numbers/_/$ on either side) — e.g. "variable" matches "static variable" but not
+    // "variableBindings" or "myVariableName".
+    func containsWord(_ word: String) -> Bool {
+        var startSearch = startIndex
+        while let range = self.range(of: word, range: startSearch..<endIndex) {
+            let isWordCharBefore: Bool
+            if range.lowerBound > startIndex {
+                let prevChar = self[index(before: range.lowerBound)]
+                isWordCharBefore = prevChar.isLetter || prevChar.isNumber || prevChar == "_" || prevChar == "$"
+            } else {
+                isWordCharBefore = false
+            }
+            let isWordCharAfter: Bool
+            if range.upperBound < endIndex {
+                let nextChar = self[range.upperBound]
+                isWordCharAfter = nextChar.isLetter || nextChar.isNumber || nextChar == "_" || nextChar == "$"
+            } else {
+                isWordCharAfter = false
+            }
+            if !isWordCharBefore && !isWordCharAfter {
+                return true
+            }
+            startSearch = range.upperBound
+        }
+        return false
+    }
+
     // 3. replaceWordDot: replaces whole word `word` followed by dot, e.g. `\bword\.` with `replacement`.
     func replaceWordDot(_ word: String, with replacement: String) -> String {
         var result = self

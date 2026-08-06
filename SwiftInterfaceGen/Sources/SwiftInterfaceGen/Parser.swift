@@ -789,7 +789,7 @@ class Parser {
             // "opaque type descriptor for" is added explicitly to catch that ABI bookkeeping symbol.
             // "field offset for" covers the real ABI field-offset metadata we don't want.
             let junkKeywords = ["type metadata", "metadata accessor", "metadata instantiation",
-                                "witness table", "helper", "field offset for", "lookup function", "variable",
+                                "witness table", "helper", "field offset for", "lookup function",
                                 "function pointer", "lazy cache", "block copy", "block destroy",
                                 "property descriptor", "reflection metadata", "resilient class stub",
                                 "opaque type descriptor for"]
@@ -801,6 +801,16 @@ class Parser {
                         return
                     }
                 }
+            }
+            // "variable" (unlike every other junkKeywords entry, a single bare word rather than
+            // a multi-word ABI-bookkeeping phrase) was matched via plain .contains, so it also
+            // dropped any real member whose name merely contains the substring "variable" as
+            // part of a longer identifier -- e.g. PromptTemplateInfo.init(templateID:
+            // variableBindings:...), silently discarding two whole initializer overloads.
+            // Require it as an isolated word (not glued to adjacent letters) to only catch the
+            // actual ABI bookkeeping text this was meant for.
+            if d_orig.containsWord("variable") {
+                return
             }
         }
         
