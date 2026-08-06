@@ -1370,6 +1370,100 @@ extension String {
         return (result, found)
     }
 
+    // 20c-3. replaceConcretePrimaryAssociatedTypeConstraint: rewrites a constrained existential
+    // whose same-type RHS is a CONCRETE type rather than the placeholder `A` (e.g. `any
+    // Swift.Sequence<Self.Swift.Sequence.Element == Swift.Int>`, from
+    // TokenGenerationCore.ContiguousBitSet.init(_:)) into Swift's primary-associated-type sugar
+    // `any Swift.Sequence<Swift.Int>` — the two forms mangle identically for stdlib protocols
+    // with a declared primary associated type (confirmed via isolated `swiftc` testing), but
+    // `replaceSelfAssociatedTypeSameTypeAWithMarker` above only fires when the RHS is literally
+    // `A`, so a concrete RHS previously fell through to stripConstrainedExistentialGenerics,
+    // which erases the whole `<...>` clause and loses the real ABI's generic-argument mangling.
+    // Only fires for protocols in `knownPrimaryAssociatedTypes` whose recorded associated-type
+    // name matches the one actually referenced, to avoid guessing for protocols where the
+    // primary associated type isn't actually the one being constrained.
+    static let knownPrimaryAssociatedTypes: [String: String] = [
+        "Sequence": "Element", "Collection": "Element", "IteratorProtocol": "Element",
+        "AsyncSequence": "Element", "AsyncIteratorProtocol": "Element"
+    ]
+    func replaceConcretePrimaryAssociatedTypeConstraint() -> String {
+        var result = self
+        var startSearch = result.startIndex
+        while let selfRange = result.range(of: "Self.", range: startSearch..<result.endIndex) {
+            var idx = selfRange.upperBound
+            while idx < result.endIndex, result[idx].isLetter || result[idx].isNumber || result[idx] == "_" || result[idx] == "." {
+                idx = result.index(after: idx)
+            }
+            guard idx > selfRange.upperBound else {
+                startSearch = selfRange.upperBound
+                continue
+            }
+            let assocPath = String(result[selfRange.upperBound..<idx])
+            let assocName = assocPath.components(separatedBy: ".").last ?? assocPath
+            var scan = idx
+            while scan < result.endIndex, result[scan] == " " {
+                scan = result.index(after: scan)
+            }
+            guard scan < result.endIndex, result[scan] == "=",
+                  result.index(after: scan) < result.endIndex, result[result.index(after: scan)] == "=" else {
+                startSearch = idx
+                continue
+            }
+            scan = result.index(scan, offsetBy: 2)
+            while scan < result.endIndex, result[scan] == " " {
+                scan = result.index(after: scan)
+            }
+            let rhsStart = scan
+            var depth = 0
+            while scan < result.endIndex {
+                let c = result[scan]
+                if c == "<" { depth += 1 }
+                else if c == ">" {
+                    if depth == 0 { break }
+                    depth -= 1
+                }
+                else if c == "," && depth == 0 { break }
+                scan = result.index(after: scan)
+            }
+            let rhs = String(result[rhsStart..<scan]).trimmingCharacters(in: .whitespaces)
+            guard scan < result.endIndex, result[scan] == ">", rhs != "A", !rhs.isEmpty else {
+                startSearch = idx
+                continue
+            }
+            // Find the protocol name immediately preceding "<Self." (the "<" right before
+            // selfRange.lowerBound, then walk back over the identifier/dotted-path before it).
+            guard selfRange.lowerBound > result.startIndex else {
+                startSearch = idx
+                continue
+            }
+            let ltIdx = result.index(before: selfRange.lowerBound)
+            guard result[ltIdx] == "<" else {
+                startSearch = idx
+                continue
+            }
+            let protoEnd = ltIdx
+            var protoStart = protoEnd
+            while protoStart > result.startIndex {
+                let prevIdx = result.index(before: protoStart)
+                let c = result[prevIdx]
+                if c.isLetter || c.isNumber || c == "_" || c == "." {
+                    protoStart = prevIdx
+                } else {
+                    break
+                }
+            }
+            let fullProto = String(result[protoStart..<protoEnd])
+            let shortProto = fullProto.components(separatedBy: ".").last ?? fullProto
+            guard String.knownPrimaryAssociatedTypes[shortProto] == assocName else {
+                startSearch = idx
+                continue
+            }
+            result.replaceSubrange(selfRange.lowerBound...result.index(before: scan), with: rhs)
+            startSearch = result.index(selfRange.lowerBound, offsetBy: rhs.count)
+        }
+        return result
+    }
+
     // 20b. cleanAnyWhereConstraints: on declaration lines, removes where-clause same-type
     // constraints whose LHS is `Any` (e.g. `Any == Void`, `Any == (Any, Any)`).
     // Keeps conformance constraints (T: P) and same-type constraints where neither side is `Any`.

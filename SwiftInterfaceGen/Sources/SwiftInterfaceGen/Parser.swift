@@ -1948,6 +1948,13 @@ class Parser {
             for (proto, assocName) in foundAssocNames {
                 primaryAssociatedTypeNames[proto] = assocName
             }
+            // A constrained existential whose same-type RHS is a CONCRETE type (e.g. "any
+            // Swift.Sequence<Self.Swift.Sequence.Element == Swift.Int>", from
+            // ContiguousBitSet.init(_:)) isn't handled by the marker replacement above (which
+            // only fires for the placeholder "A") — reconstruct it as primary-associated-type
+            // sugar ("any Swift.Sequence<Swift.Int>") before stripConstrainedExistentialGenerics
+            // (main.swift postProcess) would otherwise erase the whole clause.
+            t = t.replaceConcretePrimaryAssociatedTypeConstraint()
         }
         if t.contains("some") {
             // `some` opaque-return types demangle with no reconstructable underlying-protocol
