@@ -4068,6 +4068,21 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             // capitalized qualifier that isn't Swift/Foundation/this module itself, so the
             // stub actually resolves the cross-module type instead of failing "cannot find
             // type 'X' in scope".
+            // Collect every type name this stub itself declares, at any nesting depth, so the
+            // qualifier scan below doesn't mistake a nested-type path (e.g.
+            // "Prompt.MediaCollectionAttachment.AudioSamples") for a module name and emit a
+            // bogus "import AudioSamples" — StubNode.generateSwift's own keyword-escaping
+            // (main.swift, "public \(kindKeyword) \(escapedName)...") can backtick-quote a name,
+            // so match that optional form too and strip the backticks back off.
+            var selfDeclaredStubTypeNames = Set<String>()
+            if let declRegex = try? NSRegularExpression(pattern: "public (?:struct|enum|class|protocol) (`[A-Za-z0-9_]+`|[A-Za-z0-9_]+)", options: []) {
+                let nsRange = NSRange(fileContent.startIndex..<fileContent.endIndex, in: fileContent)
+                for m in declRegex.matches(in: fileContent, options: [], range: nsRange) {
+                    if let range = Range(m.range(at: 1), in: fileContent) {
+                        selfDeclaredStubTypeNames.insert(String(fileContent[range]).replacingOccurrences(of: "`", with: ""))
+                    }
+                }
+            }
             var extraImports = Set<String>()
             if let regex = try? NSRegularExpression(pattern: "\\b([A-Z][A-Za-z0-9_]*)\\.[A-Z][A-Za-z0-9_]*", options: []) {
                 let nsRange = NSRange(fileContent.startIndex..<fileContent.endIndex, in: fileContent)
@@ -4075,12 +4090,30 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 for m in matches {
                     if let range = Range(m.range(at: 1), in: fileContent) {
                         let qualifier = String(fileContent[range])
-                        if qualifier != "Swift", qualifier != "Foundation", qualifier != mod {
+                        // A bare generic placeholder (the "A"/"B"/"C"... convention used
+                        // throughout this generator, e.g. StubNode's own
+                        // ["A","B","C","D","E","F"] placeholders above) can appear immediately
+                        // before a dotted member/metatype access ("A.Type", "A.Element") in a
+                        // real method signature — that's a type-parameter reference, not a
+                        // module-qualified type, and must not be treated as an import target.
+                        let isGenericPlaceholder = qualifier.count <= 3 &&
+                            qualifier.first?.isUppercase == true &&
+                            qualifier.dropFirst().allSatisfy { $0.isNumber }
+                        if qualifier != "Swift", qualifier != "Foundation", qualifier != mod,
+                           !isGenericPlaceholder, !selfDeclaredStubTypeNames.contains(qualifier) {
                             extraImports.insert(qualifier)
                         }
                     }
                 }
             }
+            // Real member signatures can also reference a system-framework type by its bare
+            // (unqualified) name — e.g. "CMTime", "CVBuffer", "IOSurface" — which the
+            // dotted-qualifier scan above never catches since there's no "Qualifier." prefix.
+            // Mirror resolveImports' (main.swift) same bare-name -> framework mappings for the
+            // system frameworks these dependency stubs have been observed to need.
+            if fileContent.containsWord("IOSurface") { extraImports.insert("IOSurface") }
+            if fileContent.containsWord("CVPixelBuffer") || fileContent.containsWord("CVBuffer") { extraImports.insert("CoreVideo") }
+            if fileContent.containsWord("CMTime") { extraImports.insert("CoreMedia") }
             if !extraImports.isEmpty {
                 let importLines = extraImports.sorted().map { "import \($0)\n" }.joined()
                 fileContent = fileContent.replacingOccurrences(
