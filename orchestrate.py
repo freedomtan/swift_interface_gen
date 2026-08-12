@@ -80,13 +80,16 @@ def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_
         bridge_h = f"{name}Interface_bridge.h"
         if not is_stub and os.path.exists(bridge_h):
             cmd_emit.append("-import-underlying-module")
-            
-        if not is_stub:
-            cmd_emit.extend([
-                "-enable-experimental-feature", "NonescapableTypes",
-                "-enable-experimental-feature", "Lifetimes"
-            ])
-            
+
+        # Stage B/C dependency-stub enrichment can render real members using
+        # ~Escapable types (Span) and @_lifetime annotations -- the real framework's
+        # own interface isn't stub-vs-real-aware about which features it needs, so
+        # these flags must be enabled unconditionally, not just for `not is_stub`.
+        cmd_emit.extend([
+            "-enable-experimental-feature", "NonescapableTypes",
+            "-enable-experimental-feature", "Lifetimes"
+        ])
+
         print("Running:", " ".join(cmd_emit))
         subprocess.check_call(cmd_emit)
     
@@ -130,12 +133,12 @@ def compile_framework(name, swift_source, is_stub=False, emit_module=True, emit_
             for obj in extra_objects:
                 cmd_lib.extend(["-Xlinker", obj])
             
+        cmd_lib.extend([
+            "-enable-experimental-feature", "NonescapableTypes",
+            "-enable-experimental-feature", "Lifetimes"
+        ])
+
         if not is_stub:
-            cmd_lib.extend([
-                "-enable-experimental-feature", "NonescapableTypes",
-                "-enable-experimental-feature", "Lifetimes"
-            ])
-            
             # Linker flags for symbol matching
             if use_exports:
                 exports_file = f"{name}_exports.txt"
@@ -241,13 +244,74 @@ def build_framework(name, is_target=False):
         shutil.rmtree(tmp_stubs_dir)
     os.makedirs(tmp_stubs_dir, exist_ok=True)
     
+    # The generator's dependency-stub enrichment (renderEnrichedType) filters out a member/
+    # conformance line that circularly references the module it's building stubs FOR
+    # (currentModule) -- but a real cross-target ABI cycle (e.g. TokenGenerationCore's own
+    # dependency chain reaches back into TokenGenerationCore via PromptKit/TokenGeneration) needs
+    # the SAME filter applied against every target currently on the build call stack, not just
+    # the innermost one. Pass the whole `building` set so the generator can filter against all of it.
+    stub_gen_env = dict(os.environ)
+    stub_gen_env["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"] = ",".join(sorted(building))
     subprocess.check_call([
         "./swift-interface-gen", tbd_path, "--generate-stubs", tmp_stubs_dir
-    ])
-    
+    ], env=stub_gen_env)
+
     # 3. Get list of generated stub modules
     stub_files = [f for f in os.listdir(tmp_stubs_dir) if f.endswith(".swift")]
     stub_modules = [f[:-6] for f in stub_files]
+
+    # Swift doesn't support mutually-importing modules at all -- enrichment (real members
+    # instead of empty skeletons) can surface a genuine import CYCLE purely among dependency
+    # stub modules themselves (e.g. GenerativeModelsFoundation -> GenerativeModels ->
+    # TokenGeneration -> GenerativeModelsFoundation), distinct from the target/currentModule
+    # cycle case above. Detect it by building a directed graph of stub modules' own "import"
+    # lines and running cycle detection; any module found in a cycle gets added to the SAME
+    # circular-module env var and the stub scan is re-run so the generator strips those
+    # back-references too, exactly like it already does for `building`.
+    def find_stub_import_cycles():
+        graph = {}
+        for f in stub_files:
+            mod = f[:-6]
+            deps = set()
+            with open(f"{tmp_stubs_dir}/{f}", "r") as sf:
+                for line in sf:
+                    if line.startswith("import "):
+                        d = line.split()[1].strip()
+                        if d in stub_modules and d != mod:
+                            deps.add(d)
+            graph[mod] = deps
+        in_cycle = set()
+        visited = set()
+        stack = []
+        on_stack = set()
+        def dfs(node):
+            visited.add(node)
+            stack.append(node)
+            on_stack.add(node)
+            for nxt in graph.get(node, ()):
+                if nxt in on_stack:
+                    cycle_start = stack.index(nxt)
+                    in_cycle.update(stack[cycle_start:])
+                elif nxt not in visited:
+                    dfs(nxt)
+            stack.pop()
+            on_stack.remove(node)
+        for node in graph:
+            if node not in visited:
+                dfs(node)
+        return in_cycle
+
+    cyclic_stub_modules = find_stub_import_cycles()
+    if cyclic_stub_modules:
+        print(f"  Detected stub-module import cycle: {sorted(cyclic_stub_modules)} -- regenerating with back-references stripped")
+        stub_gen_env["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"] = ",".join(sorted(building | cyclic_stub_modules))
+        shutil.rmtree(tmp_stubs_dir)
+        os.makedirs(tmp_stubs_dir, exist_ok=True)
+        subprocess.check_call([
+            "./swift-interface-gen", tbd_path, "--generate-stubs", tmp_stubs_dir
+        ], env=stub_gen_env)
+        stub_files = [f for f in os.listdir(tmp_stubs_dir) if f.endswith(".swift")]
+        stub_modules = [f[:-6] for f in stub_files]
     
     # 4. Run the generator to output the interface file
     interface_file = f"{name}Interface.swift"
@@ -284,30 +348,39 @@ def build_framework(name, is_target=False):
     if body_referenced_stubs:
         print(f"  Also building body-referenced stub modules: {sorted(body_referenced_stubs)}")
 
+    # Build a stub's own dependencies TRANSITIVELY, not just one level deep -- a stub whose
+    # real members were enriched (state-swapped re-parse) can import another stub module that
+    # itself imports a THIRD stub module (e.g. PromptKit -> GenerativeModelsFoundation ->
+    # GenerativeModels -> GenerativeFunctionsInstrumentation), and the third module's stub file
+    # already exists on disk (the generator's own transitive-discovery loop found and stubbed
+    # it) but was never built here because only dep's own direct imports were ever scanned.
+    def build_stub_and_its_deps(dep, stub_src, visiting=None):
+        if visiting is None:
+            visiting = set()
+        if dep in visiting:
+            return
+        visiting.add(dep)
+        stub_deps = []
+        with open(stub_src, "r") as sf:
+            for line in sf:
+                if line.startswith("import "):
+                    sdep = line.split()[1].strip()
+                    if sdep not in SYSTEM_MODULES and sdep != dep:
+                        stub_deps.append(sdep)
+        for sdep in stub_deps:
+            if sdep in TARGET_FRAMEWORKS:
+                build_framework(sdep)
+            elif sdep in stub_modules:
+                build_stub_and_its_deps(sdep, f"{tmp_stubs_dir}/{sdep}.swift", visiting)
+        build_framework_stub(dep, stub_src)
+
     all_deps_to_build = list(dependencies) + sorted(body_referenced_stubs)
     for dep in all_deps_to_build:
         if dep in TARGET_FRAMEWORKS:
             # Recursively build real target framework first
             build_framework(dep)
         elif dep in stub_modules:
-            # Build stub module
-            stub_src = f"{tmp_stubs_dir}/{dep}.swift"
-            # Scan stub_src for any imports to compile its dependencies first
-            stub_deps = []
-            with open(stub_src, "r") as sf:
-                for line in sf:
-                    if line.startswith("import "):
-                        sdep = line.split()[1].strip()
-                        if sdep not in SYSTEM_MODULES and sdep != dep:
-                            stub_deps.append(sdep)
-            # Build stub dependencies
-            for sdep in stub_deps:
-                if sdep in TARGET_FRAMEWORKS:
-                    build_framework(sdep)
-                elif sdep in stub_modules:
-                    build_framework_stub(sdep, f"{tmp_stubs_dir}/{sdep}.swift")
-            # Now compile this stub framework itself
-            build_framework_stub(dep, stub_src)
+            build_stub_and_its_deps(dep, f"{tmp_stubs_dir}/{dep}.swift")
 
     # 6.4 Some extensions on purely-synthetic submodules (e.g. IntelligencePlatformLibrary_
     # AppleInternal, which has no real .framework/.swiftinterface anywhere in the SDK) are only
@@ -338,7 +411,7 @@ def build_framework(name, is_target=False):
         os.makedirs(tmp_stubs_dir, exist_ok=True)
         subprocess.check_call([
             "./swift-interface-gen", tbd_path, "--generate-stubs", tmp_stubs_dir
-        ])
+        ], env=stub_gen_env)
         rescanned_stub_files = [f for f in os.listdir(tmp_stubs_dir) if f.endswith(".swift")]
         any_rebuilt = False
         for f in rescanned_stub_files:

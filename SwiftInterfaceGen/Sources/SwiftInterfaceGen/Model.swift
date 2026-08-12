@@ -103,7 +103,16 @@ class TypeNode {
         if cleanType.hasPrefix("Swift.") {
             cleanType = String(cleanType.dropFirst(6))
         }
-        if cleanType.hasPrefix("Optional<") || cleanType.hasSuffix("?") || cleanType == "Any?" {
+        if cleanType.hasPrefix("Optional<") || cleanType == "Any?" {
+            return "nil"
+        }
+        // A trailing "?" is only the whole type's own optionality if it isn't actually
+        // the optionality of a bare (unwrapped) function type's RETURN type, e.g.
+        // "(String) -> [String: Int]?" is a non-optional closure returning an optional
+        // dictionary, not an optional closure -- only "((String) -> Int)?" (paren-wrapped)
+        // is genuinely an optional function type. Defer the decision to the closure-type
+        // handling below when the type starts with "(".
+        if cleanType.hasSuffix("?") && !cleanType.hasPrefix("(") {
             return "nil"
         }
         if cleanType == "Bool" {
@@ -146,6 +155,12 @@ class TypeNode {
                 let argsPart = String(cleanType[cleanType.index(after: cleanType.startIndex)..<closeParen])
                     .trimmingCharacters(in: .whitespaces)
                 let afterParen = String(cleanType[cleanType.index(after: closeParen)...]).trimmingCharacters(in: .whitespaces)
+                // A paren-wrapped function type immediately followed by "?"/"!" (e.g.
+                // "((String) -> Int)?") is itself Optional, regardless of what's inside --
+                // no need to unwrap further.
+                if afterParen == "?" || afterParen == "!" {
+                    return "nil"
+                }
                 // afterParen is "-> ReturnType" or "throws -> ReturnType"
                 var retType = "Void"
                 if let arrowRange = afterParen.range(of: "->") {
@@ -745,10 +760,37 @@ class TypeNode {
             }
             if let parser = parser {
                 let baseName = clean.stripGenericAngles()
-                if parser.discoveredProtocols.contains(baseName) || 
+                if parser.discoveredProtocols.contains(baseName) ||
                    parser.discoveredProtocols.contains(where: { $0.hasSuffix("." + baseName) }) ||
                    baseName.hasSuffix("_P") {
                     clean = baseName
+                }
+                // simplifyType() (Parser.swift) strips a "defaultModule." prefix from a
+                // conformance PERMANENTLY into this cached TypeNode's stored string, at the
+                // module identity active when this type was FIRST parsed/enriched. When the same
+                // cached node is later rendered again under a DIFFERENT defaultModule (a
+                // dependency stub enriched once while building module X, then re-rendered while
+                // building module Y — Stage B/C's state-swapped re-parse is reused across
+                // multiple target builds), a now-bare name that isn't actually declared in Y's
+                // own module needs its real qualifier restored, or it's unresolvable. Only the
+                // BASE type name (no generics) is looked up; re-attach any stripped angle-bracket
+                // suffix afterward.
+                let bareBase = clean.stripGenericAngles()
+                let ownModuleTypeExists = parser.modules[parser.defaultModule]?.nestedTypes[bareBase] != nil
+                // A stdlib protocol name (e.g. "Sequence") is discovered under many modules'
+                // own `discoveredProtocols` entries during a single generator run (its protocol
+                // descriptor symbol appears in every framework that references it) -- picking
+                // whichever module happened to be first in that set as the "owning module" would
+                // wrongly qualify a bare stdlib name that should stay bare/Swift-prefixed only
+                // via the ordinary stdlib-handling path below, not this cross-module lookup.
+                let isWellKnownStdlibProtocol: Set<String> = ["Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Sendable", "Error", "CustomStringConvertible", "Comparable", "Sequence", "Collection", "Strideable", "Numeric", "SignedNumeric", "AdditiveArithmetic", "FloatingPoint", "BinaryFloatingPoint", "LosslessStringConvertible", "CaseIterable", "RawRepresentable", "CodingKey", "LocalizedError", "~Copyable", "IteratorProtocol", "AsyncSequence", "AsyncIteratorProtocol", "Actor", "AnyObject", "Identifiable", "AttributedStringKey"]
+                if !ownModuleTypeExists, !isWellKnownStdlibProtocol.contains(bareBase), !bareBase.isEmpty, bareBase.first?.isUppercase == true,
+                   let qualifiedMatch = parser.discoveredProtocols.first(where: { $0.hasSuffix("." + bareBase) }) {
+                    let owningModule = String(qualifiedMatch.dropLast(bareBase.count + 1))
+                    if !owningModule.isEmpty, owningModule != parser.defaultModule {
+                        let suffix = clean.dropFirst(bareBase.count)
+                        clean = "\(owningModule).\(bareBase)\(suffix)"
+                    }
                 }
             }
             if clean == "Error" {
@@ -980,6 +1022,10 @@ class TypeNode {
                 }
             }
 
+            // Offset by the enclosing type's own generic-param count so a nested generic type
+            // (e.g. GenerativeStream<A>.Iterator<A1>) doesn't reuse a placeholder letter already
+            // bound by an outer type — Swift rejects a nested generic param shadowing an outer one.
+            let parentPlaceholderOffset = getParentGenericCount(parser: parser)
             var params = [String]()
             for i in 0..<count {
                 if isProtocol {
@@ -989,8 +1035,9 @@ class TypeNode {
                         params.append(i < placeholders.count ? placeholders[i] : "A\(i)")
                     }
                 } else {
-                    if i < placeholders.count {
-                        let p = placeholders[i]
+                    let offsetIdx = i + parentPlaceholderOffset
+                    if offsetIdx < placeholders.count {
+                        let p = placeholders[offsetIdx]
                         if placeholdersNeedingSubscriber.contains(p) {
                             params.append("\(p): Subscriber")
                         } else if placeholdersNeedingPublisher.contains(p) {
@@ -1699,6 +1746,33 @@ class TypeNode {
                 // Fix nested iterator specialization
                 cleanedSig = cleanedSig.replacingOccurrences(of: "Iterator<GenericA>", with: "Iterator")
                 cleanedSig = cleanedSig.replacingOccurrences(of: "Iterator<Any>", with: "Iterator")
+
+                // A depth-suffixed placeholder (e.g. "A1") surviving into cleanedSig without ever
+                // going through Parser.swift's own generic-param-list branch (which only runs
+                // when the ABI's method path had an explicit "<...>" segment — a bare return-type
+                // reference like "next() -> A1?" never does) still needs the same translation:
+                // if its mangled depth is below THIS type's own context depth, it actually names
+                // an ancestor context's own param and must be rewritten to that context's real
+                // render-time letter, not treated as a new method-own generic.
+                if let parser = parser {
+                    let ownTypeName = self.getEnclosingPath().isEmpty ? self.name : self.getEnclosingPath() + "." + self.name
+                    let ownContextDepth = parser.genericContextDepth(typeName: ownTypeName)
+                    let contextOffsets = parser.contextPlaceholderOffsets(typeName: ownTypeName)
+                    let placeholderLetters = ["A", "B", "C", "D", "E", "F", "G"]
+                    for baseLetter in placeholderLetters {
+                        for depthSuffix in 1...3 {
+                            let p = "\(baseLetter)\(depthSuffix)"
+                            guard depthSuffix < ownContextDepth, depthSuffix < contextOffsets.count,
+                                  let baseIdx = placeholderLetters.firstIndex(of: baseLetter) else { continue }
+                            let realLetterIdx = contextOffsets[depthSuffix] + baseIdx
+                            guard realLetterIdx < placeholderLetters.count else { continue }
+                            let realLetter = placeholderLetters[realLetterIdx]
+                            if realLetter != p && cleanedSig.replaceWord(p, with: "").count < cleanedSig.count {
+                                cleanedSig = cleanedSig.replaceWord(p, with: realLetter)
+                            }
+                        }
+                    }
+                }
 
                 var methodGenericParams = [String]()
                 let potentialParams = ["A1", "B1", "C1", "D1", "A2", "B2", "C2", "D2"]

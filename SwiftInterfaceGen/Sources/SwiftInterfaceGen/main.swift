@@ -2448,6 +2448,19 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(
                 of: "NetworkBrowser<A>.RunResult<GenericA>",
                 with: "NetworkBrowser<A>.RunResult")
+            // discoveredNestedGenericPairs (Parser.swift's precompute()) sees the real ABI's
+            // "NetworkBrowser<A>.RunResult<A1>" case-witness symbols and correctly records
+            // RunResult as taking 1 own generic param — but this codebase's established
+            // workaround (above) keeps RunResult itself non-generic and instead lets its
+            // `finish(_:)` payload fall back to the global opaque `A1` placeholder struct.
+            // Undo the now-generic declaration/use-sites this produces so that workaround still
+            // applies cleanly.
+            c = c.replacingOccurrences(
+                of: "public enum RunResult<B>: Codable, Hashable, @unchecked Sendable {",
+                with: "public enum RunResult: Codable, Hashable, @unchecked Sendable {")
+            c = c.replacingOccurrences(
+                of: "public static func ==(_ lhs: RunResult<Any>, _ rhs: RunResult<Any>) -> Bool { fatalError() }",
+                with: "public static func ==(_ lhs: RunResult, _ rhs: RunResult) -> Bool { fatalError() }")
             // Fix 11: `QUIC.TLS` (nested) and top-level `TLS` are two different structs.
             // `PeerAuthentication` lives in the top-level `TLS`; methods inside `QUIC.TLS` reference
             // `TLS.PeerAuthentication` which Swift resolves as `QUIC.TLS.PeerAuthentication` — but
@@ -3574,6 +3587,195 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         }
     }
 
+    // Renders a real, enriched TypeNode (populated via the state-swapped re-parse in
+    // generateStubs) for a dependency stub, instead of StubNode's empty-skeleton fallback.
+    // Shared by generateStubs' main per-type emission loop and its same-module closure pass —
+    // both need the identical circular-self-reference filter and Stream/EventType handling.
+    static func renderEnrichedType(_ realNode: TypeNode, mod: String, currentModule: String, parser: Parser) -> String {
+        let savedDefaultModule = parser.defaultModule
+        parser.defaultModule = mod
+        // generateAll() (the real-target codegen path) always calls markGenericRecursive
+        // before rendering, so a type's own real generic-application usages (from
+        // discoveredGenerics, populated by precompute()) mark it isGeneric before generateCode()
+        // ever runs. This dependency's members were parsed via the same processSymbols/
+        // precompute() pipeline (generateStubs' state-swapped re-parse), so discoveredGenerics
+        // already has the right entries — but nothing previously called markGenericRecursive
+        // for a dependency's own types, so a real generic type like GenerativeStream<A> rendered
+        // as if non-generic (no <A> in its header) despite its own real members using <A>.
+        parser.markGenericRecursive(node: realNode)
+        var code = realNode.generateCode(indent: "", parser: parser)
+        parser.defaultModule = savedDefaultModule
+        // A member's real signature can genuinely reference the module we're building this
+        // stub FOR (currentModule) -- e.g. TokenGeneration.Prompt.renderPromptModules(...)
+        // returning [TokenGenerationCore.PromptModule] -- and this stub must compile
+        // standalone, before currentModule exists. It can also reference any OTHER real target
+        // currently on orchestrate.py's build call stack (SWIFT_INTERFACE_GEN_BUILDING_TARGETS,
+        // set by orchestrate.py to its `building` set) -- e.g. while resolving TokenGenerationCore
+        // -> PromptKit -> TokenGeneration (a stub), TokenGeneration's own real members can
+        // reference TokenGenerationCore itself, which is equally circular (TokenGenerationCore
+        // isn't built yet either, since we're still resolving ITS dependencies). Drop just the
+        // offending single-line members (every member here renders self-contained on one line,
+        // body included) rather than losing the whole type's enrichment.
+        var circularModules = Set([currentModule])
+        if let buildingEnv = ProcessInfo.processInfo.environment["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"], !buildingEnv.isEmpty {
+            circularModules.formUnion(buildingEnv.split(separator: ",").map(String.init))
+        }
+        let memberLinePrefixes = ["public func ", "public static func ", "public final func ",
+                                   "public override func ", "public class func ", "public var ",
+                                   "public final var ", "public static var ", "public override var ",
+                                   "public let ", "public final let ", "public init", "public required init",
+                                   "public convenience init", "public subscript",
+                                   "public typealias ", "case ", "nonisolated public "]
+        let declLinePrefixes = ["public struct ", "public final class ", "public class ",
+                                 "public enum ", "@_fixed_layout public class "]
+        code = code.split(separator: "\n", omittingEmptySubsequences: false).compactMap { line -> Substring? in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard circularModules.contains(where: { trimmed.contains("\($0).") }) else { return line }
+            if memberLinePrefixes.contains(where: { trimmed.hasPrefix($0) }) {
+                return nil
+            }
+            // A type's own declaration line (e.g. "public struct PromptTemplate: Codable,
+            // PromptKit.ChatMessagePromptConvertible {") can conform to a protocol declared in
+            // a circular module -- genuinely circular the same way a member signature can be
+            // (this stub compiles standalone before that module exists), but dropping the whole
+            // TYPE would lose all its other real enrichment. Strip just the offending
+            // comma-separated conformance entries from the inheritance clause instead.
+            if declLinePrefixes.contains(where: { trimmed.hasPrefix($0) }), trimmed.hasSuffix("{") {
+                guard let colonIdx = line.firstIndex(of: ":") else { return line }
+                let head = String(line[..<colonIdx])
+                let bodyStart = line.index(after: colonIdx)
+                let inheritancePart = String(line[bodyStart..<line.index(before: line.endIndex)])
+                let entries = inheritancePart.splitByCommaRespectingBrackets().map { $0.trimmingCharacters(in: .whitespaces) }
+                let kept = entries.filter { entry in !circularModules.contains(where: { entry.contains("\($0).") }) }
+                if kept.count == entries.count { return line }
+                if kept.isEmpty {
+                    return Substring(head + " {")
+                }
+                return Substring(head + ": " + kept.joined(separator: ", ") + " {")
+            }
+            return line
+        }.joined(separator: "\n")
+        // Mirrors StubNode.generateSwift's own handling: a type given a native Stream
+        // conformance (the AppleIntelligenceReporting lazySource<A> hook, above) needs
+        // Stream's "associatedtype EventType" requirement satisfied — generateCode() has no
+        // knowledge of this synthetic conformance's associated-type requirement, since it's
+        // injected after the type's own real members were already parsed. Any nested type
+        // several levels deep can independently gain this conformance (each has its own
+        // TypeNode.conformances set), so insert per matching declaration LINE (", Stream {"/
+        // ", Stream," in the type's own inheritance clause), not just once for the top type.
+        if code.contains(" Stream ") || code.contains(" Stream,") || code.contains(" Stream{") || code.contains(" Stream {") {
+            let lines = code.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            var result = [String]()
+            for line in lines {
+                result.append(line)
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                let declaresStream = trimmed.range(of: #"\bStream\b"#, options: .regularExpression) != nil &&
+                    (trimmed.contains(": ") || trimmed.contains(", ")) && trimmed.hasSuffix("{")
+                if declaresStream {
+                    let indent = String(line.prefix(while: { $0 == " " }))
+                    result.append("\(indent)    public typealias EventType = Any")
+                }
+            }
+            code = result.joined(separator: "\n")
+        }
+        // generateAll() (the real-target codegen path) always runs postProcess's
+        // removePrivateObjCTypeReferences() before writing output — this path renders the same
+        // TypeNode.generateCode() output but never went through postProcess, so a member
+        // referencing a private/undeclared C typedef left qualified as "__C.snake_case" by
+        // simplifyType (e.g. ModelManagerServices.AuditToken.init(__C.audit_token_t)) survives
+        // into the stub and fails to compile ("cannot find type '__C' in scope" once __C isn't
+        // otherwise visible in a standalone dependency-stub module).
+        code = code.removePrivateObjCTypeReferences()
+        // simplifyType() (Parser.swift) strips a "defaultModule." prefix from EVERY type
+        // reference — not just conformances — PERMANENTLY into this cached TypeNode's stored
+        // member-signature strings, using whichever module identity was active the FIRST time
+        // this type was parsed/enriched. When the same cached node is rendered again for a
+        // DIFFERENT target build (Stage B/C's state-swapped re-parse is reused across multiple
+        // target builds), a bare name from that original stripping can be flat-out wrong here —
+        // e.g. "Prompt.Component.Value" (originally "PromptKit.Prompt...") rendered while
+        // building TokenGenerationCore, where "Prompt" isn't visible unqualified. Conformances
+        // are already re-qualified at TRUE render time (TypeNode.generateCode's inheritsList
+        // construction, Model.swift) since that list is rebuilt fresh each call; member
+        // signatures are cached as flat strings much earlier and can't cheaply get the same
+        // treatment, so re-qualify bare foreign-module type names as a text-level pass here
+        // instead — bounded to this one rendering path, not a Parser-wide behavior change.
+        code = requalifyBareForeignTypeNames(code, mod: mod, parser: parser)
+        // simplifyType()'s ambiguous-protocol disambiguation (Parser.swift, "any
+        // ___SHIELDED_<module>___.Foo") is a TEMPORARY placeholder meant to survive just long
+        // enough to bypass module-prefix stripping, then get restored to "any <module>.Foo" by
+        // postProcess (main.swift's generateAll() path only) before being written out. This
+        // stub-rendering path never went through postProcess, so an unrestored placeholder
+        // ("___SHIELDED_ModelCatalog___") can leak straight into the compiled stub as an
+        // unresolvable bare type name.
+        code = code.replacingOccurrences(of: "___SHIELDED_\(mod)___", with: mod)
+        return code
+    }
+
+    // Scans `code` for a bare (unqualified) capitalized identifier that isn't declared in `mod`
+    // itself but IS a real top-level type in some OTHER known module, and qualifies it. Bounded
+    // to top-level type names only (not nested paths) to keep false-positive risk low — a nested
+    // path segment (e.g. the ".Component" in "Prompt.Component") is left alone since only the
+    // leading segment can be an unqualified cross-module reference here.
+    static func requalifyBareForeignTypeNames(_ code: String, mod: String, parser: Parser) -> String {
+        var result = code
+        guard let bareIdentRegex = try? NSRegularExpression(pattern: "(?<![.A-Za-z0-9_])([A-Z][A-Za-z0-9_]*)\\b", options: []) else { return result }
+        let ownModuleTypeNames: Set<String> = parser.modules[mod].map { Set($0.nestedTypes.keys) } ?? []
+        // Well-known Swift stdlib protocol/attribute names are never legitimately "owned" by
+        // some other private-framework module even if that module's own conformance-injection
+        // logic (applyTypeFixups etc.) happens to record them against a nestedTypes entry --
+        // requalifying "Sendable" would corrupt "@Sendable" attribute syntax into
+        // "@Swift.Sendable" (an unknown attribute), and similarly for the others below.
+        let stdlibNames: Set<String> = ["Sendable", "Equatable", "Hashable", "Codable", "Decodable",
+            "Encodable", "Identifiable", "BitwiseCopyable", "Copyable", "Escapable", "Error",
+            "CustomStringConvertible", "CustomDebugStringConvertible", "Comparable", "Sequence",
+            "Collection", "Strideable", "Numeric", "SignedNumeric", "AdditiveArithmetic",
+            "FloatingPoint", "BinaryFloatingPoint", "LosslessStringConvertible", "CaseIterable",
+            "RawRepresentable", "CodingKey", "LocalizedError", "Actor", "AnyObject", "Optional",
+            "Array", "Dictionary", "Set", "Result", "Never", "Void",
+            // Handled by its own dedicated fallback (the same-module closure pass's
+            // newlyFoundOpaqueStruct case, main.swift) -- XPC has no real swiftinterface/tbd in
+            // this SDK, so parser.modules["XPC"] can still hold a nestedTypes entry for
+            // "XPCCodableObject" purely from a findOrCreateType() call site treating a
+            // referenced (not independently declared) path as if it were one; requalifying
+            // against that phantom entry produces "XPC.XPCCodableObject", which doesn't exist.
+            "XPCCodableObject"]
+        // A name this SAME stub file declares (nested at any depth, e.g. "public enum Streams {"
+        // inside "public enum BiomeStreams.Streams" from an earlier bug) must never be
+        // requalified — replaceWord below has no notion of declaration vs. reference sites and
+        // would corrupt "enum Streams {" into "enum BiomeStreams.Streams {" (invalid syntax).
+        var selfDeclaredNames = Set<String>()
+        // "associatedtype Foo: Bound" is also a DECLARATION, not a reference -- e.g.
+        // "associatedtype ModelConfiguration: Hashable" must never become
+        // "associatedtype TokenGenerationCore.ModelConfiguration" (invalid: an associated
+        // type's own name can never be dotted), even if some OTHER real module happens to
+        // separately declare a same-named top-level type.
+        if let declRegex = try? NSRegularExpression(pattern: "\\b(?:struct|enum|class|protocol|associatedtype) `?([A-Za-z_][A-Za-z0-9_]*)`?", options: []) {
+            let declNsRange = NSRange(result.startIndex..<result.endIndex, in: result)
+            for m in declRegex.matches(in: result, options: [], range: declNsRange) {
+                if let r = Range(m.range(at: 1), in: result) {
+                    selfDeclaredNames.insert(String(result[r]))
+                }
+            }
+        }
+        var seen = Set<String>()
+        let nsRange = NSRange(result.startIndex..<result.endIndex, in: result)
+        for m in bareIdentRegex.matches(in: result, options: [], range: nsRange) {
+            guard let range = Range(m.range(at: 1), in: result) else { continue }
+            let name = String(result[range])
+            guard !seen.contains(name), name != mod, name != "Swift", name != "Foundation",
+                  !ownModuleTypeNames.contains(name), !selfDeclaredNames.contains(name),
+                  !stdlibNames.contains(name) else { continue }
+            seen.insert(name)
+            // "__C" is the synthetic ObjC-bridge pseudo-module (registerObjcClasses), never a
+            // real importable module -- a bare ObjC-bridged name is deliberately left
+            // unqualified elsewhere (the same-module closure pass emits a local placeholder
+            // class for it), so requalifying against "__C" would break that existing handling.
+            guard let owningModule = parser.modules.first(where: { $0.key != mod && $0.key != "__C" && $0.value.nestedTypes[name] != nil })?.key else { continue }
+            result = result.replaceWord(name, with: "\(owningModule).\(name)", allowPrecededByDot: false)
+        }
+        return result
+    }
+
     static func generateStubs(outputCode: String, currentModule: String, outputDir: String, parser: Parser) {
         try? outputCode.write(toFile: "/tmp/finalCode_\(currentModule)_first_run.swift", atomically: true, encoding: .utf8)
         var externalTypes = [String: [(typeName: String, isProtocol: Bool, genericCount: Int)]]()
@@ -3874,22 +4076,41 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             "\(sdkRoot)/System/Library/SubFrameworks",
             "\(sdkRoot)/System/Library/Frameworks"
         ]
-        for mod in externalTypes.keys {
-            var tbdContent: String? = nil
-            for searchPath in tbdSearchPaths {
-                let paths = [
-                    "\(searchPath)/\(mod).framework/\(mod).tbd",
-                    "\(searchPath)/\(mod).framework/Versions/A/\(mod).tbd",
-                    "\(searchPath)/\(mod).framework/Versions/Current/\(mod).tbd"
-                ]
-                for p in paths {
-                    if let c = try? String(contentsOfFile: p, encoding: .utf8) {
-                        tbdContent = c; break
+
+        // Loading a dependency's own .tbd and enriching it with real members (below) can reveal
+        // that one of its real member signatures references a THIRD module's type/protocol that
+        // was never part of the original externalTypes scan (nothing in the target's own
+        // interface ever mentioned it) — e.g. IntelligencePlatformLibrary's real members
+        // reference BiomeStreams.DataResource, but BiomeStreams was never otherwise discovered
+        // as a dependency of TokenGenerationCore. Loop: load+enrich every currently-known
+        // module, scan the newly-enriched real member signatures for private-framework type
+        // references, add any newly-discovered ones to externalTypes, and repeat until a full
+        // pass finds nothing new (fixed point) or a safety cap is hit — mirroring
+        // orchestrate.py's own build_framework rescan loop (max_rescan_passes), which solves a
+        // structurally similar "discovered too late" problem one level up, at the process level.
+        var processedTbdModules = Set<String>()
+        let maxTransitiveDepth = 10
+        for _ in 0..<maxTransitiveDepth {
+            let modsToLoad = Set(externalTypes.keys).subtracting(processedTbdModules)
+            if modsToLoad.isEmpty { break }
+
+            for mod in modsToLoad {
+                processedTbdModules.insert(mod)
+                var tbdContent: String? = nil
+                for searchPath in tbdSearchPaths {
+                    let paths = [
+                        "\(searchPath)/\(mod).framework/\(mod).tbd",
+                        "\(searchPath)/\(mod).framework/Versions/A/\(mod).tbd",
+                        "\(searchPath)/\(mod).framework/Versions/Current/\(mod).tbd"
+                    ]
+                    for p in paths {
+                        if let c = try? String(contentsOfFile: p, encoding: .utf8) {
+                            tbdContent = c; break
+                        }
                     }
+                    if tbdContent != nil { break }
                 }
-                if tbdContent != nil { break }
-            }
-            if let content = tbdContent {
+                guard let content = tbdContent else { continue }
                 let depSymbols = extractSymbols(from: content)
                 var depDemangledMap: [(mangled: String, demangled: String)] = []
                 for sym in depSymbols {
@@ -3898,8 +4119,127 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     }
                 }
                 parser.discoverNominalTypes(demangledMap: depDemangledMap, currentModule: mod)
+                // A dependency's own real members can reference an ObjC class (mangled "So...C",
+                // e.g. IntelligencePlatformLibrary's BMSQLColumn) that's only ever registered via
+                // this same objc-classes:-scanning mechanism (used at real-target-processing time
+                // for the primary target and its depth-1 reexported libraries, main.swift ~51/60)
+                // — without it, the class is genuinely undeclared anywhere and the enriched
+                // member referencing it fails to compile. Register under "__C" (matching the
+                // reexported-library convention) so it's visible bare, unqualified, exactly like
+                // any other ObjC-bridged type.
+                registerObjcClasses(from: content, parser: parser, module: "__C")
+
+                // Additionally run this dependency's own symbols through the SAME
+                // precompute/default-argument-prepass/parse pipeline used for the real target
+                // (processSymbols), so its real members land in TypeNode.members instead of
+                // being silently dropped. parse() gates member routing on
+                // `getTopLevelModule(for: node) == primaryTargetModule` (Parser.swift) — with
+                // primaryTargetModule/defaultModule still pointing at the top-level target,
+                // every declaration native to this dependency looks "external" and never
+                // reaches `.members`. Temporarily repoint both (defaultModule is read
+                // pervasively by TypeNode.generateCode, not just primaryTargetModule) at the
+                // dependency while processing its symbols, then restore.
+                //
+                // Known accepted gap: processSymbols() no-ops if parser.processedModules
+                // already contains `mod` (e.g. it was already pulled in once as a depth-1
+                // reexported library of the real target, under the WRONG primaryTargetModule) —
+                // such a dependency silently falls back to the empty-skeleton stub below rather
+                // than being force-reprocessed, since forcing a second pass over accumulating
+                // parser state (tbdSymbols, symbolEscapingMap, defaultArgMap) not designed for
+                // multiple passes over one module risks corrupting it in ways that are harder to
+                // reason about than the empty-skeleton fallback this replaces.
+                if !parser.processedModules.contains(mod) {
+                    let savedPrimaryTarget = parser.primaryTargetModule
+                    let savedDefaultModule = parser.defaultModule
+                    let savedPrecomputeModule = parser.currentPrecomputeModule
+                    parser.primaryTargetModule = mod
+                    parser.defaultModule = mod
+                    processSymbols(depSymbols, parser: parser, module: mod, depth: 1)
+                    parser.primaryTargetModule = savedPrimaryTarget
+                    parser.defaultModule = savedDefaultModule
+                    parser.currentPrecomputeModule = savedPrecomputeModule
+                }
             }
+
+            // Scan every enriched module's real member signatures AND conformances for
+            // private-framework type references not yet in externalTypes, using the same
+            // dotted-path pattern used to scan the target's own interface further up this
+            // function — this replaces the old one-shot conformance-only BFS (which only ever
+            // walked the ORIGINAL externalTypes, before any dependency enrichment existed) by
+            // running every pass against the current, growing externalTypes set instead.
+            var foundNewTypeInThisPass = false
+            func collectMemberSignatureText(_ node: TypeNode) -> String {
+                var text = node.conformances.joined(separator: "\n") + "\n"
+                for member in node.members.values {
+                    switch member {
+                    case .initializer(let s): text += s + "\n"
+                    case .method(_, let s, _): text += s + "\n"
+                    case .property(_, let t, _, _): text += t + "\n"
+                    case .enumCase(_, let payload, _): text += (payload ?? "") + "\n"
+                    case .associatedType(let s): text += s + "\n"
+                    case .other: break
+                    }
+                }
+                for nested in node.nestedTypes.values {
+                    text += collectMemberSignatureText(nested)
+                }
+                return text
+            }
+            for mod in Set(externalTypes.keys) {
+                guard let modNode = parser.modules[mod] else { continue }
+                for topType in modNode.nestedTypes.values {
+                    let text = collectMemberSignatureText(topType)
+                    guard !text.isEmpty else { continue }
+                    // The type-name capture (group 2) allows a leading underscore (e.g.
+                    // GenerativeFunctions._StreamSanitizer) -- Swift's ABI-internal protocol
+                    // naming convention prefixes some real, publicly-referenceable protocols
+                    // with "_", and requiring an uppercase first character silently excluded
+                    // them from transitive discovery, leaving the referencing module's own
+                    // conformance unresolvable.
+                    if let regex = try? NSRegularExpression(pattern: "(?<!\\.)\\b([A-Z][a-zA-Z0-9_$]*)\\.(_?[A-Z][a-zA-Z0-9_]*(?:\\._?[A-Z][a-zA-Z0-9_]*)*)", options: []) {
+                        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+                        for m in regex.matches(in: text, options: [], range: nsRange) {
+                            guard let modRange = Range(m.range(at: 1), in: text),
+                                  let restRange = Range(m.range(at: 2), in: text) else { continue }
+                            let refMod = String(text[modRange])
+                            guard refMod != mod, refMod != currentModule, refMod != "Swift", refMod != "Foundation" else { continue }
+                            let isPrivateFw = FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/PrivateFrameworks/\(refMod).framework") ||
+                                              FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(refMod).framework")
+                            guard isPrivateFw else { continue }
+                            // Keep the FULL dotted path (e.g. "BiomeStreams.LibraryArtifact.
+                            // DataArtifact"), matching how the original target-interface scan
+                            // (pathPattern, above) captures nested-type references — a namespace-
+                            // only type like LibraryArtifact can have zero symbols of its own
+                            // (no nominal type descriptor), existing purely as a path prefix for
+                            // its real nested case-types, so truncating to the first segment
+                            // would stub an empty, disconnected LibraryArtifact and never
+                            // discover DataArtifact/Table as their own StubNode entries.
+                            let fullPath = String(text[restRange])
+                            let fullTypeName = "\(refMod).\(fullPath)"
+                            let alreadyKnown = (externalTypes[refMod] ?? []).contains { $0.typeName == fullTypeName }
+                            if !alreadyKnown {
+                                var isProto = false
+                                if let confNode = parser.findTypeNode(module: refMod, path: fullPath.components(separatedBy: ".")) {
+                                    isProto = (confNode.kind == "protocol")
+                                }
+                                externalTypes[refMod, default: []].append((typeName: fullTypeName, isProtocol: isProto, genericCount: 0))
+                                foundNewTypeInThisPass = true
+                            }
+                        }
+                    }
+                }
+            }
+            if !foundNewTypeInThisPass && modsToLoad.isEmpty { break }
         }
+
+        // Collected across ALL modules' hoists below — a protocol hoisted out of ITS OWN
+        // module's nested path (e.g. BiomeStreams.LibraryArtifact.DataArtifact ->
+        // BiomeStreams.DataArtifact) must also be rewritten wherever a DIFFERENT module's stub
+        // (e.g. IntelligencePlatformLibrary) references the original nested path, so the rename
+        // is applied as a final pass over every generated fileContent, after all modules have
+        // been processed and all hoists are known.
+        var allHoistedProtocolRenames = [(originalDottedPath: String, name: String)]()
+        var fileContentsByModule = [String: String]()
 
         for (mod, items) in externalTypes {
             print("Stubbing: \(mod) has \(items.count) items: \(items.map { $0.typeName })", to: &Self.standardError)
@@ -3973,6 +4313,14 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                             "SoftwareUpdateController", "UnifiedAssetFramework", "Step", "InstrumentationEvent",
                             "ModelIO"].contains(part) {
                             node.conformances.append("Stream")
+                            // If this type ends up rendered from real, enriched member data
+                            // (generateCode(), not this StubNode's own generateSwift()), the
+                            // conformance injected above onto the StubNode never reaches the
+                            // actual output — generateCode() reads TypeNode.conformances, a
+                            // separate set. Mirror the injection onto the real TypeNode too.
+                            if let realTypeNode = parser.findTypeNode(module: mod, path: pathSoFar) {
+                                realTypeNode.conformances.insert("Stream")
+                            }
                         }
                         // IntelligencePlatformLibrary_AppleInternal.InternalLibrary.Streams.
                         // AppleIntelligence.Reporting.ModelIO has zero real ABI ground truth
@@ -4003,7 +4351,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             
             var topLevelProtocols = [StubNode]()
             var topLevelTypes = [StubNode]()
-            
+
             for child in root.nested.values {
                 let fullPath = "\(mod).\(child.name)"
                 if child.isProtocol || child.kind == "protocol" || protocolAssociatedTypes[fullPath] != nil ||
@@ -4014,6 +4362,35 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 } else {
                     topLevelTypes.append(child)
                 }
+            }
+
+            // Swift never permits a type declaration nested inside a protocol body (unlike
+            // struct/class/enum, which can all nest each other and protocols freely) — a
+            // protocol-kind StubNode discovered several nesting levels deep (e.g.
+            // BiomeStreams.LibraryArtifact.DataArtifact, a protocol nested under the
+            // namespace-only enum LibraryArtifact) must be hoisted out to a top-level
+            // declaration instead of staying in its parent's `nested` dict, or the emitted stub
+            // fails to compile ("type 'X' cannot be nested in protocol"/"cannot be nested in
+            // struct" etc. for whatever nests it). Walk every top-level type's descendants,
+            // remove any protocol-kind node from its parent, and promote it into
+            // topLevelProtocols under its own top-level StubNode name (StubNode.name is only
+            // the LEAF segment, so promoted protocols keep their real short name — a same-named
+            // collision across two different nesting paths is not resolved here and is an
+            // accepted, unlikely-in-practice limitation of this hoist).
+            func hoistNestedProtocols(_ node: StubNode, pathSoFar: [String]) {
+                for (key, child) in node.nested {
+                    let childPath = pathSoFar + [child.name]
+                    if child.isProtocol || child.kind == "protocol" {
+                        node.nested.removeValue(forKey: key)
+                        topLevelProtocols.append(child)
+                        allHoistedProtocolRenames.append((originalDottedPath: "\(mod).\(childPath.joined(separator: "."))", name: child.name))
+                    } else {
+                        hoistNestedProtocols(child, pathSoFar: childPath)
+                    }
+                }
+            }
+            for t in topLevelTypes {
+                hoistNestedProtocols(t, pathSoFar: [t.name])
             }
             
             for proto in topLevelProtocols.sorted(by: { $0.name < $1.name }) {
@@ -4054,7 +4431,94 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             }
             
             for t in topLevelTypes.sorted(by: { $0.name < $1.name }) {
-                fileContent += t.generateSwift(depth: 0) + "\n"
+                // If this dependency was additionally run through the real parse() pipeline
+                // above, its TypeNode carries real members/nested types (generateCode()
+                // self-recurses into nestedTypes, so a single top-level call renders the whole
+                // nested tree) — render those instead of StubNode's empty-skeleton fallback, so
+                // the stub's ABI shape actually matches the real dependency.
+                if let realNode = parser.findTypeNode(module: mod, path: [t.name]), !realNode.members.isEmpty {
+                    let code = renderEnrichedType(realNode, mod: mod, currentModule: currentModule, parser: parser)
+                    fileContent += code + "\n"
+                } else {
+                    fileContent += t.generateSwift(depth: 0) + "\n"
+                }
+            }
+
+            // Enriching a type with real members (above) can surface a bare reference to a
+            // SIBLING type/protocol declared in this SAME module (mod) that was never part of
+            // the original externalTypes scan, because nothing in the target's own interface
+            // ever mentioned it as dotted "mod.Foo" text — e.g. IntelligencePlatformLibrary's
+            // real StreamResource protocol, referenced bare ("any StreamResource.Type") from an
+            // enriched member, with no other type in this stub ever conforming to or importing
+            // it. Do a same-module closure pass: scan the assembled body for bare capitalized
+            // identifiers not already declared here, and if parser has real (enriched) data for
+            // that name under `mod`, emit its declaration too. This does not reach into a THIRD
+            // module's own incomplete stub (that cross-module case is a distinct, larger problem
+            // — see the import-inference comment below, which papers over it with a plain
+            // "import Qualifier" instead of a real declaration).
+            var knownStubTypeNames = Set(topLevelTypes.map { $0.name } + topLevelProtocols.map { $0.name })
+            var closurePassBudget = 20
+            while closurePassBudget > 0 {
+                closurePassBudget -= 1
+                var newlyFound = [String]()
+                var newlyFoundObjc = [String]()
+                var newlyFoundOpaqueStruct = [String]()
+                // A same-module reference discovered via the enrichment pass (renderEnrichedType)
+                // can be permanently baked into its cached signature string as "mod.Name" — the
+                // TypeNode's member-signature text is computed once under whatever defaultModule
+                // was active at first parse and reused verbatim (see requalifyBareForeignTypeNames'
+                // header comment for the general shape of this caching quirk) — so a bare-identifier
+                // scan alone misses it. Allow an optional "<mod>." qualifier directly before the
+                // identifier without excluding it (unlike a genuinely foreign "OtherMod.Name",
+                // which must stay excluded so this pass doesn't reach into a third module's stub).
+                let qualifiedModPrefix = "(?:\(NSRegularExpression.escapedPattern(for: mod))\\.)?"
+                if let bareIdentRegex = try? NSRegularExpression(pattern: "(?<![.A-Za-z0-9_])\(qualifiedModPrefix)([A-Z][A-Za-z0-9_]*)\\b", options: []) {
+                    let nsRange = NSRange(fileContent.startIndex..<fileContent.endIndex, in: fileContent)
+                    for m in bareIdentRegex.matches(in: fileContent, options: [], range: nsRange) {
+                        if let range = Range(m.range(at: 1), in: fileContent) {
+                            let name = String(fileContent[range])
+                            guard !knownStubTypeNames.contains(name), name != mod, name != "Swift", name != "Foundation" else { continue }
+                            if let realNode = parser.findTypeNode(module: mod, path: [name]), !realNode.members.isEmpty || realNode.kind == "protocol" {
+                                newlyFound.append(name)
+                            } else if parser.findTypeNode(module: "__C", path: [name]) != nil {
+                                // A bare ObjC class (registered under "__C" above) referenced by
+                                // an enriched member — no Swift-visible declaration exists
+                                // anywhere for it beyond its bare name, so a minimal opaque
+                                // placeholder is the correct (not just expedient) fix here, not
+                                // a workaround: this mirrors how the real target itself renders
+                                // an ObjC-bridged type it can't otherwise describe.
+                                newlyFoundObjc.append(name)
+                            } else if name == "XPCCodableObject" {
+                                // Real ABI-visible (via swift-demangle) as XPC.XPCCodableObject,
+                                // but XPC has no swiftinterface/tbd in this SDK at all — the type
+                                // is genuinely undeclared anywhere reachable. generateAll() (the
+                                // primary-target path) already falls back to a local opaque
+                                // struct for this exact case; mirror that here for the dependency-
+                                // stub path, which never went through that fallback.
+                                newlyFoundOpaqueStruct.append(name)
+                            }
+                        }
+                    }
+                }
+                if newlyFound.isEmpty && newlyFoundObjc.isEmpty && newlyFoundOpaqueStruct.isEmpty { break }
+                for name in Set(newlyFoundObjc) {
+                    knownStubTypeNames.insert(name)
+                    fileContent += "public class \(name) {}\n"
+                }
+                for name in Set(newlyFoundOpaqueStruct) {
+                    knownStubTypeNames.insert(name)
+                    fileContent += "public struct \(name): Hashable, Codable, Sendable {}\n"
+                }
+                for name in Set(newlyFound) {
+                    knownStubTypeNames.insert(name)
+                    guard let realNode = parser.findTypeNode(module: mod, path: [name]) else { continue }
+                    if realNode.kind == "protocol" {
+                        fileContent += "public protocol \(name) {}\n"
+                    } else {
+                        let code = renderEnrichedType(realNode, mod: mod, currentModule: currentModule, parser: parser)
+                        fileContent += code + "\n"
+                    }
+                }
             }
 
             // A stub type's conformance/generic-bound list can reference a THIRD module's
@@ -4083,24 +4547,47 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     }
                 }
             }
+            // The qualifier must not be preceded by a "." — otherwise a long dotted chain like
+            // "BiomeStreams.LibraryArtifact.DataArtifact.Type" gets matched twice by a plain
+            // \b-anchored scan (NSRegularExpression matches don't overlap): once correctly for
+            // "BiomeStreams", then again starting fresh at "DataArtifact.Type", misreading the
+            // nested-type segment "DataArtifact" as if it were its own top-level module
+            // qualifier. A "(?<!\\.)" lookbehind restricts matches to the true first segment of
+            // each dotted chain.
             var extraImports = Set<String>()
-            if let regex = try? NSRegularExpression(pattern: "\\b([A-Z][A-Za-z0-9_]*)\\.[A-Z][A-Za-z0-9_]*", options: []) {
+            if let regex = try? NSRegularExpression(pattern: "(?<!\\.)\\b([A-Z][A-Za-z0-9_]*)\\.[A-Z][A-Za-z0-9_]*", options: []) {
                 let nsRange = NSRange(fileContent.startIndex..<fileContent.endIndex, in: fileContent)
                 let matches = regex.matches(in: fileContent, options: [], range: nsRange)
                 for m in matches {
                     if let range = Range(m.range(at: 1), in: fileContent) {
                         let qualifier = String(fileContent[range])
-                        // A bare generic placeholder (the "A"/"B"/"C"... convention used
-                        // throughout this generator, e.g. StubNode's own
-                        // ["A","B","C","D","E","F"] placeholders above) can appear immediately
-                        // before a dotted member/metatype access ("A.Type", "A.Element") in a
+                        // A bare generic placeholder can appear immediately before a dotted
+                        // member/metatype access ("A.Type", "A.Element", "GenericA.Type") in a
                         // real method signature — that's a type-parameter reference, not a
                         // module-qualified type, and must not be treated as an import target.
-                        let isGenericPlaceholder = qualifier.count <= 3 &&
+                        // Covers both this generator's own two placeholder-naming conventions:
+                        // the short "A"/"B"/"C"... form (StubNode's own placeholders) and the
+                        // "GenericA"/"GenericB"... form (Model.swift's disambiguation rename,
+                        // used when a placeholder collides with an in-scope name).
+                        let isGenericPlaceholder = (qualifier.count <= 3 &&
                             qualifier.first?.isUppercase == true &&
-                            qualifier.dropFirst().allSatisfy { $0.isNumber }
+                            qualifier.dropFirst().allSatisfy { $0.isNumber }) ||
+                            (qualifier.hasPrefix("Generic") && qualifier.count <= 9 &&
+                             qualifier.dropFirst("Generic".count).allSatisfy { $0.isUppercase || $0.isNumber })
+                        // A bare capitalized identifier before a dot can also be a real
+                        // Swift/Foundation top-level type (e.g. "Locale.LanguageCode",
+                        // "Locale.Language") rather than a module qualifier — Foundation is
+                        // always imported unconditionally (main.swift, "import Foundation\n\n"),
+                        // so these resolve without any extra import. Only treat the qualifier as
+                        // an import target if it's an actual private framework on disk;
+                        // otherwise the name is either already visible (Swift/Foundation, or a
+                        // sibling type in this same stub) or is a mis-parsed placeholder.
+                        let qualifierIsPrivateFramework = FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/PrivateFrameworks/\(qualifier).framework") ||
+                                                           FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(qualifier).framework") ||
+                                                           FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/Frameworks/\(qualifier).framework")
                         if qualifier != "Swift", qualifier != "Foundation", qualifier != mod,
-                           !isGenericPlaceholder, !selfDeclaredStubTypeNames.contains(qualifier) {
+                           !isGenericPlaceholder, !selfDeclaredStubTypeNames.contains(qualifier),
+                           qualifierIsPrivateFramework {
                             extraImports.insert(qualifier)
                         }
                     }
@@ -4112,6 +4599,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             // Mirror resolveImports' (main.swift) same bare-name -> framework mappings for the
             // system frameworks these dependency stubs have been observed to need.
             if fileContent.containsWord("IOSurface") { extraImports.insert("IOSurface") }
+            if fileContent.containsWord("OSAllocatedUnfairLock") { extraImports.insert("os") }
             if fileContent.containsWord("CVPixelBuffer") || fileContent.containsWord("CVBuffer") { extraImports.insert("CoreVideo") }
             if fileContent.containsWord("CMTime") { extraImports.insert("CoreMedia") }
             if !extraImports.isEmpty {
@@ -4121,9 +4609,37 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     with: "import Foundation\n" + importLines + "\n")
             }
 
+            // injectDefaultArguments/simplifyType's default-value fallback (Model.swift) emits
+            // "= dummyDefaultValue()" for a parameter with no reconstructable literal default.
+            // generateAll() (the primary-target path) declares this generic helper once in its
+            // own output — but a Swift default-argument thunk's mangled symbol always resolves
+            // the default EXPRESSION in the declaring type's OWN module, so a dependency stub
+            // using this fallback needs its own local copy, not a cross-module import (which
+            // wouldn't satisfy the thunk's symbol lookup even if it compiled).
+            if fileContent.contains("dummyDefaultValue()") {
+                fileContent += "\npublic func dummyDefaultValue<T>() -> T { fatalError() }\n"
+            }
+
+            fileContentsByModule[mod] = fileContent
+        }
+
+        // Apply every hoist rename (collected across ALL modules above) to every module's
+        // generated text — a protocol hoisted out of ITS OWN module's nested path (e.g.
+        // BiomeStreams.LibraryArtifact.DataArtifact -> BiomeStreams.DataArtifact) can be
+        // referenced by a DIFFERENT module's stub (e.g. IntelligencePlatformLibrary) using the
+        // original nested path, which no longer exists once hoisted.
+        for (mod, content) in fileContentsByModule {
+            var updated = content
+            for rename in allHoistedProtocolRenames {
+                guard let moduleSegment = rename.originalDottedPath.components(separatedBy: ".").first else { continue }
+                let newPath = "\(moduleSegment).\(rename.name)"
+                if updated.contains(rename.originalDottedPath) {
+                    updated = updated.replacingOccurrences(of: rename.originalDottedPath, with: newPath)
+                }
+            }
             let filePath = "\(outputDir)/\(mod).swift"
             do {
-                try fileContent.write(toFile: filePath, atomically: true, encoding: .utf8)
+                try updated.write(toFile: filePath, atomically: true, encoding: .utf8)
                 print("Generated stub source for \(mod) at \(filePath)", to: &Self.standardError)
             } catch {
                 print("Error: Could not write stub file to \(filePath)", to: &Self.standardError)

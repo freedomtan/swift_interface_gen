@@ -16,6 +16,13 @@ class Parser {
     ]
 
     var discoveredGenerics = [String: Int]() // [DottedType: Count]
+    // Precise pair-keyed record of a nested type's OWN generic-ness, populated only from a
+    // literal "Outer<...>.Inner<...>" chained-application text match (see precompute()) — keyed
+    // on "OuterShortName.InnerShortName" so it never collides with an unrelated type elsewhere
+    // that happens to share the same bare inner short name (e.g. HealthKit has both a genuinely
+    // generic Foo.Iterator<X> and a non-generic Bar.Iterator with zero own params — a bare-name
+    // fallback keyed only on "Iterator" can't distinguish them; this can).
+    var discoveredNestedGenericPairs = [String: Int]() // ["Outer.Inner": count]
     // Nodes seen via a bare "nominal type descriptor for X" symbol with no other context —
     // candidates for the Hashable/Codable/Sendable default-conformance fallback, applied only
     // if the node still has zero real conformances once all symbols have been parsed.
@@ -245,7 +252,29 @@ class Parser {
             let currentMax = discoveredGenerics[name] ?? 0
             discoveredGenerics[name] = max(currentMax, count)
         }
-        
+
+        // Precisely record a chained "Outer<...>.Inner<...>" nested generic APPLICATION as an
+        // exact (OuterShortName, InnerShortName) pair — scanGenericTypeApplications() only
+        // records the bare "Inner" name for the second application (its name-backtrack stops at
+        // the ">" boundary), which is too ambiguous to safely mark an unrelated same-named type
+        // generic elsewhere (see markGenericRecursive's comment). Matching the literal adjacency
+        // "...>.Word<" directly recovers the true owning outer type for this specific pair.
+        if let pairRegex = try? NSRegularExpression(pattern: "([A-Z][A-Za-z0-9_$]*)<[^<>]*>\\.([A-Z][A-Za-z0-9_$]*)<([^<>]*(?:<[^<>]*>[^<>]*)*)>", options: []) {
+            let nsRange = NSRange(demangled.startIndex..<demangled.endIndex, in: demangled)
+            for m in pairRegex.matches(in: demangled, options: [], range: nsRange) {
+                guard let outerRange = Range(m.range(at: 1), in: demangled),
+                      let innerRange = Range(m.range(at: 2), in: demangled),
+                      let paramsRange = Range(m.range(at: 3), in: demangled) else { continue }
+                let outer = String(demangled[outerRange])
+                let inner = String(demangled[innerRange])
+                let params = String(demangled[paramsRange])
+                let count = countTopLevelCommas(in: params)
+                let key = "\(outer).\(inner)"
+                let currentMax = discoveredNestedGenericPairs[key] ?? 0
+                discoveredNestedGenericPairs[key] = max(currentMax, count)
+            }
+        }
+
         // Infer namespaces and verify they actually exist as frameworks in the SDK
         let namespaces = demangled.scanNamespaces()
         for ns in namespaces {
@@ -401,6 +430,15 @@ class Parser {
                 total += count
             } else if let count = discoveredGenerics[currentPath] {
                 total += count
+            } else if i > 0, let count = discoveredNestedGenericPairs["\(parts[i-1]).\(parts[i])"] {
+                // discoveredNestedGenericPairs (precompute()'s exact "Outer.Inner" pair scan)
+                // recovers a chained application like "Outer<A>.Inner<A1>" — scanGenericType
+                // Applications() only ever records the bare "Inner" name for it, which isn't
+                // precise enough to safely fall back on (an unrelated type elsewhere can share
+                // that bare short name with a completely different, non-generic same-named
+                // nested type). The pair key is exact, so no adjacency/parent-chain guard is
+                // needed here.
+                total += count
             }
         }
         return total
@@ -415,6 +453,54 @@ class Parser {
         // The naming is misleading — this is actually `parentGenericCount` of the type itself
         // used as a threshold for depth-based param selection.
         return parentGenericCount(typeName: typeName)
+    }
+
+    // Swift's mangler assigns each nested generic type its own numbered "depth" (context) —
+    // depth 0 for a top-level generic type, depth 1 for a generic type nested one level inside
+    // another generic type, etc — independent of how many params each context declares. A
+    // method mangled with a depth-suffixed placeholder (e.g. "A1") belongs to the method's OWN
+    // generic parameter list only if that depth is >= the number of generic CONTEXTS in the
+    // type's own nesting chain (own context included); otherwise the placeholder actually names
+    // an enclosing type's own generic param. parentGenericCount() sums param COUNTS across
+    // ancestors, which coincidentally equals context count only when every context has exactly
+    // one param — use this instead wherever the threshold must be true context depth (e.g.
+    // GenerativeStream<A>.Iterator<A1>'s "next() -> A1?", where A1 is Iterator's OWN param, not
+    // a method-own generic, even though pCount==2 there).
+    func genericContextDepth(typeName: String) -> Int {
+        return contextPlaceholderOffsets(typeName: typeName).count
+    }
+
+    // Returns, for each generic CONTEXT in typeName's ancestor+self chain (in mangled-depth
+    // order — shallowest ancestor first), the placeholder-letter offset that context's OWN
+    // params start at, matching the same left-to-right placeholder assignment used at render
+    // time (getOwnGenericCount/getParentGenericCount in Model.swift). E.g. for
+    // "GenerativeStream.Iterator" where GenerativeStream has 1 own param and Iterator has 1 own
+    // param: offsets == [0, 1] (GenerativeStream's own param is letter index 0 = "A", Iterator's
+    // is index 1 = "B") — used to translate a depth-suffixed placeholder like "A1" (mangled
+    // depth 1, base letter index 0) into the real render-time letter for that context.
+    func contextPlaceholderOffsets(typeName: String) -> [Int] {
+        let clean = cleanType(typeName)
+        let parts = clean.components(separatedBy: ".")
+        var offsets = [Int]()
+        var cumulative = 0
+        var currentPath = ""
+        for i in 0..<parts.count {
+            if !currentPath.isEmpty { currentPath += "." }
+            currentPath += parts[i]
+            let fullPath1 = defaultModule + "." + currentPath
+            let count: Int?
+            if let c = discoveredGenerics[fullPath1] { count = c }
+            else if let c = discoveredGenerics[currentPath] { count = c }
+            // discoveredNestedGenericPairs is an exact "Outer.Inner" key — see the matching
+            // comment in parentGenericCount above — so no adjacency/parent-chain guard needed.
+            else if i > 0, let c = discoveredNestedGenericPairs["\(parts[i-1]).\(parts[i])"] { count = c }
+            else { count = nil }
+            if let count = count {
+                offsets.append(cumulative)
+                cumulative += count
+            }
+        }
+        return offsets
     }
 
     static func getMangledModule(_ mangled: String) -> String? {
@@ -1074,7 +1160,16 @@ class Parser {
                             let beforeWhere = String(cleanGenericPart[..<whereRange.lowerBound])
                             let afterWhere = String(cleanGenericPart[whereRange.upperBound...])
                             let clauseBody = afterWhere.hasSuffix(">") ? String(afterWhere.dropLast()) : afterWhere
-                            methodWhereClause = " where " + simplifyType(clauseBody)
+                            // A generic-parameter conformance constraint ("T: any Foo") is
+                            // invalid Swift -- "any" only makes sense at a value/property/
+                            // parameter TYPE position (an existential type), never inside a
+                            // where-clause constraint, which must name the bare protocol. This
+                            // mirrors the same ": any " -> ": " cleanup already applied to
+                            // extension-level constraints elsewhere in this function.
+                            var simplifiedClause = simplifyType(clauseBody)
+                            simplifiedClause = simplifiedClause.replacingOccurrences(of: ": any ", with: ": ")
+                            simplifiedClause = simplifiedClause.replacingOccurrences(of: ":any ", with: ": ")
+                            methodWhereClause = " where " + simplifiedClause
                             cleanGenericPart = beforeWhere + ">"
                         }
                         
@@ -1143,15 +1238,41 @@ class Parser {
                             for p in existingParams {
                                 allPlaceholders.insert(p)
                             }
-                            
-                            // Swift's mangler suffixes a generic placeholder with "1" whenever it
-                            // belongs to the method's own generic context (depth 1), regardless of
-                            // how many generic params the owning type itself has (pCount). So the
-                            // threshold is always depth >= 1, not depth >= pCount.
+
+                            // Swift's mangler numbers each generic CONTEXT (nesting level) with
+                            // its own depth, starting at 0 for the outermost generic type — a
+                            // method's own generic params get the FIRST depth beyond the type's
+                            // own nesting chain, i.e. depth >= genericContextDepth(tempTypeName).
+                            // A depth suffix below that threshold names an ANCESTOR type's own
+                            // param (e.g. GenerativeStream<A>.Iterator<A1>'s next() -> A1? — A1 is
+                            // depth 1, which is Iterator's own context, not the method's).
+                            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                            // Depth 0 always means "the type's own first generic context" (Self,
+                            // for a protocol, whose genericContextDepth is 0 since protocols
+                            // aren't tracked in discoveredGenerics) — never a method-own param.
+                            // The threshold must have a floor of 1 to preserve that, even though
+                            // a nested concrete generic type's real context depth can be higher.
+                            let methodOwnThreshold = max(1, genericContextDepth(typeName: tempTypeName))
+                            let contextOffsets = contextPlaceholderOffsets(typeName: tempTypeName)
                             var methodOnlyParams = [String]()
                             for p in allPlaceholders.sorted() {
-                                if getDepth(p) >= 1 {
+                                let d = getDepth(p)
+                                if d >= methodOwnThreshold {
                                     methodOnlyParams.append(p)
+                                } else if d < contextOffsets.count, let baseLetter = p.first,
+                                          let baseIdx = placeholders.firstIndex(of: String(baseLetter)) {
+                                    // A sub-threshold depth-suffixed placeholder actually names an
+                                    // ancestor context's own param — translate it to the real
+                                    // letter that context renders at (contextOffsets[d] + baseIdx),
+                                    // matching Model.swift's own left-to-right letter assignment.
+                                    let realLetterIdx = contextOffsets[d] + baseIdx
+                                    if realLetterIdx < placeholders.count {
+                                        let realLetter = placeholders[realLetterIdx]
+                                        if realLetter != p {
+                                            signatureRaw = signatureRaw.replaceWord(p, with: realLetter, allowPrecededByDot: false)
+                                            methodWhereClause = methodWhereClause.replaceWord(p, with: realLetter, allowPrecededByDot: false)
+                                        }
+                                    }
                                 }
                             }
                             existingParams = methodOnlyParams
@@ -1162,7 +1283,7 @@ class Parser {
                         } else {
                             cleanGenericPart = ""
                         }
-                        
+
                         methodGenericsPart = cleanGenericPart
                         fullMemberPath = typePath
                     }
@@ -1313,7 +1434,12 @@ class Parser {
                             let beforeWhere = String(genericPart[..<whereRange.lowerBound])
                             let afterWhere = String(genericPart[whereRange.upperBound...])
                             let clauseBody = afterWhere.hasSuffix(">") ? String(afterWhere.dropLast()) : afterWhere
-                            methodWhereClause = " where " + simplifyType(clauseBody)
+                            // See the matching comment at the other methodWhereClause site
+                            // above: "T: any Foo" is invalid Swift in a where-clause constraint.
+                            var simplifiedClause = simplifyType(clauseBody)
+                            simplifiedClause = simplifiedClause.replacingOccurrences(of: ": any ", with: ": ")
+                            simplifiedClause = simplifiedClause.replacingOccurrences(of: ":any ", with: ": ")
+                            methodWhereClause = " where " + simplifiedClause
                             genericPart = beforeWhere + ">"
                         }
                         
@@ -1382,11 +1508,30 @@ class Parser {
                             for p in existingParams {
                                 allPlaceholders.insert(p)
                             }
-                            
+
+                            // See the matching comment at the other pCount/getDepth call site
+                            // above: the threshold is the type's own generic-context depth (with
+                            // a floor of 1, since depth 0 always means Self for a protocol) — a
+                            // subscript on a nested generic type (context depth > 1) would
+                            // otherwise misclassify an ancestor's own param as method-own.
+                            let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                            let methodOwnThreshold = max(1, genericContextDepth(typeName: typeName))
+                            let contextOffsets = contextPlaceholderOffsets(typeName: typeName)
                             var methodOnlyParams = [String]()
                             for p in allPlaceholders.sorted() {
-                                if getDepth(p) >= 1 {
+                                let d = getDepth(p)
+                                if d >= methodOwnThreshold {
                                     methodOnlyParams.append(p)
+                                } else if d < contextOffsets.count, let baseLetter = p.first,
+                                          let baseIdx = placeholders.firstIndex(of: String(baseLetter)) {
+                                    let realLetterIdx = contextOffsets[d] + baseIdx
+                                    if realLetterIdx < placeholders.count {
+                                        let realLetter = placeholders[realLetterIdx]
+                                        if realLetter != p {
+                                            signatureRaw = signatureRaw.replaceWord(p, with: realLetter, allowPrecededByDot: false)
+                                            methodWhereClause = methodWhereClause.replaceWord(p, with: realLetter, allowPrecededByDot: false)
+                                        }
+                                    }
                                 }
                             }
                             existingParams = methodOnlyParams
@@ -2526,6 +2671,37 @@ class Parser {
         }
     }
 
+    // Marks node and its nested types isGeneric based on discoveredGenerics (populated by
+    // precompute() from real generic-type-application usages seen anywhere in this module's
+    // symbols). Uses defaultModule as one of its two lookup key forms, so the caller must have
+    // defaultModule already pointing at the module `node` actually belongs to.
+    func markGenericRecursive(node: TypeNode) {
+        let enclosing = node.getEnclosingPath()
+        let relativeName = enclosing.isEmpty ? node.name : enclosing + "." + node.name
+        let fullPath1 = defaultModule + "." + relativeName
+        let fullPath2 = relativeName
+        // scanGenericTypeApplications() stops its name-backtrack at a `>` boundary, so a chained
+        // application like "GenerativeStream<A>.Iterator<A1>" only ever records the bare nested
+        // name ("Iterator"), never the qualified "GenerativeStream.Iterator" path. Fall back to
+        // discoveredNestedGenericPairs (precompute()'s exact "Outer.Inner" pair scan) for nested
+        // types so real independent generic-ness on a nested type isn't lost. This is precise —
+        // keyed on the EXACT immediate-parent-plus-self pair, not just node.name — so it can't
+        // collide with an unrelated type elsewhere sharing the same short name (e.g. HealthKit
+        // has both a genuinely non-generic HKAnchoredObjectQueryDescriptor.Result and some other
+        // unrelated *.Result<T> elsewhere; a bare "Result" lookup can't tell them apart, but the
+        // pair key "HKAnchoredObjectQueryDescriptor.Result" can).
+        let pairKey = "\(node.parent?.name ?? "").\(node.name)"
+        let pairMatch = !enclosing.isEmpty && discoveredNestedGenericPairs[pairKey] != nil
+        if discoveredGenerics[fullPath1] != nil || discoveredGenerics[fullPath2] != nil || pairMatch {
+             if !node.name.hasPrefix("JSON") {
+                  node.isGeneric = true
+             }
+        }
+        for nested in node.nestedTypes.values {
+            markGenericRecursive(node: nested)
+        }
+    }
+
     func generateAll() -> String {
         applyTypeFixups()
 
@@ -2551,21 +2727,6 @@ class Parser {
         let shimHeader = ""
         var output = shimHeader
         var definedTypes = Set<String>()
-        
-        func markGenericRecursive(node: TypeNode) {
-            let enclosing = node.getEnclosingPath()
-            let relativeName = enclosing.isEmpty ? node.name : enclosing + "." + node.name
-            let fullPath1 = defaultModule + "." + relativeName
-            let fullPath2 = relativeName
-            if discoveredGenerics[fullPath1] != nil || discoveredGenerics[fullPath2] != nil {
-                 if !node.name.hasPrefix("JSON") {
-                      node.isGeneric = true
-                 }
-            }
-            for nested in node.nestedTypes.values {
-                markGenericRecursive(node: nested)
-            }
-        }
 
         let sortedModuleNames = modules.keys.sorted()
         
@@ -2852,11 +3013,14 @@ class Parser {
                             if defaultModule == "HealthKit" && moduleName == "__C" {
                                 output += "public typealias \(type.name)\(gps) = \(flattenedName)\(gps)\n"
                             }
-                            // Same root cause, different module: Vision's Serialization.decode/
-                            // encode reference bare XPCCodableObject, but that type doesn't exist
-                            // anywhere in the real XPC module (checked its swiftinterface directly)
-                            // — it's ABI-visible only inside Vision's own private declarations.
-                            if defaultModule == "Vision" && moduleName == "XPC" && type.name == "XPCCodableObject" {
+                            // Same root cause, different module: any framework can reference bare
+                            // XPCCodableObject (Vision's Serialization.decode/encode; also seen
+                            // enriching dependency stubs like ModelManagerServices), but the type
+                            // doesn't exist anywhere in the real XPC module (checked its
+                            // swiftinterface directly) — it's ABI-visible only inside each
+                            // framework's own private declarations. Not scoped to a specific
+                            // defaultModule since the type is genuinely absent from XPC everywhere.
+                            if moduleName == "XPC" && type.name == "XPCCodableObject" {
                                 output += "public typealias \(type.name)\(gps) = \(flattenedName)\(gps)\n"
                             }
                         }
@@ -3400,11 +3564,23 @@ class Parser {
         if trimmed.hasSuffix("?") || trimmed.hasPrefix("Optional<") || trimmed.hasSuffix("!") {
             if trimmed.hasSuffix("?") {
                 let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
-                return escapeClosures(in: inner, isTopLevelParameter: isTopLevelParameter, isEscaping: isEscaping) + "?"
+                let processedInner = escapeClosures(in: inner, isTopLevelParameter: isTopLevelParameter, isEscaping: isEscaping)
+                // The demangler prints a whole-closure-is-Optional type as a bare trailing "?"
+                // with no enclosing parens, e.g. "(String) -> Int?" -- this actually means
+                // "the closure itself is Optional", not "the closure's return type is
+                // Optional", so the "?" must bind to the whole (parenthesized) closure type.
+                if isNonOptionalFunctionType(inner) {
+                    return "(" + processedInner + ")?"
+                }
+                return processedInner + "?"
             }
             if trimmed.hasSuffix("!") {
                 let inner = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
-                return escapeClosures(in: inner, isTopLevelParameter: isTopLevelParameter, isEscaping: isEscaping) + "!"
+                let processedInner = escapeClosures(in: inner, isTopLevelParameter: isTopLevelParameter, isEscaping: isEscaping)
+                if isNonOptionalFunctionType(inner) {
+                    return "(" + processedInner + ")!"
+                }
+                return processedInner + "!"
             }
             if trimmed.hasPrefix("Optional<") && trimmed.hasSuffix(">") {
                 let inner = String(trimmed.dropFirst(9).dropLast()).trimmingCharacters(in: .whitespaces)
@@ -3641,25 +3817,37 @@ class Parser {
     }
 
     func isConcreteTypeNonGeneric(shortName: String) -> Bool {
-        func check(node: TypeNode) -> Bool? {
+        // Collects EVERY node across every module sharing this short name, not just the first —
+        // multiple unrelated types can share a short name (e.g. CoreAIRuntime has both a generic
+        // NDArrayDescriptor.MutableView<A> and a non-generic InferenceValue.MutableView). Only
+        // the first match used to be checked, so which one "won" depended on nondeterministic
+        // dictionary iteration order over modules.values — when the generic one won, this
+        // wrongly reported the UNRELATED non-generic type as "not concrete-non-generic" too,
+        // causing applyDiscoveredGenerics' bare-word scan to inject a bogus "<Any>" onto every
+        // bare occurrence of the short name, including the genuinely non-generic type's own
+        // synthesized `==` operator (producing an uncompilable "MutableView<Any>" reference to
+        // a type declared with no generic parameters at all).
+        func collect(node: TypeNode, into results: inout [Bool]) {
             if node.name == shortName {
-                return !node.isGeneric
+                results.append(node.isGeneric)
             }
             for child in node.nestedTypes.values {
-                if let res = check(node: child) {
-                    return res
-                }
+                collect(node: child, into: &results)
             }
-            return nil
         }
+        var results = [Bool]()
         for module in modules.values {
             for type in module.nestedTypes.values {
-                if let res = check(node: type) {
-                    return res
-                }
+                collect(node: type, into: &results)
             }
         }
-        return false
+        guard !results.isEmpty else { return false }
+        // If every same-named node agrees, trust that verdict. If they disagree (the ambiguous
+        // multi-type case), return true ("treat as non-generic concrete") so the caller SKIPS
+        // adding this short name to flatGenerics/shortGenerics entirely — the bare-word scan
+        // must never touch a short name that's ambiguous between a generic and a non-generic
+        // type, since it can't tell which occurrence is which.
+        return results.allSatisfy { !$0 } || (results.contains(true) && results.contains(false))
     }
 }
 
