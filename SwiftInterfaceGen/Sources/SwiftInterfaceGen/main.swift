@@ -1924,6 +1924,17 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             // is the new base class and its designated initializers must be called.
             c = c.replacingOccurrences(of: "public required init?(coder: NSCoder) {}",
                                         with: "public required init?(coder: NSCoder) { super.init(coder: coder) }")
+            // HitchTimeRatio is likewise a Dimension subclass (real module: `final public class
+            // HitchTimeRatio: Foundation.Dimension`) — Parser.swift sets its baseClass
+            // accordingly, but the ABI-driven class-header text still renders it with the
+            // NSObject/NSCoding-subclass shape (redundant NSCoding conformance, non-`open`
+            // visibility+finality). Apply the same header substitution SignalBars needed above.
+            if let regex = try? NSRegularExpression(
+                pattern: "@_fixed_layout open class HitchTimeRatio:\\s*NSObject,\\s*NSCoding", options: []) {
+                c = regex.stringByReplacingMatches(
+                    in: c, range: NSRange(c.startIndex..<c.endIndex, in: c),
+                    withTemplate: "@_fixed_layout final public class HitchTimeRatio: Foundation.Dimension")
+            }
         }
 
         // Fix: SwiftData's DefaultHistoryDelete<A>/DefaultHistoryInsert<A>/DefaultHistoryUpdate<A>
@@ -1958,8 +1969,16 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 of: "public struct ResultsSection<A, B>: BidirectionalCollection, Collection, Identifiable, RandomAccessCollection, Sequence {",
                 with: "public struct ResultsSection<A, B>: BidirectionalCollection, Collection, Identifiable, RandomAccessCollection, Sequence where B: Hashable {\n    public typealias ID = B")
             c = c.replacingOccurrences(
+                of: "public struct ResultsSection<A, B>: BidirectionalCollection, Collection, Equatable, Identifiable, RandomAccessCollection, Sequence {",
+                with: "public struct ResultsSection<A, B>: BidirectionalCollection, Collection, Equatable, Identifiable, RandomAccessCollection, Sequence where B: Hashable {\n    public typealias ID = B")
+            c = c.replacingOccurrences(
                 of: "public struct ResultsSectionCollection<A, B>: BidirectionalCollection, Collection, RandomAccessCollection, Sequence {",
                 with: "public struct ResultsSectionCollection<A, B>: BidirectionalCollection, Collection, RandomAccessCollection, Sequence where B: Hashable {")
+            // SectionedResults<Element, SectionTitle> wraps [ResultsSection<A, B>] internally,
+            // which itself now requires B: Hashable (real module: `where SectionTitle: Hashable`).
+            c = c.replacingOccurrences(
+                of: "public struct SectionedResults<A, B>: BidirectionalCollection, Collection, Equatable, RandomAccessCollection, Sequence {",
+                with: "public struct SectionedResults<A, B>: BidirectionalCollection, Collection, Equatable, RandomAccessCollection, Sequence where B: Hashable {")
             c = c.replacingOccurrences(
                 of: "@_fixed_layout final public class ResultsObserver<A, B>: CustomDebugStringConvertible, Observation.Observable {",
                 with: "@_fixed_layout final public class ResultsObserver<A, B>: CustomDebugStringConvertible, Observation.Observable where B: Hashable {")

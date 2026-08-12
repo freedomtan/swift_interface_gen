@@ -2437,6 +2437,13 @@ class Parser {
             if let node = modules["MetricKit"]?.nestedTypes["AveragePixelLuminance"] {
                 node.baseClass = "Foundation.Dimension"
             }
+            // HitchTimeRatio is a Foundation.Dimension subclass in the real module (per the
+            // real .swiftinterface), same as AveragePixelLuminance/SignalBars — the ABI alone
+            // (no NSObject-vs-Dimension distinction visible from symbols) makes the generator
+            // default it to a plain NSObject/NSCoding subclass instead.
+            if let node = modules["MetricKit"]?.nestedTypes["HitchTimeRatio"] {
+                node.baseClass = "Foundation.Dimension"
+            }
         }
 
         if defaultModule == "Network" {
