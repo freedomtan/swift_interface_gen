@@ -3606,11 +3606,28 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         }
     }
 
+    static func pruneSelfDeclaredExtensionTypes(_ node: TypeNode, pathSoFar: String, selfDeclaredExtensionTypes: Set<String>) {
+        node.nestedTypes = node.nestedTypes.filter { name, childNode in
+            let fullPath = "\(pathSoFar).\(name)"
+            let isSelfDeclared = selfDeclaredExtensionTypes.contains {
+                fullPath == $0 || fullPath.hasPrefix($0 + ".")
+            }
+            if isSelfDeclared {
+                return false
+            }
+            pruneSelfDeclaredExtensionTypes(childNode, pathSoFar: fullPath, selfDeclaredExtensionTypes: selfDeclaredExtensionTypes)
+            return true
+        }
+    }
+
     // Renders a real, enriched TypeNode (populated via the state-swapped re-parse in
     // generateStubs) for a dependency stub, instead of StubNode's empty-skeleton fallback.
     // Shared by generateStubs' main per-type emission loop and its same-module closure pass —
     // both need the identical circular-self-reference filter and Stream/EventType handling.
-    static func renderEnrichedType(_ realNode: TypeNode, mod: String, currentModule: String, parser: Parser) -> String {
+    static func renderEnrichedType(_ realNode: TypeNode, mod: String, currentModule: String, parser: Parser, selfDeclaredExtensionTypes: Set<String> = []) -> String {
+        if !selfDeclaredExtensionTypes.isEmpty {
+            pruneSelfDeclaredExtensionTypes(realNode, pathSoFar: "\(mod).\(realNode.name)", selfDeclaredExtensionTypes: selfDeclaredExtensionTypes)
+        }
         let savedDefaultModule = parser.defaultModule
         parser.defaultModule = mod
         // generateAll() (the real-target codegen path) always calls markGenericRecursive
@@ -3705,6 +3722,18 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         // into the stub and fails to compile ("cannot find type '__C' in scope" once __C isn't
         // otherwise visible in a standalone dependency-stub module).
         code = code.removePrivateObjCTypeReferences()
+        if !selfDeclaredExtensionTypes.isEmpty {
+            for extType in selfDeclaredExtensionTypes {
+                let parts = extType.components(separatedBy: ".")
+                if parts.count >= 2 {
+                    let shortName = parts.suffix(2).joined(separator: ".")
+                    let leafName = parts.last!
+                    code = code.replacingOccurrences(of: extType, with: "Any")
+                    code = code.replacingOccurrences(of: shortName, with: "Any")
+                    code = code.replaceWord(leafName, with: "Any")
+                }
+            }
+        }
         // simplifyType() (Parser.swift) strips a "defaultModule." prefix from EVERY type
         // reference — not just conformances — PERMANENTLY into this cached TypeNode's stored
         // member-signature strings, using whichever module identity was active the FIRST time
@@ -3792,6 +3821,36 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             guard let owningModule = parser.modules.first(where: { $0.key != mod && $0.key != "__C" && $0.value.nestedTypes[name] != nil })?.key else { continue }
             result = result.replaceWord(name, with: "\(owningModule).\(name)", allowPrecededByDot: false)
         }
+        // A reference can also be WRONGLY qualified rather than bare -- e.g. a demangled ABI
+        // symbol names a return type "PromptKit.Prompt.Component.Value" because the SYMBOL
+        // itself belongs to PromptKit (GenerativeModelsFoundation.SelfAttention.toValue()'s own
+        // mangled name embeds that qualifier), even though "Prompt" is actually declared in
+        // TokenGeneration (which PromptKit imports/depends on) -- simplifyType's defaultModule
+        // stripping never touches this since the qualifier isn't `mod` here, so it survives
+        // verbatim into the stub as an unresolvable cross-module reference. Detect a qualifier
+        // that isn't a real module owning that type name, and correct it to whichever module
+        // actually declares it.
+        if let wrongQualifierRegex = try? NSRegularExpression(pattern: "\\b([A-Z][A-Za-z0-9_]*)\\.([A-Z][A-Za-z0-9_]*)\\b", options: []) {
+            var corrections = [(wrong: String, right: String)]()
+            let wqNsRange = NSRange(result.startIndex..<result.endIndex, in: result)
+            for m in wrongQualifierRegex.matches(in: result, options: [], range: wqNsRange) {
+                guard let qualRange = Range(m.range(at: 1), in: result),
+                      let nameRange = Range(m.range(at: 2), in: result) else { continue }
+                let qualifier = String(result[qualRange])
+                let name = String(result[nameRange])
+                guard qualifier != mod, qualifier != "Swift", qualifier != "Foundation", qualifier != "__C",
+                      !stdlibNames.contains(name) else { continue }
+                // Only correct a qualifier that's a KNOWN module (real target/dependency) but
+                // doesn't itself declare this name -- an unrecognized qualifier could be a
+                // legitimate nested-type path segment (e.g. "Outer.Inner"), not a module prefix.
+                guard parser.modules[qualifier] != nil, parser.modules[qualifier]?.nestedTypes[name] == nil else { continue }
+                guard let rightModule = parser.modules.first(where: { $0.key != qualifier && $0.key != mod && $0.key != "__C" && $0.value.nestedTypes[name] != nil })?.key else { continue }
+                corrections.append((wrong: "\(qualifier).\(name)", right: "\(rightModule).\(name)"))
+            }
+            for (wrong, right) in corrections where wrong != right {
+                result = result.replacingOccurrences(of: wrong, with: right)
+            }
+        }
         return result
     }
 
@@ -3810,6 +3869,48 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         // name — read it here so the stub declares "associatedtype <Name>" under the same
         // placeholder position instead of a bare "A".
         let primaryAssociatedTypeNames = parser.primaryAssociatedTypeNames
+        var selfDeclaredExtensionTypes = Set<String>(parser.selfDeclaredExternalExtensionPaths)
+        let outputLines = outputCode.components(separatedBy: .newlines)
+        var activeExtPrefix: String? = nil
+        var currentDepth = 0
+
+        for line in outputLines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            
+            if currentDepth == 0 && trimmed.hasPrefix("extension ") {
+                let afterExt = trimmed.dropFirst("extension ".count).trimmingCharacters(in: .whitespaces)
+                let header = afterExt.components(separatedBy: CharacterSet(charactersIn: " :{")).first ?? ""
+                if header.contains(".") {
+                    let mod = header.components(separatedBy: ".")[0]
+                    if mod != currentModule {
+                        activeExtPrefix = header
+                    }
+                }
+            }
+            
+            let opens = line.filter { $0 == "{" }.count
+            let closes = line.filter { $0 == "}" }.count
+            currentDepth += (opens - closes)
+            
+            if let extPrefix = activeExtPrefix, currentDepth > 0 {
+                if trimmed.hasPrefix("public enum ") || trimmed.hasPrefix("public struct ") ||
+                   trimmed.hasPrefix("public class ") || trimmed.hasPrefix("public typealias ") ||
+                   trimmed.hasPrefix("enum ") || trimmed.hasPrefix("struct ") ||
+                   trimmed.hasPrefix("class ") || trimmed.hasPrefix("typealias ") {
+                    let words = trimmed.components(separatedBy: CharacterSet.whitespaces.union(CharacterSet(charactersIn: ":<({")))
+                    let keywords: Set<String> = ["public", "private", "fileprivate", "internal", "enum", "struct", "class", "typealias", "@unchecked", "Sendable", "@objc", "final", "indirect", ""]
+                    let nonKeyWords = words.filter { !keywords.contains($0) }
+                    if let nestedName = nonKeyWords.first {
+                        let fullPath = "\(extPrefix).\(nestedName)"
+                        selfDeclaredExtensionTypes.insert(fullPath)
+                    }
+                }
+            }
+            
+            if currentDepth == 0 {
+                activeExtPrefix = nil
+            }
+        }
 
         var constraintTypes = Set<String>()
         // 1. Parse 'where' constraints
@@ -3934,7 +4035,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     // members of that external module, so stubbing them here would re-declare
                     // them and create a genuine ambiguous-lookup conflict with our own
                     // extension-injected declaration.
-                    let isSelfDeclaredExtension = parser.selfDeclaredExternalExtensionPaths.contains {
+                    let isSelfDeclaredExtension = selfDeclaredExtensionTypes.contains {
                         typeName == $0 || typeName.hasPrefix($0 + ".")
                     }
                     if isPrivateFw && mod != currentModule && !isSelfDeclaredExtension {
@@ -3982,7 +4083,10 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     if isPrivate && confMod != currentModule {
                         let confName = confParts.dropFirst().joined(separator: ".")
                         let fullConfName = "\(confMod).\(confName)"
-                        if !visited.contains(fullConfName) {
+                        let isSelfDeclaredExt = selfDeclaredExtensionTypes.contains {
+                            fullConfName == $0 || fullConfName.hasPrefix($0 + ".")
+                        }
+                        if !visited.contains(fullConfName) && !isSelfDeclaredExt {
                             visited.insert(fullConfName)
                             queue.append(fullConfName)
                             
@@ -4235,8 +4339,11 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                             // discover DataArtifact/Table as their own StubNode entries.
                             let fullPath = String(text[restRange])
                             let fullTypeName = "\(refMod).\(fullPath)"
+                            let isSelfDeclaredExt = selfDeclaredExtensionTypes.contains {
+                                fullTypeName == $0 || fullTypeName.hasPrefix($0 + ".")
+                            }
                             let alreadyKnown = (externalTypes[refMod] ?? []).contains { $0.typeName == fullTypeName }
-                            if !alreadyKnown {
+                            if !alreadyKnown && !isSelfDeclaredExt {
                                 var isProto = false
                                 if let confNode = parser.findTypeNode(module: refMod, path: fullPath.components(separatedBy: ".")) {
                                     isProto = (confNode.kind == "protocol")
@@ -4456,7 +4563,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 // nested tree) — render those instead of StubNode's empty-skeleton fallback, so
                 // the stub's ABI shape actually matches the real dependency.
                 if let realNode = parser.findTypeNode(module: mod, path: [t.name]), !realNode.members.isEmpty {
-                    let code = renderEnrichedType(realNode, mod: mod, currentModule: currentModule, parser: parser)
+                    let code = renderEnrichedType(realNode, mod: mod, currentModule: currentModule, parser: parser, selfDeclaredExtensionTypes: selfDeclaredExtensionTypes)
                     fileContent += code + "\n"
                 } else {
                     fileContent += t.generateSwift(depth: 0) + "\n"
@@ -4497,7 +4604,13 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                         if let range = Range(m.range(at: 1), in: fileContent) {
                             let name = String(fileContent[range])
                             guard !knownStubTypeNames.contains(name), name != mod, name != "Swift", name != "Foundation" else { continue }
-                            if let realNode = parser.findTypeNode(module: mod, path: [name]), !realNode.members.isEmpty || realNode.kind == "protocol" {
+                            // These bare names are real system-framework types that get a real
+                            // "import <Framework>" below (mirroring resolveImports) rather than
+                            // an opaque local placeholder — declaring both would be ambiguous.
+                            let hasRealSystemFrameworkImport = ["IOSurface", "OSAllocatedUnfairLock", "CVPixelBuffer", "CVBuffer", "CMTime"].contains(name)
+                            if hasRealSystemFrameworkImport {
+                                knownStubTypeNames.insert(name)
+                            } else if let realNode = parser.findTypeNode(module: mod, path: [name]), !realNode.members.isEmpty || realNode.kind == "protocol" {
                                 newlyFound.append(name)
                             } else if parser.findTypeNode(module: "__C", path: [name]) != nil {
                                 // A bare ObjC class (registered under "__C" above) referenced by
@@ -4534,10 +4647,41 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     if realNode.kind == "protocol" {
                         fileContent += "public protocol \(name) {}\n"
                     } else {
-                        let code = renderEnrichedType(realNode, mod: mod, currentModule: currentModule, parser: parser)
+                        let code = renderEnrichedType(realNode, mod: mod, currentModule: currentModule, parser: parser, selfDeclaredExtensionTypes: selfDeclaredExtensionTypes)
                         fileContent += code + "\n"
                     }
                 }
+            }
+
+            // GenerativeModelsFoundation.SelfAttention.toValue()'s real ABI return type demangles
+            // as "PromptKit.Prompt.Component.Value" -- but no framework anywhere in this SDK
+            // (searched across every PrivateFrameworks .tbd) declares a "Prompt.Component" nested
+            // type under ANY module, including TokenGeneration (where "Prompt" itself genuinely
+            // lives). This is a residual, unresolvable ABI gap -- same class of issue as the
+            // "Generable" protocol reference diagnosed but never fixed in an earlier session
+            // (Stage D "graceful degradation", per the dependency-stub-member-enrichment plan,
+            // was never implemented). The exact qualifier surviving into fileContent varies by
+            // which build pass rendered it (PromptKit.Prompt.Component.Value or, after
+            // requalifyBareForeignTypeNames "corrects" it, TokenGeneration.Prompt.Component.Value)
+            // -- rather than chase that qualifier, replace either broken reference text with a
+            // self-contained local placeholder type, avoiding any ambiguity about which external
+            // module's "Prompt" to extend. This MUST run before the extraImports qualifier scan
+            // below -- otherwise that scan still sees the bare "PromptKit.Prompt..." text and
+            // emits a spurious "import PromptKit" even though the reference is gone afterward,
+            // which is what was producing the real PromptKit<->TokenGenerationCore import cycle.
+            // Only the bare return-type reference is broken -- "Prompt.Component.Value" is a
+            // real, legitimately-declared nested type (see PromptKit.swift's own "public enum
+            // Value" under "public struct Component"), and a FURTHER-qualified reference like
+            // "...Value.CustomData" (Value's own nested type) must be left alone. A negative
+            // lookahead for a trailing "." restricts the replacement to the bare reference.
+            for badRef in ["PromptKit.Prompt.Component.Value", "TokenGeneration.Prompt.Component.Value"] {
+                if let badRefRegex = try? NSRegularExpression(pattern: NSRegularExpression.escapedPattern(for: badRef) + "(?!\\.[A-Za-z])") {
+                    let nsRange = NSRange(fileContent.startIndex..<fileContent.endIndex, in: fileContent)
+                    fileContent = badRefRegex.stringByReplacingMatches(in: fileContent, range: nsRange, withTemplate: "SelfAttentionValuePlaceholder")
+                }
+            }
+            if fileContent.containsWord("SelfAttentionValuePlaceholder") {
+                fileContent += "\npublic enum SelfAttentionValuePlaceholder {}\n"
             }
 
             // A stub type's conformance/generic-bound list can reference a THIRD module's
@@ -4626,6 +4770,73 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 fileContent = fileContent.replacingOccurrences(
                     of: "import Foundation\n\n",
                     with: "import Foundation\n" + importLines + "\n")
+            }
+
+            // ModelManagerServices.ClientData is returned across an actor-isolation boundary by
+            // TokenGeneration.DictationStreamingPromptRequest.next() (an actor's
+            // AsyncIteratorProtocol requirement) -- Swift 6 requires that return type be
+            // Sendable, or Codable/Hashable is not enough. The real ClientData almost certainly
+            // IS Sendable (Foundation.Data and an opaque XPCCodableObject are its only stored
+            // properties, both value-semantic), but its .tbd conformance descriptors don't list
+            // Sendable explicitly (implicit derivation isn't ABI-visible). Declare it explicitly
+            // wherever this stub renders ClientData's own declaration.
+            if mod == "ModelManagerServices" {
+                fileContent = fileContent.replacingOccurrences(
+                    of: "public struct ClientData: Codable, Hashable {",
+                    with: "public struct ClientData: Codable, Hashable, Sendable {")
+            }
+
+            // Same GenerativeConfigurationProtocol associated-type gap postProcess() already
+            // fixes on PromptKit's own primary-target render path (see the
+            // `parser.defaultModule == "PromptKit"` block above) -- postProcess() only runs on
+            // that path, not here in the dependency-stub assembly loop, so PromptKit-as-a-
+            // dependency (e.g. for TokenGenerationCore) needs the identical typealias injection
+            // applied to whatever text this loop actually rendered.
+            if mod == "PromptKit" {
+                fileContent = fileContent.replacingOccurrences(
+                    of: "public struct ChatMessagesPrompt: ChatMessagesPromptConvertible, Codable, GenerativeConfigurationProtocol, PromptMode {",
+                    with: "public struct ChatMessagesPrompt: ChatMessagesPromptConvertible, Codable, GenerativeConfigurationProtocol, PromptMode {\n    public typealias PromptType = ChatMessagesPrompt\n    public typealias PromptContentType = Swift.String")
+                fileContent = fileContent.replacingOccurrences(
+                    of: "public struct CompletionPrompt: Codable, Swift.ExpressibleByExtendedGraphemeClusterLiteral, Swift.ExpressibleByStringInterpolation, Swift.ExpressibleByStringLiteral, Swift.ExpressibleByUnicodeScalarLiteral, GenerativeConfigurationProtocol, PromptMode {",
+                    with: "public struct CompletionPrompt: Codable, Swift.ExpressibleByExtendedGraphemeClusterLiteral, Swift.ExpressibleByStringInterpolation, Swift.ExpressibleByStringLiteral, Swift.ExpressibleByUnicodeScalarLiteral, GenerativeConfigurationProtocol, PromptMode {\n    public typealias PromptType = CompletionPrompt\n    public typealias PromptContentType = Swift.String")
+            }
+
+            // `Network.NWConnection.ConnectionProgressReport` is a genuine ABI-confirmed nested
+            // type (its members are all real, demangled .tbd symbols), but it's absent from the
+            // SDK's own shipped Network.swiftinterface -- library-evolution-hidden or simply not
+            // yet reflected there. Any dependency stub referencing it via a plain "import Network"
+            // (Network isn't itself a dependency stub -- it's a real system framework we never
+            // rebuild) fails with "not a member type of class 'Network.NWConnection'". Declare it
+            // locally as an extension, mirroring the shape generateAll() already synthesizes when
+            // Network itself is the primary target (main.swift's "Fix 6" NWConnection-extension
+            // handling) -- legal since a real class can gain a nested type via an extension in a
+            // downstream module, and the real interface has no conflicting declaration to clash with.
+            if fileContent.containsWord("ConnectionProgressReport") && mod != "Network" {
+                fileContent = fileContent.replacingOccurrences(
+                    of: "import Foundation\n",
+                    with: "import Foundation\nimport Network\n")
+                fileContent += """
+
+                extension Network.NWConnection {
+                    public struct ConnectionProgressReport: Codable, CustomStringConvertible, Equatable {
+                        public var isMakingProgress: Swift.Bool { fatalError() }
+                        public var reportedAt: Foundation.Date { fatalError() }
+                        public var description: Swift.String { fatalError() }
+                        public var elapsedTime: Swift.Duration { fatalError() }
+                        public var isConnected: Swift.Bool { fatalError() }
+                        public var rttEstimate: Swift.Duration { fatalError() }
+                        public var isLowQuality: Swift.Bool { fatalError() }
+                        public var completionEstimate: Swift.Duration { fatalError() }
+                        public var completionEstimateRemaining: Swift.Duration { fatalError() }
+                        public var isActive: Swift.Bool { fatalError() }
+                        public var startedAt: Foundation.Date { fatalError() }
+                        public static func == (lhs: Self, rhs: Self) -> Swift.Bool { fatalError() }
+                        public init(from decoder: Swift.Decoder) throws { fatalError() }
+                        public func encode(to encoder: Swift.Encoder) throws {}
+                    }
+                }
+
+                """
             }
 
             // injectDefaultArguments/simplifyType's default-value fallback (Model.swift) emits

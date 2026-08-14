@@ -1870,7 +1870,15 @@ class TypeNode {
                     let defaultVal = TypeNode.defaultReturnValue(for: returnType)
                     let body = defaultVal.isEmpty ? "{}" : "{ return \(defaultVal) }"
                     let finalBody = defaultVal == "fatalError()" ? "{ fatalError() }" : body
-                    lines.append("\(nextIndent)\(lifetimeAttr)public \(finalMod)\(overrideMod)\(staticMod)\(funcModifier)func \(cleanedSig) \(finalBody)") 
+                    // AsyncIteratorProtocol.makeAsyncIterator() is a nonisolated protocol
+                    // requirement; an actor satisfying it by returning Self needs the
+                    // implementation marked `nonisolated` explicitly, or the compiler treats the
+                    // whole AsyncSequence/AsyncIteratorProtocol conformance as isolation-crossing
+                    // ([#ConformanceIsolation]) -- worse, marking the CONFORMANCE @preconcurrency
+                    // instead (rather than the method nonisolated) hits a SILGen ownership-
+                    // verifier crash in this toolchain when the return type is the actor itself.
+                    let nonisolatedMod = (finalKind == "actor" && cleanN == "makeAsyncIterator") ? "nonisolated " : ""
+                    lines.append("\(nextIndent)\(nonisolatedMod)\(lifetimeAttr)public \(finalMod)\(overrideMod)\(staticMod)\(funcModifier)func \(cleanedSig) \(finalBody)")
                 }
             case .associatedType(let code):
                 lines.append("\(nextIndent)\(code)")

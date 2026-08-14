@@ -946,6 +946,16 @@ class Parser {
             isStaticExtension = true
         }
         
+        if let extRange = body.range(of: ".(extension in ") {
+            let prefix = String(body[..<extRange.lowerBound])
+            let rest = String(body[extRange.upperBound...])
+            if let parenIdx = rest.firstIndex(of: ")") {
+                let extModule = String(rest[..<parenIdx])
+                var nestedPath = String(rest[rest.index(after: parenIdx)...])
+                if nestedPath.hasPrefix(".") { nestedPath.removeFirst() }
+                body = "(extension in \(extModule)):\(prefix).\(nestedPath)"
+            }
+        }
         if body.starts(with: "(extension in ") {
             if let colonIndex = body.firstIndex(of: ":") {
                 let actualBody = String(body[body.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
@@ -1643,6 +1653,13 @@ class Parser {
     private func findOrCreateType(name: String) -> TypeNode {
         if name.contains("<") { fputs("findOrCreateType with <: \(name)\n", stderr) }
         var parts = name.components(separatedBy: ".")
+        
+        let isExternalExt = selfDeclaredExternalExtensionPaths.contains {
+            name == $0 || name.hasPrefix($0 + ".")
+        }
+        if isExternalExt {
+            return TypeNode(name: parts.last!)
+        }
         // Members of a type like "Publisher" that discoverNominalTypes recognized as declared
         // inside a "(extension in <defaultModule>)" on some other module's type (e.g.
         // Swift.Optional, or TokenGeneration.Prompt) route here as
@@ -1650,10 +1667,14 @@ class Parser {
         // node name discoverNominalTypes registered the extension declaration under (see
         // stdlibTypeExtensions), so the type's members land on that same node.
         if parts.count >= 3 {
-            let nestedPath = parts.dropFirst(2).joined(separator: ".")
-            let candidateInternalName = "__StdlibExt_\(parts[0])_\(parts[1])_" + nestedPath
-            if stdlibTypeExtensions[candidateInternalName] != nil {
-                parts = [defaultModule, candidateInternalName]
+            for i in stride(from: parts.count - 1, through: 2, by: -1) {
+                let subPath = parts[2...i].joined(separator: ".")
+                let candidateInternalName = "__StdlibExt_\(parts[0])_\(parts[1])_" + subPath
+                if stdlibTypeExtensions[candidateInternalName] != nil {
+                    let remainder = parts.dropFirst(i + 1)
+                    parts = [defaultModule, candidateInternalName] + remainder
+                    break
+                }
             }
         }
         if parts[0] == "__C" && parts.count > 1 {
@@ -3240,6 +3261,16 @@ class Parser {
             var extendedTypeModule: String? = nil
             var extendedStdlibType: String? = nil
             var displayName: String? = nil
+            if let extRange = path.range(of: ".(extension in ") {
+                let prefix = String(path[..<extRange.lowerBound])
+                let rest = String(path[extRange.upperBound...])
+                if let parenIdx = rest.firstIndex(of: ")") {
+                    let extModule = String(rest[..<parenIdx])
+                    var nestedPath = String(rest[rest.index(after: parenIdx)...])
+                    if nestedPath.hasPrefix(".") { nestedPath.removeFirst() }
+                    path = "(extension in \(extModule)):\(prefix).\(nestedPath)"
+                }
+            }
             if path.hasPrefix("(extension in "), let colonIdx = path.firstIndex(of: ":") {
                 let extModule = String(path[path.index(path.startIndex, offsetBy: "(extension in ".count)..<path.index(before: colonIdx)])
                 path = String(path[path.index(after: colonIdx)...])
@@ -3248,17 +3279,24 @@ class Parser {
                 // "Swift" or "TokenGeneration"), pathParts[1] is the type being extended (e.g.
                 // "Optional" or "Prompt"), and the remainder is the new nested type's path
                 // (e.g. "Publisher").
-                if extModule == currentModule, pathParts.count >= 3 {
-                    extendedTypeModule = pathParts[0]
-                    extendedStdlibType = pathParts[1]
-                    let nestedPath = pathParts.dropFirst(2).joined(separator: ".")
-                    displayName = pathParts.last
+                if pathParts.count >= 3 {
                     selfDeclaredExternalExtensionPaths.insert(pathParts.joined(separator: "."))
-                    // Multiple (module, type) pairs can be extended with a same-named nested
-                    // type (e.g. both Optional and Result gain a "Publisher", or unrelated
-                    // modules each have their own "Prompt"), so the internal node name must
-                    // stay unique per (extended-type-module, extended-type) pair.
-                    path = currentModule + "." + "__StdlibExt_\(pathParts[0])_\(pathParts[1])_" + nestedPath
+                    if extModule == currentModule {
+                        extendedTypeModule = pathParts[0]
+                        extendedStdlibType = pathParts[1]
+                        let nestedPath = pathParts.dropFirst(2).joined(separator: ".")
+                        displayName = pathParts.last
+                        // Multiple (module, type) pairs can be extended with a same-named nested
+                        // type (e.g. both Optional and Result gain a "Publisher", or unrelated
+                        // modules each have their own "Prompt"), so the internal node name must
+                        // stay unique per (extended-type-module, extended-type) pair.
+                        path = currentModule + "." + "__StdlibExt_\(pathParts[0])_\(pathParts[1])_" + nestedPath
+                    } else {
+                        // A symbol demangling as "(extension in Foo):Bar.Baz.Qux" declares Qux as a
+                        // NEW nested type Foo adds to Bar.Baz via an extension -- it does not belong
+                        // to Bar.Baz's own declaration. Skip registering it as if it were Bar.Baz's own.
+                        continue
+                    }
                 }
             } else if let inIndex = path.range(of: " in ") {
                 path = String(path[..<inIndex.lowerBound])
