@@ -168,6 +168,59 @@ building = set()
 clean_after = False
 keep_stubs = False
 skip_built_deps = True
+generator_built_this_process = False
+
+GENERATOR_SOURCES = [
+    "SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift",
+    "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Parser.swift",
+    "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Model.swift",
+    "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Config.swift",
+    "SwiftInterfaceGen/Sources/SwiftInterfaceGen/String+RegexFree.swift",
+    "SwiftInterfaceGen/Sources/SwiftInterfaceGen/TreeNode.swift",
+    "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.cpp",
+]
+
+def ensure_generator_built():
+    """build_framework() is called once per resolved real-framework dependency -- for a
+    target with several real-framework dependencies (e.g. TokenGenerationCore resolves 6),
+    that reissued the ~20s swiftc -O generator rebuild up to 7x in a single orchestrate.py
+    invocation, and again on every subsequent invocation (e.g. once per target in
+    run_regression_tests.py's 9-target loop), even though the generator's own sources hadn't
+    changed. Rebuild only if the binary is missing/stale relative to its sources -- both within
+    this process (generator_built_this_process) and across process invocations (mtime check)."""
+    global generator_built_this_process
+    if generator_built_this_process:
+        return
+    generator_bin = "./swift-interface-gen"
+    needs_build = not os.path.exists(generator_bin)
+    if not needs_build:
+        bin_mtime = os.path.getmtime(generator_bin)
+        needs_build = any(
+            os.path.exists(src) and os.path.getmtime(src) > bin_mtime
+            for src in GENERATOR_SOURCES
+        )
+    if needs_build:
+        print("--- Building Generator ---")
+        subprocess.check_call([
+            "clang++", "-O3", "-std=c++11", "-c",
+            "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.cpp",
+            "-o", "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o"
+        ])
+        subprocess.check_call([
+            "swiftc", "-O", "-parse-as-library",
+            "SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift",
+            "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Parser.swift",
+            "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Model.swift",
+            "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Config.swift",
+            "SwiftInterfaceGen/Sources/SwiftInterfaceGen/String+RegexFree.swift",
+            "SwiftInterfaceGen/Sources/SwiftInterfaceGen/TreeNode.swift",
+            "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o",
+            "-lc++",
+            "-o", generator_bin
+        ])
+    else:
+        print("--- Skipping generator build: up to date ---")
+    generator_built_this_process = True
 
 def is_framework_fully_built(name):
     """Check whether name's framework is already present in LocalFrameworks from a prior
@@ -218,26 +271,9 @@ def build_framework(name, is_target=False):
     print(f"Resolving dependencies for Target: {name}")
     print(f"========================================")
     
-    # 1. Build swift-interface-gen first
-    print("--- Building Generator ---")
-    subprocess.check_call([
-        "clang++", "-O3", "-std=c++11", "-c",
-        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.cpp",
-        "-o", "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o"
-    ])
-    subprocess.check_call([
-        "swiftc", "-O", "-parse-as-library",
-        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift",
-        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Parser.swift",
-        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Model.swift",
-        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Config.swift",
-        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/String+RegexFree.swift",
-        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/TreeNode.swift",
-        "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o",
-        "-lc++",
-        "-o", "./swift-interface-gen"
-    ])
-    
+    # 1. Build swift-interface-gen first (skipped if already up to date)
+    ensure_generator_built()
+
     # 2. Run generator in stub-generation mode on the target TBD
     tmp_stubs_dir = f"tmp_stubs_{name}"
     if os.path.exists(tmp_stubs_dir):
@@ -301,10 +337,16 @@ def build_framework(name, is_target=False):
                 dfs(node)
         return in_cycle
 
-    cyclic_stub_modules = find_stub_import_cycles()
-    if cyclic_stub_modules:
-        print(f"  Detected stub-module import cycle: {sorted(cyclic_stub_modules)} -- regenerating with back-references stripped")
-        stub_gen_env["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"] = ",".join(sorted(building | cyclic_stub_modules))
+    while True:
+        cyclic_stub_modules = find_stub_import_cycles()
+        current_targets = set(stub_gen_env.get("SWIFT_INTERFACE_GEN_BUILDING_TARGETS", "").split(","))
+        new_cycles = cyclic_stub_modules - current_targets
+        if not new_cycles:
+            break
+        all_cyclic = sorted(building | cyclic_stub_modules | current_targets)
+        all_cyclic = [c for c in all_cyclic if c]
+        print(f"  Detected stub-module import cycle: {sorted(new_cycles)} -- regenerating with back-references stripped")
+        stub_gen_env["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"] = ",".join(all_cyclic)
         shutil.rmtree(tmp_stubs_dir)
         os.makedirs(tmp_stubs_dir, exist_ok=True)
         subprocess.check_call([
@@ -368,6 +410,8 @@ def build_framework(name, is_target=False):
                     if sdep not in SYSTEM_MODULES and sdep != dep:
                         stub_deps.append(sdep)
         for sdep in stub_deps:
+            if sdep == name:
+                continue
             if sdep in TARGET_FRAMEWORKS:
                 build_framework(sdep)
             elif sdep in stub_modules:
@@ -376,6 +420,8 @@ def build_framework(name, is_target=False):
 
     all_deps_to_build = list(dependencies) + sorted(body_referenced_stubs)
     for dep in all_deps_to_build:
+        if dep == name:
+            continue
         if dep in TARGET_FRAMEWORKS:
             # Recursively build real target framework first
             build_framework(dep)
@@ -416,7 +462,7 @@ def build_framework(name, is_target=False):
         any_rebuilt = False
         for f in rescanned_stub_files:
             dep = f[:-6]
-            if dep not in stub_modules or dep not in built:
+            if dep in TARGET_FRAMEWORKS or dep not in stub_modules or dep not in built:
                 continue
             new_path = f"{tmp_stubs_dir}/{f}"
             old_path = f"{stale_tmp_stubs_dir}/{f}"

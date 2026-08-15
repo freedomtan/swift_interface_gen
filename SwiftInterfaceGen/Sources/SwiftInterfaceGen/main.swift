@@ -3700,7 +3700,9 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                                    "public final var ", "public static var ", "public override var ",
                                    "public let ", "public final let ", "public init", "public required init",
                                    "public convenience init", "public subscript",
-                                   "public typealias ", "case ", "nonisolated public "]
+                                   "public typealias ", "case ", "nonisolated public ",
+                                   "func ", "static func ", "class func ", "mutating func ",
+                                   "var ", "let ", "subscript", "init", "associatedtype ", "typealias "]
         let declLinePrefixes = ["public struct ", "public final class ", "public class ",
                                  "public enum ", "@_fixed_layout public class "]
         code = code.split(separator: "\n", omittingEmptySubsequences: false).compactMap { line -> Substring? in
@@ -4774,7 +4776,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 for name in Set(newlyFound) {
                     if knownStubTypeNames.contains(name) { continue }
                     knownStubTypeNames.insert(name)
-                    let declPattern = "(?:protocol|struct|class|enum|typealias)\\s+\(name)\\b"
+                    let declPattern = "(?:^|\\n)(?:@[A-Za-z0-9_]+\\s+)*(?:public\\s+|open\\s+)?(?:protocol|struct|class|enum|typealias)\\s+\(name)\\b"
                     if fileContent.range(of: declPattern, options: .regularExpression) != nil { continue }
                     guard let realNode = parser.findTypeNode(module: mod, path: [name]) else { continue }
                     if realNode.kind == "protocol" {
@@ -4816,11 +4818,17 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             if fileContent.containsWord("SelfAttentionValuePlaceholder") {
                 fileContent += "\npublic enum SelfAttentionValuePlaceholder {}\n"
             }
+            var circularModules = Set([currentModule])
+            if let buildingEnv = ProcessInfo.processInfo.environment["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"], !buildingEnv.isEmpty {
+                circularModules.formUnion(buildingEnv.split(separator: ",").map(String.init))
+            }
             if mod == "GenerativeFunctionsFoundation" {
-                fileContent = fileContent.replacingOccurrences(
-                    of: "public struct ChatMessageResponse<A>: ChatLanguageModelResponse, ChatLanguageModelResponseBase {\n    public var content: A { get { fatalError() } }\n}",
-                    with: "public struct ChatMessageResponse<A>: ChatLanguageModelResponse, ChatLanguageModelResponseBase {\n    public var content: A { get { fatalError() } }\n    public var role: PromptKit.ChatMessageRole { get { fatalError() } }\n}"
-                )
+                if !circularModules.contains("PromptKit") {
+                    fileContent = fileContent.replacingOccurrences(
+                        of: "public struct ChatMessageResponse<A>: ChatLanguageModelResponse, ChatLanguageModelResponseBase {\n    public var content: A { get { fatalError() } }\n}",
+                        with: "public struct ChatMessageResponse<A>: ChatLanguageModelResponse, ChatLanguageModelResponseBase {\n    public var content: A { get { fatalError() } }\n    public var role: PromptKit.ChatMessageRole { get { fatalError() } }\n}"
+                    )
+                }
             }
 
             // A stub type's conformance/generic-bound list can reference a THIRD module's
@@ -4888,6 +4896,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                                                            FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(qualifier).framework") ||
                                                            FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/Frameworks/\(qualifier).framework")
                         if qualifier != "Swift", qualifier != "Foundation", qualifier != mod,
+                           !circularModules.contains(qualifier),
                            !isGenericPlaceholder, !selfDeclaredStubTypeNames.contains(qualifier),
                            qualifierIsPrivateFramework {
                             extraImports.insert(qualifier)

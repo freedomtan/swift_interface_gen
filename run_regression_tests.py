@@ -5,8 +5,8 @@ import sys
 TESTS = [
     ("CoreAICommon", "test_CoreAICommon.swift"),
     ("CoreAICompiler", "test_CoreAICompiler.swift"),
-    ("ODIE", "test_ODIE.swift"),
     ("CoreAIDelegates", "test_CoreAIDelegates.swift"),
+    ("ODIE", "test_ODIE.swift"),
     ("AppleIntelligenceReporting", "test_AppleIntelligenceReporting.swift"),
     ("UnifiedAssetFramework", "test_UnifiedAssetFramework.swift"),
     ("ModelCatalog", "test_ModelCatalog.swift"),
