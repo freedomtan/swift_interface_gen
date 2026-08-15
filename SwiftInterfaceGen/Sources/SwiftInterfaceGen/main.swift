@@ -97,9 +97,17 @@ struct SwiftInterfaceGen {
         let stdlibExtPrefixes = ["_$ss", "_$sSf", "_$sSd", "_$sSi", "_$sSu", "_$sSb",
                                  "_$sSS", "_$sSs",  // Float/Double/Int/UInt/Bool/String/Substring
                                  "_$sSo"]           // ObjC class extensions (So = Swift ObjC bridge)
-        let filteredExports = parser.ownTbdSymbols.sorted().filter { sym in
+        var filteredExports = parser.ownTbdSymbols.sorted().filter { sym in
             !stdlibExtPrefixes.contains(where: { sym.hasPrefix($0) })
         }
+        let ownObjcClasses = extractObjcClasses(from: content)
+        for cls in ownObjcClasses {
+            if !cls.hasPrefix("_Tt") {
+                filteredExports.append("_OBJC_CLASS_$_\(cls)")
+                filteredExports.append("_OBJC_METACLASS_$_\(cls)")
+            }
+        }
+        filteredExports.sort()
 
         let exportsContent = filteredExports.joined(separator: "\n") + "\n"
         try? exportsContent.write(toFile: "\(currentModule)_exports.txt", atomically: true, encoding: .utf8)
@@ -117,10 +125,7 @@ struct SwiftInterfaceGen {
                 var headerLines = ["#import <Foundation/Foundation.h>"]
                 var implLines = ["#import \"\(currentModule)Interface_bridge.h\""]
                 for t in bridgedTypes {
-                    var actualKind = t.kind == "unknown" ? "struct" : t.kind
-                    if t.name == "MLModelStructure" {
-                        actualKind = "class"
-                    }
+                    let actualKind = t.kind == "enum" ? "enum" : "class"
                     if actualKind == "class" {
                         headerLines.append("@interface \(t.name) : NSObject")
                         headerLines.append("@end")
@@ -214,7 +219,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             }
         }
         
-        if code.contains("MTL") { imports.insert("Metal") }
+        if code.contains("MTL") || code.contains("MPS") { imports.insert("Metal"); imports.insert("MetalPerformanceShaders") }
         if code.contains("IOSurface") { imports.insert("IOSurface") }
         if code.contains("CGImage") || code.contains("CGRect") || code.contains("CGSize") || code.contains("CGFloat") { imports.insert("CoreGraphics") }
         if code.contains("CVPixelBuffer") || code.contains("CVBuffer") { imports.insert("CoreVideo") }
@@ -2355,6 +2360,20 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 with: "public func isEqual(other: AnyExtensionField) -> Swift.Bool { fatalError() }")
         }
 
+        if parser.defaultModule == "MetalPerformanceShadersGraph" {
+            c = c.replacingOccurrences(
+                of: #"public static var counter: (?:Synchronization\.)?Atomic<.*?>.*"#,
+                with: "public static let counter: Synchronization.Atomic<Swift.UInt32> = .init(0)",
+                options: .regularExpression)
+            c = c.replacingOccurrences(
+                of: "public init(_ arg1: ODIE.DelegateProgramArguments)",
+                with: "required public init(_ arg1: ODIE.DelegateProgramArguments)")
+            c += """
+
+            public class MPSGraphNDXRuntime {}
+            """
+        }
+
         if parser.defaultModule == "PromptKit" {
             // ChatMessagesPrompt/CompletionPrompt conform to GenerativeConfigurationProtocol
             // (associatedtype PromptType: PromptMode) and PromptMode (associatedtype
@@ -3342,12 +3361,26 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         }
         
         // Generate stubs.s
-        var stubsContent = ".data\n.align 3\n"
-        var stubCount = 0
-        for sym in missing {
-            stubsContent += ".globl \(sym)\n\(sym):\n    .quad 0\n"
-            stubCount += 1
+        func isDataSymbol(_ sym: String) -> Bool {
+            let dataSuffixes = ["vpZ", "vp", "vpv", "vpvZ", "MF", "Mf", "WV", "VN", "MI", "Mi", "MP", "TL", "TM", "Mr", "MrZ"]
+            for suf in dataSuffixes {
+                if sym.hasSuffix(suf) {
+                    return true
+                }
+            }
+            return false
         }
+        
+        var textStubs = ""
+        var dataStubs = ""
+        for sym in missing {
+            if isDataSymbol(sym) {
+                dataStubs += ".globl \(sym)\n.no_dead_strip \(sym)\n.align 3\n\(sym):\n    .quad 0\n    .quad 0\n"
+            } else {
+                textStubs += ".globl \(sym)\n.no_dead_strip \(sym)\n.align 2\n\(sym):\n    ret\n"
+            }
+        }
+        let stubsContent = ".text\n" + textStubs + "\n.data\n" + dataStubs
         do {
             try stubsContent.write(toFile: stubsSPath, atomically: true, encoding: .utf8)
             print("Generated \(missing.count) stubs in \(stubsSPath).")
@@ -3359,9 +3392,6 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
 static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/nm")
-        // Use -U (no -g) so local symbols (e.g. Swift fA_ default-argument thunks emitted
-        // as local 't' under -enable-library-evolution) are included in the comparison.
-        // Only .quad 0 stubs are generated for symbols truly absent from the dylib.
         process.arguments = ["-U", dylibPath]
         
         let pipe = Pipe()
@@ -3376,9 +3406,17 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 output.enumerateLines { line, _ in
                     let parts = line.split { $0.isWhitespace }
                     if parts.count >= 3 {
-                        symbols.insert(String(parts[2]))
+                        let symType = parts[1]
+                        let symName = parts[2]
+                        if symType != "U" && symType != "u" && symType != "b" {
+                            symbols.insert(String(symName))
+                        }
                     } else if parts.count == 2 {
-                        symbols.insert(String(parts[1]))
+                        let symType = parts[0]
+                        let symName = parts[1]
+                        if symType != "U" && symType != "u" && symType != "b" {
+                            symbols.insert(String(symName))
+                        }
                     }
                 }
                 return symbols
@@ -3512,6 +3550,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
 
     class StubNode {
         var name: String
+        var originalPath: [String] = []
         var isProtocol: Bool = false
         var kind: String = "struct"
         var genericCount: Int = 0
@@ -3723,6 +3762,11 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         // otherwise visible in a standalone dependency-stub module).
         code = code.removePrivateObjCTypeReferences()
         if !selfDeclaredExtensionTypes.isEmpty {
+            let stdlibTypes: Set<String> = [
+                "String", "Int", "Double", "Float", "Bool", "UInt", "Int8", "Int16", "Int32", "Int64",
+                "UInt8", "UInt16", "UInt32", "UInt64", "Data", "URL", "Error", "Decoder", "Encoder",
+                "CodingKey", "Any", "Result", "Optional", "Array", "Dictionary", "Set"
+            ]
             for extType in selfDeclaredExtensionTypes {
                 let parts = extType.components(separatedBy: ".")
                 if parts.count >= 2 {
@@ -3730,7 +3774,9 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     let leafName = parts.last!
                     code = code.replacingOccurrences(of: extType, with: "Any")
                     code = code.replacingOccurrences(of: shortName, with: "Any")
-                    code = code.replaceWord(leafName, with: "Any")
+                    if !stdlibTypes.contains(leafName) {
+                        code = code.replaceWord(leafName, with: "Any")
+                    }
                 }
             }
         }
@@ -3756,7 +3802,56 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         // ("___SHIELDED_ModelCatalog___") can leak straight into the compiled stub as an
         // unresolvable bare type name.
         code = code.replacingOccurrences(of: "___SHIELDED_\(mod)___", with: mod)
+        if realNode.kind == "protocol" {
+            let extCode = generateProtocolDefaultExtension(code: code, protocolName: realNode.name)
+            if !extCode.isEmpty {
+                code += "\n" + extCode
+            }
+        }
         return code
+    }
+
+    static func generateProtocolDefaultExtension(code: String, protocolName: String) -> String {
+        let lines = code.components(separatedBy: "\n")
+        var extMembers = [String]()
+        var inProtocol = false
+        var depth = 0
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.contains("protocol \(protocolName)") || (trimmed.hasPrefix("public protocol ") && trimmed.contains(protocolName)) {
+                inProtocol = true
+            }
+            if !inProtocol { continue }
+            for ch in trimmed {
+                if ch == "{" { depth += 1 }
+                else if ch == "}" { depth -= 1 }
+            }
+            if depth == 1 && inProtocol {
+                // Inside protocol body
+                if trimmed.hasPrefix("static var ") || trimmed.hasPrefix("class var ") || trimmed.hasPrefix("var ") {
+                    if let braceIdx = trimmed.firstIndex(of: "{") {
+                        let head = String(trimmed[..<braceIdx]).trimmingCharacters(in: .whitespaces)
+                        let isReadWrite = trimmed.contains("set")
+                        let body = isReadWrite ? "{ get { fatalError() } set { fatalError() } }" : "{ get { fatalError() } }"
+                        extMembers.append("    public \(head) \(body)")
+                    }
+                } else if trimmed.hasPrefix("static func ") || trimmed.hasPrefix("class func ") || trimmed.hasPrefix("func ") {
+                    extMembers.append("    public \(trimmed) { fatalError() }")
+                } else if trimmed.hasPrefix("static subscript") || trimmed.hasPrefix("subscript") {
+                    if let braceIdx = trimmed.firstIndex(of: "{") {
+                        let head = String(trimmed[..<braceIdx]).trimmingCharacters(in: .whitespaces)
+                        let isReadWrite = trimmed.contains("set")
+                        let body = isReadWrite ? "{ get { fatalError() } set { fatalError() } }" : "{ get { fatalError() } }"
+                        extMembers.append("    public \(head) \(body)")
+                    }
+                }
+            }
+            if depth == 0 && inProtocol {
+                inProtocol = false
+            }
+        }
+        if extMembers.isEmpty { return "" }
+        return "\nextension \(protocolName) {\n" + extMembers.joined(separator: "\n") + "\n}\n"
     }
 
     // Scans `code` for a bare (unqualified) capitalized identifier that isn't declared in `mod`
@@ -3780,6 +3875,10 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             "FloatingPoint", "BinaryFloatingPoint", "LosslessStringConvertible", "CaseIterable",
             "RawRepresentable", "CodingKey", "LocalizedError", "Actor", "AnyObject", "Optional",
             "Array", "Dictionary", "Set", "Result", "Never", "Void",
+            "String", "Int", "Double", "Float", "Bool", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
+            "Int8", "Int16", "Int32", "Int64", "Character", "StaticString", "Substring", "Decoder", "Encoder",
+            "UUID", "Data", "Date", "URL", "URLRequest", "Locale", "TimeZone", "Calendar", "CharacterSet",
+            "Notification", "IndexPath", "IndexSet", "Measurement", "Unit", "Dimension", "Duration",
             // Handled by its own dedicated fallback (the same-module closure pass's
             // newlyFoundOpaqueStruct case, main.swift) -- XPC has no real swiftinterface/tbd in
             // this SDK, so parser.modules["XPC"] can still hold a nestedTypes entry for
@@ -3797,7 +3896,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         // "associatedtype TokenGenerationCore.ModelConfiguration" (invalid: an associated
         // type's own name can never be dotted), even if some OTHER real module happens to
         // separately declare a same-named top-level type.
-        if let declRegex = try? NSRegularExpression(pattern: "\\b(?:struct|enum|class|protocol|associatedtype) `?([A-Za-z_][A-Za-z0-9_]*)`?", options: []) {
+        if let declRegex = try? NSRegularExpression(pattern: "\\b(?:struct|enum|class|protocol|associatedtype|case) `?([A-Za-z_][A-Za-z0-9_]*)`?", options: []) {
             let declNsRange = NSRange(result.startIndex..<result.endIndex, in: result)
             for m in declRegex.matches(in: result, options: [], range: declNsRange) {
                 if let r = Range(m.range(at: 1), in: result) {
@@ -4379,6 +4478,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     pathSoFar.append(part)
                     if current.nested[part] == nil {
                         let node = StubNode(name: part)
+                        node.originalPath = pathSoFar
                         if let typeNode = parser.findTypeNode(module: mod, path: pathSoFar) {
                             node.kind = typeNode.kind
                             node.conformances = typeNode.conformances.compactMap { conf in
@@ -4484,7 +4584,9 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                    ["Visitor", "Decoder", "Encoder", "Message", "Enum", "Stream"].contains(child.name) ||
                    child.name.hasSuffix("Protocol") || child.name.hasSuffix("Providing") || child.name.hasSuffix("Delegate") {
                     child.isProtocol = true
-                    topLevelProtocols.append(child)
+                    if !topLevelProtocols.contains(where: { $0.name == child.name }) {
+                        topLevelProtocols.append(child)
+                    }
                 } else {
                     topLevelTypes.append(child)
                 }
@@ -4501,14 +4603,15 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             // remove any protocol-kind node from its parent, and promote it into
             // topLevelProtocols under its own top-level StubNode name (StubNode.name is only
             // the LEAF segment, so promoted protocols keep their real short name — a same-named
-            // collision across two different nesting paths is not resolved here and is an
-            // accepted, unlikely-in-practice limitation of this hoist).
+            // collision across two different nesting paths is deduplicated by name).
             func hoistNestedProtocols(_ node: StubNode, pathSoFar: [String]) {
                 for (key, child) in node.nested {
                     let childPath = pathSoFar + [child.name]
                     if child.isProtocol || child.kind == "protocol" {
                         node.nested.removeValue(forKey: key)
-                        topLevelProtocols.append(child)
+                        if !topLevelProtocols.contains(where: { $0.name == child.name }) {
+                            topLevelProtocols.append(child)
+                        }
                         allHoistedProtocolRenames.append((originalDottedPath: "\(mod).\(childPath.joined(separator: "."))", name: child.name))
                     } else {
                         hoistNestedProtocols(child, pathSoFar: childPath)
@@ -4520,7 +4623,12 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             }
             
             for proto in topLevelProtocols.sorted(by: { $0.name < $1.name }) {
-                let fullPath = "\(mod).\(proto.name)"
+                let lookupPath = proto.originalPath.isEmpty ? [proto.name] : proto.originalPath
+                if let realNode = parser.findTypeNode(module: mod, path: lookupPath), !realNode.members.isEmpty {
+                    let code = renderEnrichedType(realNode, mod: mod, currentModule: currentModule, parser: parser, selfDeclaredExtensionTypes: selfDeclaredExtensionTypes)
+                    fileContent += code + "\n"
+                } else {
+                    let fullPath = "\(mod).\(proto.name)"
                 var genericDecl = ""
                 var assocDecl = ""
                 var placeholderNames = Set<String>()
@@ -4554,6 +4662,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     fileContent += "    associatedtype EventType\n"
                 }
                 fileContent += "}\n\n"
+                }
             }
             
             for t in topLevelTypes.sorted(by: { $0.name < $1.name }) {
@@ -4562,7 +4671,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 // self-recurses into nestedTypes, so a single top-level call renders the whole
                 // nested tree) — render those instead of StubNode's empty-skeleton fallback, so
                 // the stub's ABI shape actually matches the real dependency.
-                if let realNode = parser.findTypeNode(module: mod, path: [t.name]), !realNode.members.isEmpty {
+                if let realNode = parser.findTypeNode(module: mod, path: [t.name]), (!realNode.members.isEmpty || !realNode.nestedTypes.isEmpty) {
                     let code = renderEnrichedType(realNode, mod: mod, currentModule: currentModule, parser: parser, selfDeclaredExtensionTypes: selfDeclaredExtensionTypes)
                     fileContent += code + "\n"
                 } else {
@@ -4610,7 +4719,28 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                             let hasRealSystemFrameworkImport = ["IOSurface", "OSAllocatedUnfairLock", "CVPixelBuffer", "CVBuffer", "CMTime"].contains(name)
                             if hasRealSystemFrameworkImport {
                                 knownStubTypeNames.insert(name)
-                            } else if let realNode = parser.findTypeNode(module: mod, path: [name]), !realNode.members.isEmpty || realNode.kind == "protocol" {
+                            } else if parser.systemTypes.contains(name) {
+                                // A real TypeNode can exist under `mod` for a bare name that's
+                                // ALSO a genuine Swift/Foundation system type (e.g. ModelCatalog's
+                                // own ABI declares a "ModelCatalog.NSNumber" class purely because
+                                // its symbols return the real Foundation.NSNumber under that
+                                // qualifier — not because ModelCatalog owns a distinct NSNumber).
+                                // Declaring a local stub here would collide with the real
+                                // Foundation type already visible via "import Foundation"
+                                // ("'NSNumber' is ambiguous for type lookup"). Leave it as the
+                                // real system type; no stub, no import needed.
+                                knownStubTypeNames.insert(name)
+                            } else if parser.findTypeNode(module: mod, path: [name]) != nil {
+                                // Any other real TypeNode discovered under this module qualifies,
+                                // not just ones with real members or protocols -- a bare-
+                                // referenced sibling type can be a genuine, real ABI type with NO
+                                // members at all (e.g. ODIE.SharedMutableBytes, an opaque
+                                // `@objc deinit`-only class referenced from
+                                // Tensor.SharedStorageBacking.bytes), and skipping it here left
+                                // the stub referencing a type it never declares ("cannot find
+                                // type 'SharedMutableBytes' in scope"). generateCode()/
+                                // renderEnrichedType() already render a memberless type correctly
+                                // as an empty `class/struct/enum Name {}`.
                                 newlyFound.append(name)
                             } else if parser.findTypeNode(module: "__C", path: [name]) != nil {
                                 // A bare ObjC class (registered under "__C" above) referenced by
@@ -4642,7 +4772,10 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     fileContent += "public struct \(name): Hashable, Codable, Sendable {}\n"
                 }
                 for name in Set(newlyFound) {
+                    if knownStubTypeNames.contains(name) { continue }
                     knownStubTypeNames.insert(name)
+                    let declPattern = "(?:protocol|struct|class|enum|typealias)\\s+\(name)\\b"
+                    if fileContent.range(of: declPattern, options: .regularExpression) != nil { continue }
                     guard let realNode = parser.findTypeNode(module: mod, path: [name]) else { continue }
                     if realNode.kind == "protocol" {
                         fileContent += "public protocol \(name) {}\n"
@@ -4682,6 +4815,12 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             }
             if fileContent.containsWord("SelfAttentionValuePlaceholder") {
                 fileContent += "\npublic enum SelfAttentionValuePlaceholder {}\n"
+            }
+            if mod == "GenerativeFunctionsFoundation" {
+                fileContent = fileContent.replacingOccurrences(
+                    of: "public struct ChatMessageResponse<A>: ChatLanguageModelResponse, ChatLanguageModelResponseBase {\n    public var content: A { get { fatalError() } }\n}",
+                    with: "public struct ChatMessageResponse<A>: ChatLanguageModelResponse, ChatLanguageModelResponseBase {\n    public var content: A { get { fatalError() } }\n    public var role: PromptKit.ChatMessageRole { get { fatalError() } }\n}"
+                )
             }
 
             // A stub type's conformance/generic-bound list can reference a THIRD module's
@@ -4762,9 +4901,10 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             // Mirror resolveImports' (main.swift) same bare-name -> framework mappings for the
             // system frameworks these dependency stubs have been observed to need.
             if fileContent.containsWord("IOSurface") { extraImports.insert("IOSurface") }
-            if fileContent.containsWord("OSAllocatedUnfairLock") { extraImports.insert("os") }
+            if fileContent.containsWord("OSAllocatedUnfairLock") || fileContent.containsWord("Logger") || fileContent.contains("os.") { extraImports.insert("os") }
             if fileContent.containsWord("CVPixelBuffer") || fileContent.containsWord("CVBuffer") { extraImports.insert("CoreVideo") }
             if fileContent.containsWord("CMTime") { extraImports.insert("CoreMedia") }
+            if fileContent.containsWord("MPSCommandBuffer") || fileContent.containsWord("MPSDataType") || fileContent.containsWord("MPSGraph") { extraImports.insert("MetalPerformanceShaders") }
             if !extraImports.isEmpty {
                 let importLines = extraImports.sorted().map { "import \($0)\n" }.joined()
                 fileContent = fileContent.replacingOccurrences(
@@ -4792,6 +4932,15 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             // that path, not here in the dependency-stub assembly loop, so PromptKit-as-a-
             // dependency (e.g. for TokenGenerationCore) needs the identical typealias injection
             // applied to whatever text this loop actually rendered.
+            if mod == "ODIE" {
+                if !fileContent.contains("public struct _Profiler") {
+                    fileContent += "\npublic struct _Profiler {}\n"
+                }
+                if !fileContent.contains("public struct _Attribute") {
+                    fileContent += "\npublic struct _Attribute {}\n"
+                }
+            }
+
             if mod == "PromptKit" {
                 fileContent = fileContent.replacingOccurrences(
                     of: "public struct ChatMessagesPrompt: ChatMessagesPromptConvertible, Codable, GenerativeConfigurationProtocol, PromptMode {",
@@ -4865,6 +5014,14 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 let newPath = "\(moduleSegment).\(rename.name)"
                 if updated.contains(rename.originalDottedPath) {
                     updated = updated.replacingOccurrences(of: rename.originalDottedPath, with: newPath)
+                }
+                let unqualifiedOriginalPath = String(rename.originalDottedPath.dropFirst(moduleSegment.count + 1))
+                if !unqualifiedOriginalPath.isEmpty {
+                    if mod == moduleSegment {
+                        updated = updated.replacingOccurrences(of: unqualifiedOriginalPath, with: rename.name)
+                    } else {
+                        updated = updated.replacingOccurrences(of: unqualifiedOriginalPath, with: newPath)
+                    }
                 }
             }
             let filePath = "\(outputDir)/\(mod).swift"

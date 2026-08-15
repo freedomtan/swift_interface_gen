@@ -811,7 +811,9 @@ class TypeNode {
             let isStride = n == "Stride" || n.hasSuffix(".Stride")
             var forbiddenProtocols: Set<String> = ["AdditiveArithmetic", "BinaryFloatingPoint",
                    "FloatingPoint", "Numeric", "SignedNumeric", "Strideable",
-                   "BinaryInteger", "FixedWidthInteger", "SignedInteger", "UnsignedInteger"]
+                   "BinaryInteger", "FixedWidthInteger", "SignedInteger", "UnsignedInteger",
+                   "AsyncSequence", "AsyncIteratorProtocol", "IteratorProtocol",
+                   "Sequence", "Collection", "BidirectionalCollection", "RandomAccessCollection", "MutableCollection", "RangeReplaceableCollection"]
             if isCustomFloatType {
                 forbiddenProtocols = []
             } else if isSchedulerTimeType {
@@ -820,7 +822,10 @@ class TypeNode {
                 forbiddenProtocols.remove("SignedNumeric")
                 forbiddenProtocols.remove("AdditiveArithmetic")
             }
-            inheritsList = inheritsList.filter { !forbiddenProtocols.contains($0) }
+            inheritsList = inheritsList.filter { proto in
+                let base = proto.replacingOccurrences(of: "Swift.", with: "").replacingOccurrences(of: "_Concurrency.", with: "")
+                return !forbiddenProtocols.contains(proto) && !forbiddenProtocols.contains(base)
+            }
         }
         if actualKind == "class" {
             // Strip Equatable, Hashable, and Codable — these generate extra conformance descriptors
@@ -1064,6 +1069,7 @@ class TypeNode {
         // ObjC-bridged types are extended via a Swift extension (not declared as a new class).
         // The extension block is wrapped in sentinel comments so orchestrate.py can strip it
         // from the module-interface compilation phase (which can't use -import-objc-header).
+        var isFinalClass = false
         if isObjcBridged && finalKind == "class" {
             lines.append("\(indent)// --- ObjC Extension (bridge-header required) ---")
             lines.append("\(indent)extension \(displayTypeName) {")
@@ -1105,6 +1111,7 @@ class TypeNode {
                 }
                 if !hasSubclass && !isNonFinalInTBD {
                     classVisibility = "final " + classVisibility
+                    isFinalClass = true
                 }
             }
             let fixedLayoutAttr = (finalKind == "class") ? "@_fixed_layout " : ""
@@ -1333,7 +1340,7 @@ class TypeNode {
                     // For classes, ensure the init body is non-empty to force symbol emission.
                     // If it's NSObject, use super.init(), otherwise fatalError().
                     let initBody = isOverride && cleanedSig.starts(with: "init()") ? "{ super.init() }" : "{ fatalError() }"
-                    let isRequired = self.kind == "class" && (cleanedSig.contains("init(from:") || cleanedSig.contains("init?(coder:") || cleanedSig.contains("init(coder:"))
+                    let isRequired = finalKind == "class" && !isFinalClass && (cleanedSig.contains("init(from:") || cleanedSig.contains("init?(coder:") || cleanedSig.contains("init(coder:") || !self.conformances.isEmpty)
                     let requiredMod = isRequired ? "required " : ""
                     lines.append("\(nextIndent)\(requiredMod)public \(overrideMod)\(cleanedSig) \(initBody)")
                 }
