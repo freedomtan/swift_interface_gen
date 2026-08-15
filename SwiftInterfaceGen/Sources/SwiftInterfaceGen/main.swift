@@ -1762,6 +1762,9 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             // generate protocol-extension defaults), which is what actually satisfies
             // SwiftUI.ScrollTargetBehavior's requirement. Add it directly.
             c = c.replacingOccurrences(
+                of: "public func updateTarget(_ arg1: inout SwiftUI.ScrollTarget, context: ChartScrollTargetBehaviorContext) -> () {}\n}",
+                with: "public func updateTarget(_ arg1: inout SwiftUI.ScrollTarget, context: ChartScrollTargetBehaviorContext) -> () {}\n    public func updateTarget(_ target: inout SwiftUI.ScrollTarget, context: SwiftUI.ScrollTargetBehaviorContext) -> () {}\n}")
+            c = c.replacingOccurrences(
                 of: "public func updateTarget(_: inout SwiftUI.ScrollTarget, context: ChartScrollTargetBehaviorContext) -> () {}\n}",
                 with: "public func updateTarget(_: inout SwiftUI.ScrollTarget, context: ChartScrollTargetBehaviorContext) -> () {}\n    public func updateTarget(_ target: inout SwiftUI.ScrollTarget, context: SwiftUI.ScrollTargetBehaviorContext) -> () {}\n}")
         }

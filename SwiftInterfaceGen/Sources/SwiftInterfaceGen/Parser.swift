@@ -2557,6 +2557,7 @@ class Parser {
                 node.members["handleConnectedEvent"] = .method(name: "handleConnectedEvent", signature: "handleConnectedEvent(_ arg1: ProtocolInstanceReference) -> ()", isStatic: false)
             }
         }
+
         
         // Auto-detect NSObject subclasses: any class with an init(coder: NSCoder) member is an
         // NSObject subclass conforming to NSCoding. Mark them so Model.swift emits the correct
