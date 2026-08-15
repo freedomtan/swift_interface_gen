@@ -2328,8 +2328,17 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 of: "public protocol MutableViewRepresentable: Sendable {",
                 with: "public protocol MutableViewRepresentable: Sendable, ~Copyable {")
             c = c.replacingOccurrences(
+                of: "public func insert<GenericA>(_ arg1: GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable,  GenericA: ~Copyable {}",
+                with: "public func insert<GenericA>(_ arg1: borrowing GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable,  GenericA: ~Copyable {}")
+            c = c.replacingOccurrences(
+                of: "public func insert<GenericA>(_ arg1: GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable, GenericA: ~Copyable {}",
+                with: "public func insert<GenericA>(_ arg1: borrowing GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable, GenericA: ~Copyable {}")
+            c = c.replacingOccurrences(
                 of: "public func insert<GenericA>(_: GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable,  GenericA: ~Copyable {}",
                 with: "public func insert<GenericA>(_: borrowing GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable,  GenericA: ~Copyable {}")
+            c = c.replacingOccurrences(
+                of: "public func insert<GenericA>(_: GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable, GenericA: ~Copyable {}",
+                with: "public func insert<GenericA>(_: borrowing GenericA, for: Swift.String) -> () where GenericA: InferenceValue.ViewRepresentable, GenericA: ~Copyable {}")
         }
 
         if parser.defaultModule == "InternalSwiftProtobuf" {
