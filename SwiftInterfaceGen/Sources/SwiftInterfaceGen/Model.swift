@@ -809,6 +809,7 @@ class TypeNode {
             let isCustomFloatType = ["Float4", "Float8", "BFloat16"].contains(n)
             let isSchedulerTimeType = n == "SchedulerTimeType" || n.hasSuffix(".SchedulerTimeType")
             let isStride = n == "Stride" || n.hasSuffix(".Stride")
+            let isIterator = n == "Iterator" || n.hasSuffix(".Iterator") || n == "AsyncIterator" || n.hasSuffix(".AsyncIterator")
             var forbiddenProtocols: Set<String> = ["AdditiveArithmetic", "BinaryFloatingPoint",
                    "FloatingPoint", "Numeric", "SignedNumeric", "Strideable",
                    "BinaryInteger", "FixedWidthInteger", "SignedInteger", "UnsignedInteger",
@@ -821,10 +822,45 @@ class TypeNode {
             } else if isStride {
                 forbiddenProtocols.remove("SignedNumeric")
                 forbiddenProtocols.remove("AdditiveArithmetic")
+            } else if isIterator {
+                forbiddenProtocols.remove("IteratorProtocol")
+                forbiddenProtocols.remove("AsyncIteratorProtocol")
             }
             inheritsList = inheritsList.filter { proto in
                 let base = proto.replacingOccurrences(of: "Swift.", with: "").replacingOccurrences(of: "_Concurrency.", with: "")
+                if let parser = parser {
+                    let hasMc = parser.conformancesFromTBD.contains { c in
+                        let matchesType = (c.hasPrefix("\(n):") || c.contains(".\(n):"))
+                        let matchesProto = (c.hasSuffix(":\(base)") || c.hasSuffix(":\(proto)"))
+                        return matchesType && matchesProto
+                    }
+                    if hasMc {
+                        return true
+                    }
+                }
                 return !forbiddenProtocols.contains(proto) && !forbiddenProtocols.contains(base)
+            }
+            if isIterator {
+                let hasAsyncNext = self.members.values.contains {
+                    if case .method(let name, let sig, _) = $0 {
+                        return name == "next" && sig.contains("async")
+                    }
+                    return false
+                }
+                let hasSyncNext = self.members.values.contains {
+                    if case .method(let name, let sig, _) = $0 {
+                        return name == "next" && !sig.contains("async")
+                    }
+                    return false
+                }
+                if hasAsyncNext || inheritsList.contains("AsyncIteratorProtocol") {
+                    inheritsList = inheritsList.filter { $0 != "IteratorProtocol" && $0 != "Swift.IteratorProtocol" }
+                    if !inheritsList.contains("AsyncIteratorProtocol") {
+                        inheritsList.append("AsyncIteratorProtocol")
+                    }
+                } else if hasSyncNext && !inheritsList.contains("IteratorProtocol") {
+                    inheritsList.append("IteratorProtocol")
+                }
             }
         }
         if actualKind == "class" {
@@ -888,6 +924,9 @@ class TypeNode {
             inScope.insert("A")
         } else if typeName == "XPCServiceClientConnection" {
             displayTypeName += "<A: XPCService>"
+            inScope.insert("A")
+        } else if typeName == "MultiplexedDatagramFlow" || typeName == "MultiplexedStreamFlow" || typeName == "MultiplexingDatagramPath" || typeName == "MultiplexingStreamPath" {
+            displayTypeName += "<A: ManyToManyProtocolHandler>"
             inScope.insert("A")
         } else if parser?.defaultModule == "Combine" && isGeneric && (typeName.contains("Sink") || typeName.contains("Record") || typeName.contains("Zip") || typeName.contains("CombineLatest") || typeName.contains("Merge") || typeName.contains("Sequence")) {
             let short = typeName.components(separatedBy: ".").last ?? typeName
@@ -1340,7 +1379,8 @@ class TypeNode {
                     // For classes, ensure the init body is non-empty to force symbol emission.
                     // If it's NSObject, use super.init(), otherwise fatalError().
                     let initBody = isOverride && cleanedSig.starts(with: "init()") ? "{ super.init() }" : "{ fatalError() }"
-                    let isRequired = finalKind == "class" && !isFinalClass && (cleanedSig.contains("init(from:") || cleanedSig.contains("init?(coder:") || cleanedSig.contains("init(coder:") || !self.conformances.isEmpty)
+                    let isCoderInit = cleanedSig.contains("init?(coder:") || cleanedSig.contains("init(coder:")
+                    let isRequired = finalKind == "class" && (isCoderInit || (!isFinalClass && (cleanedSig.contains("init(from:") || !self.conformances.isEmpty)))
                     let requiredMod = isRequired ? "required " : ""
                     lines.append("\(nextIndent)\(requiredMod)public \(overrideMod)\(cleanedSig) \(initBody)")
                 }
@@ -2199,24 +2239,30 @@ class TypeNode {
                         }
                         let skipAssociatedTypes = hasAnyProtoMethods && hasAllMethods
 
-                        if !skipAssociatedTypes {
-                            for (mName, mKind) in pn.members {
-                                if case .associatedType = mKind {
-                                    if !self.members.keys.contains(mName) && !self.members.keys.contains("typealias " + mName) {
-                                        var val = "Any"
-                                        if mName == "Body" {
-                                            if hasConformance("ChartContent") {
-                                                val = "AnyChartContent"
-                                            } else if hasConformance("View") {
-                                                val = "SwiftUI.EmptyView"
-                                            } else if hasConformance("Scene") {
-                                                val = "SwiftUI.EmptyScene"
-                                            } else {
-                                                val = "Never"
-                                            }
+                        for (mName, mKind) in pn.members {
+                            if case .associatedType = mKind {
+                                if !self.members.keys.contains(mName) && !self.members.keys.contains("typealias " + mName) {
+                                    var val = "Any"
+                                    if mName == "LowerProtocol" {
+                                        if hasConformance("AutomaticLowerDatagramProcessing") {
+                                            val = "OutboundDatagramLinkage"
+                                        } else if hasConformance("AutomaticLowerStreamProcessing") {
+                                            val = "OutboundStreamLinkage"
                                         }
-                                        lines.append("\(nextIndent)public typealias \(mName) = \(val)")
+                                    } else if mName == "Body" {
+                                        if hasConformance("ChartContent") {
+                                            val = "AnyChartContent"
+                                        } else if hasConformance("View") {
+                                            val = "SwiftUI.EmptyView"
+                                        } else if hasConformance("Scene") {
+                                            val = "SwiftUI.EmptyScene"
+                                        } else {
+                                            val = "Never"
+                                        }
+                                    } else if skipAssociatedTypes {
+                                        continue
                                     }
+                                    lines.append("\(nextIndent)public typealias \(mName) = \(val)")
                                 }
                             }
                         }

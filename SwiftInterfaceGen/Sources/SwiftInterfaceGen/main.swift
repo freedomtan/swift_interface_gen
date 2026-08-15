@@ -374,7 +374,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                     i += 1
                 }
                 let token = String(chars[start..<i])
-                if token.hasPrefix("_$s") || token.hasPrefix("_OBJC_CLASS_$_") {
+                if token.hasPrefix("_$s") || token.hasPrefix("_OBJC_CLASS_$_") || token.hasPrefix("_OBJC_METACLASS_$_") || token.hasPrefix("_OBJC_IVAR_$_") {
                     // Skip symbols embedded inside `$ld$previous$...` linker metadata lines.
                     // These appear as `_$s<mangled>` inside a `$ld$previous$/path/$...$` string
                     // and represent old ABI-compatibility symbols, not current exports.
@@ -3362,6 +3362,9 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         
         // Generate stubs.s
         func isDataSymbol(_ sym: String) -> Bool {
+            if sym.hasPrefix("_OBJC_CLASS_$_") || sym.hasPrefix("_OBJC_METACLASS_$_") || sym.hasPrefix("_OBJC_IVAR_$_") {
+                return true
+            }
             let dataSuffixes = ["vpZ", "vp", "vpv", "vpvZ", "MF", "Mf", "WV", "VN", "MI", "Mi", "MP", "TL", "TM", "Mr", "MrZ"]
             for suf in dataSuffixes {
                 if sym.hasSuffix(suf) {

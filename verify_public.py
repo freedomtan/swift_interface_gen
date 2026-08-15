@@ -317,7 +317,7 @@ def test_framework(name, tbd, swiftinterface_path, work_dir):
             "-Xlinker", "-install_name", "-Xlinker", install_name,
             "-enable-experimental-feature", "NonescapableTypes",
             "-enable-experimental-feature", "Lifetimes",
-        ] + extra_compile_flags
+        ] + extra_compile_flags + extra_objs
         r = run(compile_cmd)
         if r.returncode != 0 or not os.path.exists(first_pass_dylib):
             print(f"\n--- Compilation failed for {name} ---")

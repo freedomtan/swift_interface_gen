@@ -2307,7 +2307,7 @@ class Parser {
                 }
                 unnamedCount += 1
             } else {
-                if !hasLabel && trimmed != "()" {
+                if (!hasLabel && trimmed != "()") || (hasLabel && labelName == "_") {
                     newParams.append("_ arg\(unnamedCount): " + escapedType)
                     unnamedCount += 1
                 } else {
@@ -2544,6 +2544,17 @@ class Parser {
             if let node = modules["ModelCatalog"]?.nestedTypes["LLMModelBase"] {
                 node.members["dependencies"] = .property(name: "dependencies", type: "Array<any ManagedResource>", isReadOnly: true, isStatic: false)
                 node.members["runtimeInformation"] = .property(name: "runtimeInformation", type: "Array<ManagedRuntimeInformation>", isReadOnly: true, isStatic: false)
+            }
+        }
+
+        if defaultModule == "Network" {
+            // Fix Network MultiplexingDatagramPath
+            if let node = modules["Network"]?.nestedTypes["MultiplexingDatagramPath"] {
+                node.members["typealias LowerProtocol"] = .associatedType("public typealias LowerProtocol = OutboundDatagramLinkage")
+                node.members["attachLowerProtocol"] = .method(name: "attachLowerProtocol", signature: "attachLowerProtocol(_ arg1: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> ()", isStatic: false)
+                node.members["handleNetworkProtocolEvent"] = .method(name: "handleNetworkProtocolEvent", signature: "handleNetworkProtocolEvent(_ arg1: ProtocolInstanceReference, event: NetworkProtocolEvent) -> ()", isStatic: false)
+                node.members["handleDisconnectedEvent"] = .method(name: "handleDisconnectedEvent", signature: "handleDisconnectedEvent(_ arg1: ProtocolInstanceReference, error: NetworkError?) -> ()", isStatic: false)
+                node.members["handleConnectedEvent"] = .method(name: "handleConnectedEvent", signature: "handleConnectedEvent(_ arg1: ProtocolInstanceReference) -> ()", isStatic: false)
             }
         }
         
