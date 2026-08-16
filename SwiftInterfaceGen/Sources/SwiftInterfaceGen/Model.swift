@@ -1378,11 +1378,16 @@ class TypeNode {
                 } else {
                     // For classes, ensure the init body is non-empty to force symbol emission.
                     // If it's NSObject, use super.init(), otherwise fatalError().
-                    let initBody = isOverride && cleanedSig.starts(with: "init()") ? "{ super.init() }" : "{ fatalError() }"
-                    let isCoderInit = cleanedSig.contains("init?(coder:") || cleanedSig.contains("init(coder:")
-                    let isRequired = finalKind == "class" && (isCoderInit || (!isFinalClass && (cleanedSig.contains("init(from:") || !self.conformances.isEmpty)))
+                    var effectiveSig = cleanedSig
+                    // Strip a leading "required " that may already be present in the demangled signature
+                    // to avoid emitting "required required public init(...)"
+                    let sigAlreadyRequired = effectiveSig.hasPrefix("required ")
+                    if sigAlreadyRequired { effectiveSig = String(effectiveSig.dropFirst("required ".count)) }
+                    let initBody = isOverride && effectiveSig.starts(with: "init()") ? "{ super.init() }" : "{ fatalError() }"
+                    let isCoderInit = effectiveSig.contains("init?(coder:") || effectiveSig.contains("init(coder:")
+                    let isRequired = sigAlreadyRequired || (finalKind == "class" && (isCoderInit || (!isFinalClass && (effectiveSig.contains("init(from:") || !self.conformances.isEmpty))))
                     let requiredMod = isRequired ? "required " : ""
-                    lines.append("\(nextIndent)\(requiredMod)public \(overrideMod)\(cleanedSig) \(initBody)")
+                    lines.append("\(nextIndent)\(requiredMod)public \(overrideMod)\(effectiveSig) \(initBody)")
                 }
             case .property(let n, let t, let isReadOnly, let isStatic):
                 // Subscripts can have multiple overloads (e.g. subscript([Int]) and subscript(Int...))

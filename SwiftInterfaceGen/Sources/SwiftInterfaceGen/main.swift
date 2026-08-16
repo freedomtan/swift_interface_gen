@@ -2378,6 +2378,9 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 with: "public static let counter: Synchronization.Atomic<Swift.UInt32> = .init(0)",
                 options: .regularExpression)
             c = c.replacingOccurrences(
+                of: "required public init(_ arg1: ODIE.DelegateProgramArguments)",
+                with: "public init(_ arg1: ODIE.DelegateProgramArguments)")
+            c = c.replacingOccurrences(
                 of: "public init(_ arg1: ODIE.DelegateProgramArguments)",
                 with: "required public init(_ arg1: ODIE.DelegateProgramArguments)")
             c += """
