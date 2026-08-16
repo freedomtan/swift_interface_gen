@@ -2383,9 +2383,24 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(
                 of: "public init(_ arg1: ODIE.DelegateProgramArguments)",
                 with: "required public init(_ arg1: ODIE.DelegateProgramArguments)")
+            c = c.replacingOccurrences(
+                of: "public var delegateLogger: Logger { get { fatalError() } }",
+                with: "public let delegateLogger: os.Logger = os.Logger()")
+            c = c.replacingOccurrences(
+                of: "public struct __C_MPSGraphNDXRuntime: Hashable, Codable, Sendable {}",
+                with: "public typealias __C_MPSGraphNDXRuntime = MPSGraphNDXRuntime")
+            c = c.replacingOccurrences(
+                of: "outputIsInOut: @escaping (Swift.Int) -> Swift.Bool",
+                with: "outputIsInOut: (Swift.Int) -> Swift.Bool")
+            c = c.replacingOccurrences(
+                of: "public final let mpsgraphDelegate: MPSGraphDelegate?",
+                with: "public final func deinitNDX() {}\n    public final let mpsgraphDelegate: MPSGraphDelegate?")
             c += """
 
             public class MPSGraphNDXRuntime {}
+            extension Array {
+                public init(_ span: Span<Element>) { fatalError() }
+            }
             """
         }
 
