@@ -387,9 +387,15 @@ class Parser {
             if node.kind != kind {
                 node.kind = kind
             }
+            if ["struct", "class", "enum"].contains(kind) {
+                node.kindConfirmedFromABI = true
+            }
         } else if node.kind == "unknown" || node.kind == "struct" {
              if kind == "class" || kind == "enum" || kind == "protocol" {
                  node.kind = kind
+                 if ["struct", "class", "enum"].contains(kind) {
+                     node.kindConfirmedFromABI = true
+                 }
              }
         }
         if ["struct", "class", "enum"].contains(node.kind) {
@@ -1565,6 +1571,7 @@ class Parser {
                 
                 if memberName == "rawValue" && (node.kind == "enum" || node.kind == "unknown") {
                     node.kind = "enum"
+                    node.kindConfirmedFromABI = true
                     node.rawType = type
                 }
 
@@ -2942,9 +2949,20 @@ class Parser {
                 // Coherence ships only a .tbd with ABI symbols, no .swiftinterface — its types
                 // can't be confirmed real, and "extension Coherence.CRContext" then fails with
                 // "no type named 'CRContext' in module 'Coherence'"). Skip such a module/type
-                // entirely rather than guessing.
+                // entirely rather than guessing — UNLESS kind is confirmed from an actual ABI
+                // nominal-type-descriptor/type-metadata symbol (kindConfirmedFromABI — NOT the
+                // same as `kindIsKnown` above, which can also be true purely because
+                // generateAll()'s later "default every still-unknown type to struct" pass ran;
+                // that default alone isn't proof the type is real, e.g. a bare, genuinely
+                // nonexistent reference like XPC.XPCCodableObject). A real ABI symbol is just as
+                // strong a proof the type is real as a .swiftinterface declaration, and for a
+                // private ABI-only framework (e.g. TokenGeneration, which ships no
+                // .swiftinterface anywhere in the SDK) the isTypeDefinedInFramework check would
+                // otherwise ALWAYS fail — even for types this module's own real members
+                // legitimately extend — discarding real extensionMembers data and falling back
+                // to an empty flattened stub in Phase 4 below.
                 if isExternalAvailable && moduleName != "Swift" && moduleName != "__C" &&
-                   !isTypeDefinedInFramework(module: moduleName, typeName: type.name) {
+                   !type.kindConfirmedFromABI && !isTypeDefinedInFramework(module: moduleName, typeName: type.name) {
                     continue
                 }
 
@@ -3027,9 +3045,27 @@ class Parser {
                         let hkBridgedProtocolNames: Set<String> = [
                             "HKDataCacheContext", "HKDataCacheProviding", "HKWorkoutMetricsDelegate"
                         ]
+                        // A VMn/CMn/OMn-suffixed nominal-type-descriptor symbol (real ABI,
+                        // kindConfirmedFromABI — NOT the same as a bare kind == struct/class/enum
+                        // check, which can also be true purely from generateAll()'s later
+                        // "default every still-unknown type to struct" pass and isn't proof the
+                        // type is real, e.g. XPC.XPCCodableObject) is just as strong a proof the
+                        // type is real as isTypeDefinedInFramework's .swiftinterface-presence
+                        // check — and for a private ABI-only framework (no .swiftinterface
+                        // anywhere in the SDK, e.g. TokenGeneration) that check can never
+                        // succeed, permanently flattening every such type into an empty,
+                        // disconnected struct instead of the correct typealias. See the matching
+                        // bypass in Phase 2 above for the fuller rationale.
+                        // Scoped to non-"__C" modules: __C's own isTypeDefinedInFramework path
+                        // (systemTypes.contains) is a different, already-correct mechanism for
+                        // ObjC-bridged types, and a handful of __C names (NSInputStream/
+                        // NSOutputStream) are ABI-real but Swift-obsoleted/renamed — bypassing
+                        // here would emit a bare typealias to the obsoleted name instead of the
+                        // renamed one simplifyType() otherwise produces.
+                        let kindIsKnownHere = moduleName != "__C" && type.kindConfirmedFromABI
                         if defaultModule == "HealthKit" && moduleName == "__C" && hkBridgedProtocolNames.contains(type.name) {
                             // no-op: real declaration comes from the bridge header
-                        } else if isTypeDefinedInFramework(module: moduleName, typeName: type.name) {
+                        } else if kindIsKnownHere || isTypeDefinedInFramework(module: moduleName, typeName: type.name) {
                             if moduleName == "__C" {
                                 output += "public typealias \(flattenedName)\(gps) = \(type.name)\(gps)\n"
                             } else {

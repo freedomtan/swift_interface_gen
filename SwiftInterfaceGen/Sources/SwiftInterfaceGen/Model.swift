@@ -42,6 +42,15 @@ class TypeNode {
     // symbol (Parser.swift) — such a property must be emitted as a real stored var/let, not
     // the default computed-property rendering, or its accessor/addressor ABI won't match.
     var storedMembers: Set<String> = []
+    // True only when `kind` was set from an actual ABI nominal-type-descriptor/type-metadata
+    // symbol (setKind, Parser.swift) — as opposed to generateAll()'s later, unconditional
+    // "default every still-unknown type to struct" pass, which also leaves `kind` as
+    // struct/class/enum but for a type that may genuinely not exist anywhere (e.g. a bare
+    // reference like XPC.XPCCodableObject with no real declaration in the XPC module at all).
+    // Needed so Parser.swift's Phase 2/4 "is this type real" gates can trust `kind` alone for
+    // a private ABI-only framework (no .swiftinterface to fall back on) without also trusting
+    // it for a type that was merely defaulted.
+    var kindConfirmedFromABI: Bool = false
 
     private func isLifetimeSpanType(_ type: String) -> Bool {
         let clean = type.replacingOccurrences(of: "Optional<", with: "")
@@ -2470,9 +2479,17 @@ class TypeNode {
             }
         }
 
+        // A retroactive conformance (below) is a property of the TYPE, not of any one extension
+        // block — generateOneExtension can be called multiple times for the same type
+        // (extensionMembers, each constrainedExtensions constraint, each
+        // originallyDefinedInExtensions module), and re-declaring the same conformance on more
+        // than one of those blocks produces "redundant conformance of 'X' to protocol 'Y'".
+        // Emit it on the first block only.
+        var retroactiveConformanceEmitted = false
+
         func generateOneExtension(membersList: [MemberKind], constraint: String?) -> String {
             var extLines = [String]()
-            
+
         // Collect generic parameters from constraint and all associated types
         var extInScope = inScope
         if isProtocol {
@@ -2557,7 +2574,7 @@ class TypeNode {
             // called on them), so without emitting them here the conformance itself is silently
             // dropped even though its member witnesses render fine.
             var retroactiveConformanceSuffix = ""
-            if parser?.getTopLevelModule(for: self) != defaultModule {
+            if parser?.getTopLevelModule(for: self) != defaultModule && !retroactiveConformanceEmitted {
                 let wellKnownStdlib: Set<String> = ["Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Sendable", "Error", "CustomStringConvertible", "Comparable", "Sequence", "Collection", "Strideable", "Numeric", "SignedNumeric", "AdditiveArithmetic", "FloatingPoint", "BinaryFloatingPoint", "LosslessStringConvertible", "CaseIterable", "RawRepresentable", "CodingKey", "LocalizedError", "~Copyable"]
                 let retroactive = conformances.compactMap { conf -> String? in
                     let clean = conf.replacingOccurrences(of: "any ", with: "")
@@ -2566,6 +2583,7 @@ class TypeNode {
                     return clean
                 }
                 if !retroactive.isEmpty {
+                    retroactiveConformanceEmitted = true
                     retroactiveConformanceSuffix = ": " + retroactive.sorted().joined(separator: ", ")
                 }
             }
