@@ -851,7 +851,11 @@ class Parser {
                     }
                     return
                 } else if desc.contains("conformance descriptor") {
-                    let parts = d.components(separatedBy: ":")
+                    var confStr = d
+                    if confStr.hasPrefix("(extension in "), let colonIdx = confStr.firstIndex(of: ":") {
+                        confStr = String(confStr[confStr.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
+                    }
+                    let parts = confStr.components(separatedBy: ":")
                     if parts.count == 2 {
                         var typePath = parts[0].trimmingCharacters(in: .whitespaces)
                         if typePath.contains("protocol conformance descriptor for ") {
@@ -1703,13 +1707,13 @@ class Parser {
     private func findOrCreateType(name: String) -> TypeNode {
         if name.contains("<") { fputs("findOrCreateType with <: \(name)\n", stderr) }
         var parts = name.components(separatedBy: ".")
+        if parts[0] == "A?" || parts[0].hasSuffix("?") {
+            parts = ["Swift", "Optional"] + parts.dropFirst()
+        } else if parts[0] == "Swift" && parts.count > 1 && (parts[1] == "A?" || parts[1].hasSuffix("?")) {
+            parts = ["Swift", "Optional"] + parts.dropFirst(2)
+        }
         
-        let isExternalExt = selfDeclaredExternalExtensionPaths.contains {
-            name == $0 || name.hasPrefix($0 + ".")
-        }
-        if isExternalExt {
-            return TypeNode(name: parts.last!)
-        }
+
         // Members of a type like "Publisher" that discoverNominalTypes recognized as declared
         // inside a "(extension in <defaultModule>)" on some other module's type (e.g.
         // Swift.Optional, or TokenGeneration.Prompt) route here as
@@ -2907,7 +2911,9 @@ class Parser {
                     // or Result<Success, Failure>), which are not in scope inside the inner struct.
                     var body = type.generateCode(indent: "    ", nameOverride: extInfo.displayName, parser: self)
                     let replacementForB = (extInfo.stdlibType == "Result") ? "any Swift.Error" : "Any"
+                    body = body.replacingOccurrences(of: "typealias A =", with: "typealias ___TYPEALIAS_A___ =")
                     body = body.replaceWord("A", with: "Any", allowPrecededByDot: false, allowFollowedByDot: false)
+                    body = body.replacingOccurrences(of: "typealias ___TYPEALIAS_A___ =", with: "typealias A =")
                     body = body.replaceWord("B", with: replacementForB, allowPrecededByDot: false, allowFollowedByDot: false)
                     for bare in ["C", "D"] {
                         body = body.replaceWord(bare, with: "Any", allowPrecededByDot: false, allowFollowedByDot: false)

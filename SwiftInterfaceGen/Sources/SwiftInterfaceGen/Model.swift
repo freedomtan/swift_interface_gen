@@ -258,15 +258,29 @@ class TypeNode {
         }
         
         let defaultModule = parser.defaultModule
-        var pathComponents = [String]()
-        if !defaultModule.isEmpty { pathComponents.append(defaultModule) }
+        let topMod = parser.getTopLevelModule(for: self)
         let enc = getEnclosingPath()
-        if !enc.isEmpty { pathComponents.append(enc) }
-        pathComponents.append(self.name)
-        let fullTypeName = pathComponents.joined(separator: ".")
-        let methodKey = "\(fullTypeName).\(methodName)(\(labels.joined(separator: ":"))\(labels.isEmpty ? "" : ":"))"
+        let typeSuffix = (enc.isEmpty ? "" : enc + ".") + self.name
+        let labelSuffix = "(\(labels.joined(separator: ":"))\(labels.isEmpty ? "" : ":"))"
 
-        guard let indices = parser.defaultArguments[methodKey] else {
+        let candidateKeys = [
+            "\(topMod).\(typeSuffix).\(methodName)\(labelSuffix)",
+            "\(defaultModule).\(typeSuffix).\(methodName)\(labelSuffix)",
+            "\(typeSuffix).\(methodName)\(labelSuffix)",
+            "\(self.name).\(methodName)\(labelSuffix)"
+        ]
+
+        var indicesOpt: Set<Int>? = nil
+        var matchedKey = ""
+        for k in candidateKeys {
+            if let idxs = parser.defaultArguments[k] {
+                indicesOpt = idxs
+                matchedKey = k
+                break
+            }
+        }
+
+        guard let indices = indicesOpt else {
             return signature
         }
         
@@ -278,7 +292,7 @@ class TypeNode {
                 if let colonIdx = trimmed.firstIndex(of: ":") {
                     let typePart = String(trimmed[trimmed.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
                     defaultValue = TypeNode.getDefaultValue(for: typePart)
-                    fputs("applyDefaultArguments key: \(methodKey) typePart: '\(typePart)' resolved: '\(defaultValue)'\n", stderr)
+                    fputs("applyDefaultArguments key: \(matchedKey) typePart: '\(typePart)' resolved: '\(defaultValue)'\n", stderr)
                 }
                 newParams.append("\(trimmed) = \(defaultValue)")
             } else {
@@ -1332,7 +1346,12 @@ class TypeNode {
                 
                 let localCleanScope = { (s: String) -> String in
                     var res = s
-                    let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                    let placeholders = [
+                        "A", "B", "C", "D", "E", "F", "G",
+                        "A1", "B1", "C1", "D1", "E1", "F1", "G1",
+                        "A2", "B2", "C2", "D2", "E2", "F2", "G2",
+                        "A3", "B3", "C3", "D3", "E3", "F3", "G3"
+                    ]
                     for p in placeholders {
                         if !effectiveScope.contains(p) {
                             res = res.replaceWord(p, with: "Any")
@@ -1720,7 +1739,12 @@ class TypeNode {
                 }
                 cleanedSig = {
                     var res = cleanedSig
-                    let placeholders = ["A", "B", "C", "D", "E", "F", "G"]
+                    let placeholders = [
+                        "A", "B", "C", "D", "E", "F", "G",
+                        "A1", "B1", "C1", "D1", "E1", "F1", "G1",
+                        "A2", "B2", "C2", "D2", "E2", "F2", "G2",
+                        "A3", "B3", "C3", "D3", "E3", "F3", "G3"
+                    ]
                     for p in placeholders {
                         if !effectiveScope.contains(p) {
                             res = res.replaceWord(p, with: "Any")
@@ -1770,7 +1794,7 @@ class TypeNode {
                     }
                 }
 
-                if cleanN == "==" && (sig.contains(".Type") || sig.contains(".`Type`")) {
+                if cleanN == "==" && (sig.range(of: "\\.Type\\b", options: .regularExpression) != nil || sig.contains(".`Type`")) {
                     continue
                 }
 
@@ -1901,7 +1925,7 @@ class TypeNode {
                     let returnType = sigParts.count > 1 ? sigParts.last!.replacingOccurrences(of: ")", with: "").trimmingCharacters(in: .whitespaces) : "Bool"
                     let allArgs = sigParts[0].trimmingCharacters(in: .whitespaces)
                     
-                    let argTypes = allArgs.components(separatedBy: ", ")
+                    let argTypes = allArgs.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
                     if argTypes.count == 2 {
                         var left = argTypes[0].replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "").trimmingCharacters(in: .whitespaces)
                         var right = argTypes[1].replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "").trimmingCharacters(in: .whitespaces)
@@ -2321,6 +2345,24 @@ class TypeNode {
                         lines.append("\(nextIndent)public mutating func appendLiteral(_ literal: Swift.String) { fatalError() }")
                     }
                 }
+                if confBase == "EventPredicateExpression" || confBase.hasSuffix(".EventPredicateExpression") {
+                    let hasA = self.nestedTypes["A"] != nil || self.nestedTypes["typealias A"] != nil ||
+                               self.members.keys.contains { $0 == "A" || $0.hasPrefix("typealias A") } ||
+                               self.extensionMembers.keys.contains { $0 == "A" || $0.hasPrefix("typealias A") } ||
+                               lines.contains { $0.contains("typealias A") }
+                    if !hasA {
+                        lines.append("\(nextIndent)public typealias A = Any")
+                    }
+                }
+                if (confBase == "AttributedStringKey" || confBase.hasSuffix(".AttributedStringKey")) && actualKind == "enum" {
+                    let hasValue = self.nestedTypes["Value"] != nil || self.nestedTypes["typealias Value"] != nil ||
+                                   self.members.keys.contains { $0 == "Value" || $0.hasPrefix("typealias Value") } ||
+                                   self.extensionMembers.keys.contains { $0 == "Value" || $0.hasPrefix("typealias Value") } ||
+                                   lines.contains { $0.contains("typealias Value") }
+                    if !hasValue {
+                        lines.append("\(nextIndent)public typealias Value = Bool")
+                    }
+                }
                 
                 // Look up internal/custom protocols defined in the module
                 // NOTE: Protocol synthesis disabled — associated-type fallback always synthesizes
@@ -2368,6 +2410,10 @@ class TypeNode {
                                         } else if hasConformance("AutomaticLowerStreamProcessing") {
                                             val = "OutboundStreamLinkage"
                                         }
+                                    } else if mName == "Value" && hasConformance("AttributedStringKey") {
+                                        val = "Bool"
+                                    } else if mName == "A" {
+                                        val = "Any"
                                     } else if mName == "Body" {
                                         if hasConformance("ChartContent") {
                                             val = "AnyChartContent"
