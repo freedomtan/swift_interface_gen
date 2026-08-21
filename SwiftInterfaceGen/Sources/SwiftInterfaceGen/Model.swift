@@ -42,6 +42,7 @@ class TypeNode {
     // symbol (Parser.swift) — such a property must be emitted as a real stored var/let, not
     // the default computed-property rendering, or its accessor/addressor ABI won't match.
     var storedMembers: Set<String> = []
+    var silgenSymbols: Set<String> = []
     // True only when `kind` was set from an actual ABI nominal-type-descriptor/type-metadata
     // symbol (setKind, Parser.swift) — as opposed to generateAll()'s later, unconditional
     // "default every still-unknown type to struct" pass, which also leaves `kind` as
@@ -2484,6 +2485,16 @@ class TypeNode {
                     }
                 }
             }
+        }
+        
+        for sym in self.silgenSymbols.sorted() {
+            var cleanSym = sym
+            if cleanSym.hasPrefix("_") {
+                cleanSym = String(cleanSym.dropFirst())
+            }
+            let funcName = "_stub_" + cleanSym.replacingOccurrences(of: "$", with: "_").replacingOccurrences(of: "@", with: "_")
+            lines.append("\(nextIndent)@_silgen_name(\"\(cleanSym)\")")
+            lines.append("\(nextIndent)public static func \(funcName)() { fatalError() }")
         }
         
         if hasDeinit && !isObjcBridged && (actualKind == "class" || (actualKind == "struct" && hasConformance("~Copyable"))) {

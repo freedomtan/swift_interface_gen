@@ -692,6 +692,23 @@ class Parser {
                 let node = findOrCreateType(name: cleanType(typePath))
                 let escapedMemberName = escapeKeyword(memberName)
                 node.storedMembers.insert(isStoredStatic ? "static \(escapedMemberName)" : escapedMemberName)
+                if isStoredStatic && (mangled.hasSuffix("vau") || mangled.contains("vau")) {
+                    node.silgenSymbols.insert(mangled)
+                }
+            }
+            return
+        }
+
+        if mangled.hasSuffix("vpZ") && demangled.hasPrefix("static ") {
+            var propPath = demangled
+            if let colonIdx = propPath.range(of: " : ") {
+                propPath = String(propPath[..<colonIdx.lowerBound])
+            }
+            propPath = String(propPath.dropFirst("static ".count))
+            let (typePath, memberName) = splitPath(propPath)
+            if !typePath.isEmpty && !memberName.isEmpty {
+                let node = findOrCreateType(name: cleanType(typePath))
+                node.silgenSymbols.insert(mangled)
             }
             return
         }
