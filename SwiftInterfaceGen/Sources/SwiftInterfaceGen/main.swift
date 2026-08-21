@@ -2377,8 +2377,16 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 of: #"public static var counter: (?:Synchronization\.)?Atomic<.*?>.*"#,
                 with: "public static let counter: Synchronization.Atomic<Swift.UInt32> = .init(0)",
                 options: .regularExpression)
+            // Model.swift's own `required` synthesis (isRequired, for a non-final class
+            // conforming to a protocol) can already have prepended "required " to this exact
+            // initializer -- blindly prepending a second one here produces the illegal
+            // "required required public init(...)" (duplicate modifier). Only add it when
+            // missing.
             c = c.replacingOccurrences(
                 of: "public init(_ arg1: ODIE.DelegateProgramArguments)",
+                with: "required public init(_ arg1: ODIE.DelegateProgramArguments)")
+            c = c.replacingOccurrences(
+                of: "required required public init(_ arg1: ODIE.DelegateProgramArguments)",
                 with: "required public init(_ arg1: ODIE.DelegateProgramArguments)")
             c += """
 
