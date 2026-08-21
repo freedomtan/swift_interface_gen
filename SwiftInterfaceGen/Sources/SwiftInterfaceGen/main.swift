@@ -97,8 +97,28 @@ struct SwiftInterfaceGen {
         let stdlibExtPrefixes = ["_$ss", "_$sSf", "_$sSd", "_$sSi", "_$sSu", "_$sSb",
                                  "_$sSS", "_$sSs",  // Float/Double/Int/UInt/Bool/String/Substring
                                  "_$sSo"]           // ObjC class extensions (So = Swift ObjC bridge)
+        var movedTypeNames = Set<String>()
+        if let moduleNode = parser.modules[currentModule] {
+            for t in moduleNode.nestedTypes.values where t.movedFromModule != nil {
+                movedTypeNames.insert(t.name)
+            }
+        }
+
         var filteredExports = parser.ownTbdSymbols.sorted().filter { sym in
-            !stdlibExtPrefixes.contains(where: { sym.hasPrefix($0) })
+            if stdlibExtPrefixes.contains(where: { sym.hasPrefix($0) }) {
+                return false
+            }
+            if sym.hasPrefix("_$s") || sym.hasPrefix("$s") {
+                if let mod = Parser.getMangledModule(sym), mod != currentModule {
+                    let extMarker = "\(currentModule.count)\(currentModule)E"
+                    let isExtension = sym.contains(extMarker)
+                    let isMoved = movedTypeNames.contains(where: { sym.contains($0) })
+                    if !isExtension && !isMoved {
+                        return false
+                    }
+                }
+            }
+            return true
         }
         let ownObjcClasses = extractObjcClasses(from: content)
         for cls in ownObjcClasses {
