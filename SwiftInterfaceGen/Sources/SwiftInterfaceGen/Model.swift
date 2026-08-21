@@ -51,6 +51,20 @@ class TypeNode {
     // a private ABI-only framework (no .swiftinterface to fall back on) without also trusting
     // it for a type that was merely defaulted.
     var kindConfirmedFromABI: Bool = false
+    // Set when this type's own nominal-type-descriptor/type-metadata symbol (a VMn/CMn/OMn or
+    // VN/CN/ON suffix) is found directly in the PRIMARY TARGET's own .tbd document (not a
+    // dependency's), but mangled under a DIFFERENT module than the primary target itself (e.g.
+    // TokenGenerationCore's own .tbd directly, non-compatibility-shim-wrapped, exports
+    // _$s15TokenGeneration6PromptVMn). This is Apple's real ABI signal that the type has been
+    // moved wholesale from its nominal module to the primary target via
+    // @_originallyDefinedIn — the nominal module's own .tbd only carries the moved type's
+    // symbols inside $ld$previous$ back-deployment compatibility strings, not as real current
+    // exports. Stores the nominal (pre-move) module name so generateAll() can render the type
+    // as one of the primary target's own real declarations, tagged with the matching
+    // @_originallyDefinedIn attribute, instead of leaving it to the dependency-stub path (which
+    // would only ever produce an empty/dynamic_lookup-satisfied reference and never actually
+    // compile the type's own ABI into the primary target's binary).
+    var movedFromModule: String? = nil
 
     private func isLifetimeSpanType(_ type: String) -> Bool {
         let clean = type.replacingOccurrences(of: "Optional<", with: "")
@@ -276,7 +290,7 @@ class TypeNode {
         return String(prefix) + newParams.joined(separator: ", ") + String(suffix)
     }
 
-    private func escapeKeyword(_ name: String) -> String {
+    func escapeKeyword(_ name: String) -> String {
         let swiftKeywords: Set<String> = [
             "associatedtype", "class", "deinit", "enum", "extension", "fileprivate",
             "func", "import", "init", "inout", "internal", "let", "open", "operator",
@@ -1962,12 +1976,25 @@ class TypeNode {
 
         // Add explicit conformance stubs for non-protocol types IF not already provided
         if !isProtocol {
-            let hasInitFrom = members.values.contains { if case .initializer(let s) = $0, s.contains("init(from:") { return true }; return false }
-            let hasEncodeTo = members.values.contains { if case .method(let n, _, _) = $0, n == "encode" { return true }; return false }
-            let hasHashInto = members.values.contains { if case .method(let n, _, _) = $0, n == "hash" { return true }; return false }
-            let hasCoderInit = members.values.contains { if case .initializer(let s) = $0, s.contains("init(coder:") { return true }; return false }
-            let hasEncodeWith = members.values.contains { if case .method(let n, let s, _) = $0, n == "encode" && s.contains("with:") { return true }; return false }
-            let hasDebugDescription = members.values.contains { if case .property(let n, _, _, _) = $0, n == "debugDescription" { return true }; return false }
+            // A real ABI-enriched member can land in extensionMembers/originallyDefinedInExtensions
+            // instead of `members` (e.g. Codable/Hashable synthesis on a dependency-stub type
+            // whose descriptor moved via @_originallyDefinedIn) -- checking only `members` here
+            // would miss it and synthesize a duplicate declaration. constrainedExtensions is
+            // deliberately EXCLUDED: a member declared there only exists under an ADDITIONAL
+            // generic constraint (e.g. "extension PubSub.Completion where A: Decodable") and does
+            // NOT satisfy the type's own unconditional Codable/Hashable conformance for every A —
+            // treating it as if it did skips synthesizing the real, unconditional init(from:)/
+            // encode(to:)/hash(into:) this type still needs for the general case.
+            let allMemberContainers: [[String: MemberKind]] = [members, extensionMembers] + Array(originallyDefinedInExtensions.values)
+            func anyContainerHas(_ predicate: (MemberKind) -> Bool) -> Bool {
+                allMemberContainers.contains { $0.values.contains(where: predicate) }
+            }
+            let hasInitFrom = anyContainerHas { if case .initializer(let s) = $0, s.contains("init(from:") { return true }; return false }
+            let hasEncodeTo = anyContainerHas { if case .method(let n, _, _) = $0, n == "encode" { return true }; return false }
+            let hasHashInto = anyContainerHas { if case .method(let n, _, _) = $0, n == "hash" { return true }; return false }
+            let hasCoderInit = anyContainerHas { if case .initializer(let s) = $0, s.contains("init(coder:") { return true }; return false }
+            let hasEncodeWith = anyContainerHas { if case .method(let n, let s, _) = $0, n == "encode" && s.contains("with:") { return true }; return false }
+            let hasDebugDescription = anyContainerHas { if case .property(let n, _, _, _) = $0, n == "debugDescription" { return true }; return false }
 
             if (hasConformance("Decodable") || hasConformance("Codable")) && !hasInitFrom {
                 let requiredMod = (kind == "class") ? "required " : ""
@@ -1980,7 +2007,13 @@ class TypeNode {
                 lines.append("\(nextIndent)public func hash(into hasher: inout Hasher) { fatalError() }")
             }
             if hasConformance("CustomDebugStringConvertible") && !hasDebugDescription {
-                lines.append("\(nextIndent)public var debugDescription: String { get { fatalError() } }")
+                // Must be qualified "Swift.String", not bare "String" -- a type can legitimately
+                // declare its own nested type literally named "String" (e.g.
+                // GenerativeFunctionsFoundation.JSONSchema.String), which would otherwise shadow
+                // the stdlib type in this synthesized property's own declaring scope and fail
+                // the CustomDebugStringConvertible conformance ("candidate has non-matching type
+                // 'JSONSchema.String'").
+                lines.append("\(nextIndent)public var debugDescription: Swift.String { get { fatalError() } }")
             }
             let genericParamsList: String
             if typeName == "BidirectionalXPCServiceClientConnection" {
@@ -2066,6 +2099,27 @@ class TypeNode {
                     lines.append("\(nextIndent)public var rawValue: \(rawValueType) { get { fatalError() } }")
                 }
             }
+            // OptionSet/SetAlgebra require a public `init()` (the empty-set value). The
+            // compiler-synthesized memberwise init for a struct is never public, so without an
+            // explicit public `init()` somewhere the conformance fails outright ("initializer
+            // 'init()' must be declared public"). Real conforming types' ABI only ever exposes
+            // `init(rawValue:)` for this shape, never a standalone `init()` -- so it must be
+            // synthesized whenever missing, checking members AND extensionMembers/
+            // originallyDefinedInExtensions (Stage F's moved-type extension emits the
+            // rawValue init there, not in `members`).
+            let allInitContainers: [[String: MemberKind]] = [members, extensionMembers] + Array(originallyDefinedInExtensions.values) + Array(constrainedExtensions.values)
+            let hasEmptyInit = allInitContainers.contains { container in
+                container.values.contains {
+                    if case .initializer(let s) = $0 { return s == "init()" || s.hasPrefix("init()") }
+                    return false
+                }
+            }
+            if hasConformance("OptionSet") || hasConformance("SetAlgebra") || hasEmptyInit {
+                if !members.values.contains(where: { if case .initializer(let s) = $0 { return s == "init()" || s.hasPrefix("init()") } else { return false } }) {
+                    members["init()"] = .initializer("init()")
+                    lines.append("\(nextIndent)public init() { fatalError() }")
+                }
+            }
 
             if hasConformance("Comparable") && !hasLessThanOperator() {
                 let leftType = escapeKeyword(n) + genericParamsList
@@ -2073,7 +2127,10 @@ class TypeNode {
                 lines.append("\(nextIndent)public static func <(_ lhs: \(leftType), _ rhs: \(rightType)) -> Bool { fatalError() }")
             }
             if hasConformance("CustomStringConvertible") && !hasDescriptionProperty() {
-                lines.append("\(nextIndent)public var description: String { get { return \"\" } }")
+                // Qualified "Swift.String" for the same reason as the CustomDebugStringConvertible
+                // synthesis above -- a nested type literally named "String" would otherwise shadow
+                // the stdlib type here and fail the conformance.
+                lines.append("\(nextIndent)public var description: Swift.String { get { return \"\" } }")
             }
             // ContiguousBytes requires `withUnsafeBytes<R>(_:) rethrows -> R`, which CryptoKit's
             // conforming types (Nonce/Digest/SymmetricKey/etc.) never declare explicitly in their
@@ -2209,6 +2266,58 @@ class TypeNode {
                     }
                     if !hasBody {
                         lines.append("\(nextIndent)public var body: Never { get { fatalError() } }")
+                    }
+                }
+                // A real ABI-enriched member satisfying one of these protocol-driven synthesis
+                // checks below can land in extensionMembers/originallyDefinedInExtensions/
+                // constrainedExtensions instead of `members` (e.g. Stage F's moved-type
+                // extension emits a nested type's real init/method there) -- checking only
+                // `members` would miss it and synthesize a duplicate declaration.
+                let allSynthesisMemberContainers: [[String: MemberKind]] = [self.members, self.extensionMembers] + Array(self.originallyDefinedInExtensions.values) + Array(self.constrainedExtensions.values)
+                func synthesisContainerHas(_ predicate: (MemberKind) -> Bool) -> Bool {
+                    allSynthesisMemberContainers.contains { $0.values.contains(where: predicate) }
+                }
+                if confBase == "AsyncSequence" || confBase == "Swift.AsyncSequence" {
+                    let hasMakeAsyncIterator = synthesisContainerHas {
+                        if case .method(let name, _, _) = $0 { return name.hasPrefix("makeAsyncIterator") }
+                        return false
+                    }
+                    if !hasMakeAsyncIterator {
+                        if self.nestedTypes["AsyncIterator"] != nil {
+                            lines.append("\(nextIndent)public func makeAsyncIterator() -> AsyncIterator { fatalError() }")
+                        } else {
+                            if !self.members.keys.contains("Element") && !self.members.keys.contains("typealias Element") {
+                                lines.append("\(nextIndent)public typealias Element = Any")
+                            }
+                        }
+                    }
+                }
+                if confBase == "AsyncIteratorProtocol" || confBase == "Swift.AsyncIteratorProtocol" {
+                    let hasNext = synthesisContainerHas {
+                        if case .method(let name, _, _) = $0 { return name.hasPrefix("next") }
+                        return false
+                    }
+                    if !hasNext {
+                        if !self.members.keys.contains("Element") && !self.members.keys.contains("typealias Element") {
+                            lines.append("\(nextIndent)public typealias Element = Any")
+                        }
+                        lines.append("\(nextIndent)public mutating func next() async throws -> Element? { fatalError() }")
+                    }
+                }
+                if confBase == "StringInterpolationProtocol" || confBase == "Swift.StringInterpolationProtocol" {
+                    let hasLiteralCapacityInit = synthesisContainerHas {
+                        if case .initializer(let s) = $0 { return s.contains("literalCapacity") }
+                        return false
+                    }
+                    if !hasLiteralCapacityInit {
+                        lines.append("\(nextIndent)public init(literalCapacity: Swift.Int, interpolationCount: Swift.Int) { fatalError() }")
+                    }
+                    let hasAppendLiteral = synthesisContainerHas {
+                        if case .method(let name, _, _) = $0 { return name == "appendLiteral" }
+                        return false
+                    }
+                    if !hasAppendLiteral {
+                        lines.append("\(nextIndent)public mutating func appendLiteral(_ literal: Swift.String) { fatalError() }")
                     }
                 }
                 
@@ -2397,7 +2506,7 @@ class TypeNode {
                 }
             }
         }
-        for ext in constrainedExtensions.values {
+        for ext in Array(constrainedExtensions.values) + Array(originallyDefinedInExtensions.values) {
             for member in ext.values {
                 if case .method(let n, _, _) = member {
                     let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
@@ -2419,7 +2528,7 @@ class TypeNode {
                 }
             }
         }
-        for ext in constrainedExtensions.values {
+        for ext in Array(constrainedExtensions.values) + Array(originallyDefinedInExtensions.values) {
             for member in ext.values {
                 if case .method(let n, _, _) = member {
                     let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
@@ -2433,7 +2542,11 @@ class TypeNode {
     }
 
     func hasDescriptionProperty() -> Bool {
-        return members["description"] != nil
+        if members["description"] != nil { return true }
+        for ext in [extensionMembers] + Array(constrainedExtensions.values) + Array(originallyDefinedInExtensions.values) {
+            if ext["description"] != nil { return true }
+        }
+        return false
     }
 
     func generateExtensions(defaultModule: String, parser: Parser? = nil, path: String = "") -> String {
@@ -2574,8 +2687,8 @@ class TypeNode {
             // called on them), so without emitting them here the conformance itself is silently
             // dropped even though its member witnesses render fine.
             var retroactiveConformanceSuffix = ""
-            if parser?.getTopLevelModule(for: self) != defaultModule && !retroactiveConformanceEmitted {
-                let wellKnownStdlib: Set<String> = ["Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Sendable", "Error", "CustomStringConvertible", "Comparable", "Sequence", "Collection", "Strideable", "Numeric", "SignedNumeric", "AdditiveArithmetic", "FloatingPoint", "BinaryFloatingPoint", "LosslessStringConvertible", "CaseIterable", "RawRepresentable", "CodingKey", "LocalizedError", "~Copyable"]
+            if self.movedFromModule == nil && parser?.getTopLevelModule(for: self) != defaultModule && !retroactiveConformanceEmitted {
+                let wellKnownStdlib: Set<String> = ["Equatable", "Hashable", "Codable", "Decodable", "Encodable", "Sendable", "Error", "CustomStringConvertible", "CustomDebugStringConvertible", "Comparable", "Sequence", "Collection", "Strideable", "Numeric", "SignedNumeric", "AdditiveArithmetic", "FloatingPoint", "BinaryFloatingPoint", "LosslessStringConvertible", "CaseIterable", "RawRepresentable", "CodingKey", "LocalizedError", "~Copyable", "ExpressibleByArrayLiteral", "ExpressibleByDictionaryLiteral", "ExpressibleByStringLiteral", "ExpressibleByIntegerLiteral", "ExpressibleByFloatLiteral", "ExpressibleByNilLiteral", "ExpressibleByBooleanLiteral", "OptionSet", "SetAlgebra", "Identifiable", "IteratorProtocol", "AsyncSequence", "AsyncIteratorProtocol"]
                 let retroactive = conformances.compactMap { conf -> String? in
                     let clean = conf.replacingOccurrences(of: "any ", with: "")
                     if clean.hasPrefix("Swift.") || clean.hasPrefix("Foundation.") { return nil }
@@ -2942,9 +3055,24 @@ class TypeNode {
         let sortedOrigModules = originallyDefinedInExtensions.keys.sorted()
         for origModule in sortedOrigModules {
             if let membersMap = originallyDefinedInExtensions[origModule], !membersMap.isEmpty {
-                output += "@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)\n"
-                output += "@_originallyDefinedIn(module: \"\(origModule)\", macOS 10.15)\n"
-                output += generateOneExtension(membersList: Array(membersMap.values), constraint: nil)
+                let uniqueMembers = membersMap.values.filter { member in
+                    switch member {
+                    case .initializer(let sig):
+                        return !members.values.contains(where: { if case .initializer(let s) = $0 { return s == sig } else { return false } })
+                    case .method(let name, let sig, let isStatic):
+                        let cleanSig = sig.replacingOccurrences(of: " infix", with: "").replacingOccurrences(of: " prefix", with: "").replacingOccurrences(of: " postfix", with: "")
+                        return !members.values.contains(where: { if case .method(let n, let s, let st) = $0 { return (s == sig || s == cleanSig || n == name) && st == isStatic } else { return false } })
+                    case .property(let name, _, _, let isStatic):
+                        return !members.values.contains(where: { if case .property(let n, _, _, let st) = $0 { return n == name && st == isStatic } else { return false } })
+                    default:
+                        return true
+                    }
+                }
+                if !uniqueMembers.isEmpty {
+                    output += "@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)\n"
+                    output += "@_originallyDefinedIn(module: \"\(origModule)\", macOS 10.15)\n"
+                    output += generateOneExtension(membersList: uniqueMembers, constraint: nil)
+                }
             }
         }
         

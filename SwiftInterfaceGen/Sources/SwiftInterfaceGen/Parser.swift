@@ -1359,7 +1359,7 @@ class Parser {
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
                             if symbolModule == primaryTargetModule {
                                 node.extensionMembers[initFull] = .initializer(initFull)
-                            } else if ownTbdSymbols.contains(mangled) && extensionModule == nil {
+                            } else if ownTbdSymbols.contains(mangled) && extensionModule == nil && node.movedFromModule == symbolModule {
                                 node.originallyDefinedInExtensions[symbolModule, default: [:]][initFull] = .initializer(initFull)
                             }
                         } else {
@@ -1380,7 +1380,7 @@ class Parser {
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
                             if symbolModule == primaryTargetModule {
                                 node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
-                            } else if ownTbdSymbols.contains(mangled) && extensionModule == nil {
+                            } else if ownTbdSymbols.contains(mangled) && extensionModule == nil && node.movedFromModule == symbolModule {
                                 node.originallyDefinedInExtensions[symbolModule, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                             }
                         } else {
@@ -1595,7 +1595,7 @@ class Parser {
                 } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
                     if symbolModule == primaryTargetModule {
                         node.extensionMembers[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
-                    } else if ownTbdSymbols.contains(mangled) && extensionModule == nil {
+                    } else if ownTbdSymbols.contains(mangled) && extensionModule == nil && node.movedFromModule == symbolModule {
                         node.originallyDefinedInExtensions[symbolModule, default: [:]][storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                     }
                 } else {
@@ -2777,6 +2777,47 @@ class Parser {
 
         let sortedModuleNames = modules.keys.sorted()
         
+        // Phase 0.5: Emit types real ABI proves moved wholesale into defaultModule via
+        // @_originallyDefinedIn (movedFromModule, set by discoverNominalTypes) — before Phase 1
+        // so these render as defaultModule's OWN top-level declarations under their real bare
+        // name (not the "OtherModule_Name" flattened form dependency types normally get), each
+        // tagged with the matching attribute so the compiled symbol still mangles under its
+        // original (pre-move) module, matching the real target's own ABI exactly. Must happen
+        // before Phase 1's per-module `isModuleAvailable` skip below, since these types live
+        // under their ORIGINAL module's TypeNode (e.g. modules["TokenGeneration"]), which Phase
+        // 1 otherwise skips entirely for a module that isn't defaultModule and IS available.
+        // Collected so a reference ANYWHERE else in this same output (e.g. a defaultModule-
+        // native type like PromptModule's own "case fullAttention([TokenGeneration.Prompt.
+        // RenderedPromptFragment])") can also be stripped of its now-stale pre-move qualifier --
+        // see the global sweep after Phase 4 below. Only the exact "OrigModule.TypeName" pairs
+        // that actually moved are stripped, never the whole module prefix blanket, so an
+        // unrelated, still-real OrigModule.OtherType reference elsewhere is untouched.
+        var movedQualifiersToStrip = Set<String>()
+        for moduleName in sortedModuleNames {
+            guard let module = modules[moduleName] else { continue }
+            let movedTypes = module.nestedTypes.values.filter { $0.movedFromModule != nil }.sorted(by: { $0.name < $1.name })
+            if movedTypes.isEmpty { continue }
+            for type in movedTypes {
+                markGenericRecursive(node: type)
+            }
+            for type in movedTypes {
+                let flattenedName = "\(moduleName)_\(type.name)"
+                definedTypes.insert(flattenedName)
+                let savedDefaultModule = defaultModule
+                defaultModule = moduleName
+                var body = type.generateCode(indent: "", parser: self)
+                if let origModule = type.movedFromModule {
+                    body = body.replacingOccurrences(of: "\(origModule).", with: "")
+                }
+                defaultModule = savedDefaultModule
+                guard let origModule = type.movedFromModule else { continue }
+                movedQualifiersToStrip.insert("\(origModule).\(type.name)")
+                output += "@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)\n"
+                output += "@_originallyDefinedIn(module: \"\(origModule)\", macOS 10.15)\n"
+                output += body + "\n\n"
+            }
+        }
+
         // Phase 1: Generate type/class/enum declarations
         for moduleName in sortedModuleNames {
             if ["Swift", "Foundation", "ObjectiveC", "__C"].contains(moduleName) { continue }
@@ -2806,8 +2847,17 @@ class Parser {
                     // a real importable module though (see the "__C." stripping convention in
                     // simplifyType) — an ObjC-bridged type like HKAttachment becomes directly
                     // visible under its bare name, so qualifying with "__C." here would produce
-                    // "cannot find type '__C' in scope".
-                    let extPrefix = extInfo.module == "__C" ? "" : "\(extInfo.module)."
+                    // "cannot find type '__C' in scope". A THIRD case: the extended type itself
+                    // moved wholesale into defaultModule via @_originallyDefinedIn (Stage F's
+                    // movedFromModule) -- e.g. TokenGeneration.Prompt now lives as
+                    // defaultModule's own bare "Prompt", so "extension TokenGeneration.Prompt"
+                    // would reference a module (TokenGeneration) that no longer declares it,
+                    // failing "'RenderedPromptFragment' is not a member type of struct
+                    // 'defaultModule.Prompt'" wherever some OTHER real member elsewhere still
+                    // references it as "TokenGeneration.Prompt.RenderedPromptFragment" (its
+                    // stored signature text was qualified against the type's pre-move home).
+                    let extendedTypeMoved = findTypeNode(module: extInfo.module, path: [extInfo.stdlibType])?.movedFromModule != nil
+                    let extPrefix = (extInfo.module == "__C" || extendedTypeMoved) ? "" : "\(extInfo.module)."
                     output += "extension \(extPrefix)\(extInfo.stdlibType) {\n"
                     // Replace any bare outer generic-param placeholders (A, B, C…) with Any.
                     // These come from the enclosing stdlib type's own type params (e.g. Optional<Wrapped>
@@ -2967,7 +3017,9 @@ class Parser {
                 }
 
                 let pathPrefix: String
-                if moduleName == "Swift" {
+                if type.movedFromModule != nil {
+                    pathPrefix = ""
+                } else if moduleName == "Swift" {
                     pathPrefix = "Swift"
                 } else if moduleName == "__C" {
                     pathPrefix = ""
@@ -2980,7 +3032,11 @@ class Parser {
                 } else {
                     pathPrefix = "\(moduleName)_"
                 }
-                output += type.generateExtensions(defaultModule: defaultModule, parser: self, path: pathPrefix)
+                var extOutput = type.generateExtensions(defaultModule: defaultModule, parser: self, path: pathPrefix)
+                if let origModule = type.movedFromModule {
+                    extOutput = extOutput.replacingOccurrences(of: "\(origModule).", with: "")
+                }
+                output += extOutput
             }
         }
 
@@ -3191,6 +3247,20 @@ class Parser {
         }
         output += "\n" + stubs
 
+        // A member native to defaultModule itself (e.g. PromptModule.fullAttention's payload
+        // type) can reference a type that moved wholesale into defaultModule via
+        // @_originallyDefinedIn, still qualified with its PRE-move module (e.g.
+        // "TokenGeneration.Prompt.RenderedPromptFragment") -- that qualifier was baked into the
+        // member's stored signature text back when the type's home module was first resolved,
+        // and nothing else in generateAll() revisits it. Only Phase 0.5 strips the qualifier,
+        // and only from the moved type's OWN body. Sweep the whole assembled output for every
+        // "OrigModule.MovedTypeName" pair collected above and strip just that qualifier --
+        // bounded to the exact moved-type names, so an unrelated OrigModule.OtherType
+        // reference (a type that did NOT move) is left alone.
+        for qualifier in movedQualifiersToStrip {
+            output = output.replacingOccurrences(of: "\(qualifier).", with: "\(qualifier.components(separatedBy: ".").last!).")
+        }
+
         return output
     }
 
@@ -3364,6 +3434,26 @@ class Parser {
             setKind(kind, for: node, force: true)
             if let typeModule = extendedTypeModule, let stdlibType = extendedStdlibType, let display = displayName {
                 stdlibTypeExtensions[node.name] = (typeModule, stdlibType, display)
+            }
+            // A type's own nominal-type-descriptor/type-metadata symbol (kind already
+            // struct/class/enum here, never protocol/enum-case) appearing directly in the
+            // PRIMARY TARGET's own .tbd document (ownTbdSymbols, populated only at depth 0 —
+            // see processSymbols) but mangled under a DIFFERENT module than the primary target
+            // is real ABI proof the type moved wholesale to the primary target via
+            // @_originallyDefinedIn: the type's nominal module only carries this same symbol
+            // inside a $ld$previous$ back-deployment string (never a real current export;
+            // extractSymbols already excludes those), while the primary target's OWN document
+            // exports it as a genuine current symbol. Not restricted to typePath.count == 1 —
+            // a NESTED type's own descriptor can move independently of its enclosing type (e.g.
+            // GenerativeFunctionsFoundation.RecursiveSchema.Options moved to PromptKit while
+            // RecursiveSchema itself stayed put) — Phase 0.5's flattening only ever iterates
+            // module.nestedTypes.values (direct children), so marking a deeper nested node here
+            // never causes it to be mistakenly flattened as a top-level type; it only makes the
+            // member-level originallyDefinedInExtensions gate (node.movedFromModule == symbolModule)
+            // fire correctly for members of THIS specific node.
+            if module != currentModule, currentModule == primaryTargetModule,
+               ["struct", "class", "enum"].contains(kind), ownTbdSymbols.contains(mangled) {
+                node.movedFromModule = module
             }
         }
     }

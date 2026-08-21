@@ -3651,6 +3651,9 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             if conformances.contains("Stream") {
                 s += "\(indent)    public typealias EventType = Any\n"
             }
+            if conformances.contains(where: { $0.contains("ChatLanguageModelResponseStringStreamString") || $0.contains("CompletionLanguageModelResponseStringStreamString") }) {
+                s += "\(indent)    public var text: Swift.String { get { fatalError() } }\n"
+            }
             
             for child in nested.values.sorted(by: { $0.name < $1.name }) {
                 s += child.generateSwift(depth: depth + 1)
@@ -3678,6 +3681,89 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
     // generateStubs) for a dependency stub, instead of StubNode's empty-skeleton fallback.
     // Shared by generateStubs' main per-type emission loop and its same-module closure pass —
     // both need the identical circular-self-reference filter and Stream/EventType handling.
+    // Emits ONLY the `@_originallyDefinedIn`-tagged extension blocks a TypeNode carries in
+    // originallyDefinedInExtensions -- the one piece of extension-based enrichment genuinely
+    // missing from renderEnrichedType's generateCode()-only render (see the comment at its call
+    // site below). Deliberately self-contained rather than calling the full generateExtensions():
+    // that function ALSO re-renders extensionMembers/constrainedExtensions, which for a protocol
+    // would duplicate what generateProtocolDefaultExtension (below) already synthesizes from the
+    // protocol's own requirement list, and carries a lot of unrelated machinery (retroactive-
+    // conformance suffixes, stdlib placeholder renames, primary-associated-type scoping) this
+    // narrow case has no need for -- the members a moved type's real ABI puts here are always
+    // simple, already-fully-qualified signatures (see Parser.swift's originallyDefinedInExtensions
+    // insert sites), never generic-placeholder-bearing ones. Recurses into nestedTypes so a moved
+    // type nested several levels deep (e.g. RecursiveSchema.Options) is covered from a single
+    // top-level call, matching generateCode()'s own self-recursing shape.
+    static func renderOriginallyDefinedInExtensions(_ node: TypeNode, currentPath: String) -> String {
+        var output = ""
+        let escapedNodeName = node.escapeKeyword(node.name)
+        let nodePath = currentPath.isEmpty ? escapedNodeName : "\(currentPath).\(escapedNodeName)"
+        for origModule in node.originallyDefinedInExtensions.keys.sorted() {
+            guard let membersMap = node.originallyDefinedInExtensions[origModule], !membersMap.isEmpty else { continue }
+            let sortedMembers = membersMap.values.sorted { lhs, rhs in
+                if case .initializer = lhs, case .initializer = rhs { return false }
+                if case .initializer = lhs { return true }
+                if case .initializer = rhs { return false }
+                return false
+            }
+            var extBody = ""
+            var emittedAny = false
+            for member in sortedMembers {
+                switch member {
+                case .initializer(let sig):
+                    if node.members.values.contains(where: { if case .initializer(let s) = $0 { return s == sig } else { return false } }) { continue }
+                    extBody += "    public \(sig) { fatalError() }\n"
+                    emittedAny = true
+                case .method(let name, let sig, var isStatic):
+                    // `sig` is already the full "name(params) -> ReturnType" text (see
+                    // Parser.swift's `fixedSignature = escapedMemberName + signature(...)`) --
+                    // do not re-prefix it with `name` again. An operator method's stored sig
+                    // carries a literal trailing " infix"/" prefix"/" postfix" marker (mirroring
+                    // Model.swift's own generateOneExtension handling of the same MemberKind) --
+                    // strip it and force `static`, since Swift requires operator methods be static.
+                    let cleanSig = sig.replacingOccurrences(of: " infix", with: "")
+                        .replacingOccurrences(of: " prefix", with: "")
+                        .replacingOccurrences(of: " postfix", with: "")
+                    if cleanSig != sig { isStatic = true }
+                    if node.members.values.contains(where: { if case .method(let n, let s, let st) = $0 { return (s == sig || s == cleanSig || n == name) && st == isStatic } else { return false } }) { continue }
+                    extBody += "    public \(isStatic ? "static " : "")func \(cleanSig) { fatalError() }\n"
+                    emittedAny = true
+                case .property(let name, let type, let isReadOnly, let isStatic):
+                    if node.members.values.contains(where: { if case .property(let n, _, _, let st) = $0 { return n == name && st == isStatic } else { return false } }) { continue }
+                    let getter = "{ get { fatalError() }\(isReadOnly ? "" : " set { fatalError() }") }"
+                    extBody += "    public \(isStatic ? "static " : "")var \(name): \(type) \(getter)\n"
+                    emittedAny = true
+                default:
+                    break
+                }
+            }
+            if emittedAny {
+                output += "@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)\n"
+                output += "@_originallyDefinedIn(module: \"\(origModule)\", macOS 10.15)\n"
+                output += "extension \(nodePath) {\n"
+                output += extBody
+                output += "}\n"
+            }
+        }
+        // A nested type literally named "Type" (or another Swift keyword) needs the SAME
+        // backtick escaping inside every signature that references it qualified as
+        // "...NodeName.Type" -- otherwise Swift parses the unescaped ".Type" suffix as the
+        // metatype-of-NodeName expression instead of a reference to this nested type, which
+        // silently type-checks wrong everywhere except where an exact-type match is required
+        // (e.g. a static == operator's parameter list), where it surfaces as a hard compile
+        // error ("member operator '==' must have at least one argument of type '...`Type`'").
+        // Escaping only the extension's own header (nodePath) above isn't enough since member
+        // signatures elsewhere in this same text can reference the identical qualified path.
+        if escapedNodeName != node.name, let re = try? NSRegularExpression(pattern: "\\.\(NSRegularExpression.escapedPattern(for: node.name))\\b(?!`)") {
+            let nsRange = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = re.stringByReplacingMatches(in: output, range: nsRange, withTemplate: ".`\(node.name)`")
+        }
+        for nested in node.nestedTypes.values {
+            output += renderOriginallyDefinedInExtensions(nested, currentPath: nodePath)
+        }
+        return output
+    }
+
     static func renderEnrichedType(_ realNode: TypeNode, mod: String, currentModule: String, parser: Parser, selfDeclaredExtensionTypes: Set<String> = []) -> String {
         if !selfDeclaredExtensionTypes.isEmpty {
             pruneSelfDeclaredExtensionTypes(realNode, pathSoFar: "\(mod).\(realNode.name)", selfDeclaredExtensionTypes: selfDeclaredExtensionTypes)
@@ -3694,7 +3780,42 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         // as if non-generic (no <A> in its header) despite its own real members using <A>.
         parser.markGenericRecursive(node: realNode)
         var code = realNode.generateCode(indent: "", parser: parser)
+        // generateCode() only ever renders a type's own `members` (declared inline in its own
+        // body) plus, for a protocol specifically, generateProtocolDefaultExtension (below)
+        // synthesizes a trivial default-implementation extension straight from the protocol's
+        // own requirement list. Neither path ever looks at originallyDefinedInExtensions, so a
+        // type whose real ABI moved via @_originallyDefinedIn (e.g. PromptKit's RecursiveSchema.
+        // Options.init(rawValue:)/rawValue, really exported under GenerativeFunctionsFoundation's
+        // own mangled name) rendered with its base conformance list (RawRepresentable/SetAlgebra/
+        // etc.) but none of the real members that satisfy it. Add just that one missing piece --
+        // NOT the full generateExtensions() (which also re-renders extensionMembers/
+        // constrainedExtensions and would duplicate generateProtocolDefaultExtension's synthesis
+        // for protocols).
+        let origDefExtCode = renderOriginallyDefinedInExtensions(realNode, currentPath: "")
+        if !origDefExtCode.isEmpty {
+            code += "\n" + origDefExtCode
+        }
         parser.defaultModule = savedDefaultModule
+        // simplifyType() (Parser.swift) strips a "defaultModule." prefix from EVERY type
+        // reference — not just conformances — PERMANENTLY into this cached TypeNode's stored
+        // member-signature strings, using whichever module identity was active the FIRST time
+        // this type was parsed/enriched. When the same cached node is rendered again for a
+        // DIFFERENT target build (Stage B/C's state-swapped re-parse is reused across multiple
+        // target builds), a bare name from that original stripping can be flat-out wrong here —
+        // e.g. "Prompt.Component.Value" (originally "PromptKit.Prompt...") rendered while
+        // building TokenGenerationCore, where "Prompt" isn't visible unqualified. Conformances
+        // are already re-qualified at TRUE render time (TypeNode.generateCode's inheritsList
+        // construction, Model.swift) since that list is rebuilt fresh each call; member
+        // signatures are cached as flat strings much earlier and can't cheaply get the same
+        // treatment, so re-qualify bare foreign-module type names as a text-level pass here
+        // instead — bounded to this one rendering path, not a Parser-wide behavior change.
+        // Must run BEFORE the circular-module member filter below: a member whose stored
+        // signature still has its module prefix stripped (e.g. bare "AnyGenerationGuides"
+        // instead of "PromptKit.AnyGenerationGuides") is invisible to that filter's
+        // dotted-qualifier check, so a genuinely circular reference would otherwise survive
+        // unfiltered as a bare name, then get its qualifier reattached AFTER filtering already
+        // ran and let it through uncaught.
+        code = requalifyBareForeignTypeNames(code, mod: mod, parser: parser)
         // A member's real signature can genuinely reference the module we're building this
         // stub FOR (currentModule) -- e.g. TokenGeneration.Prompt.renderPromptModules(...)
         // returning [TokenGenerationCore.PromptModule] -- and this stub must compile
@@ -3720,9 +3841,46 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                                    "var ", "let ", "subscript", "init", "associatedtype ", "typealias "]
         let declLinePrefixes = ["public struct ", "public final class ", "public class ",
                                  "public enum ", "@_fixed_layout public class "]
+        // TypeNode.init (Model.swift) permanently strips a conformance's module qualifier
+        // whenever the protocol's dotted name is present in parser.discoveredProtocols --
+        // that includes a protocol declared in a circularModules member, so the dotted-prefix
+        // check above ("PromptKit.") never matches; the bare name (e.g.
+        // "PromptComponentValueConvertible") is what actually appears in `code`. Recover the
+        // owning module for every bare discoveredProtocols entry so a circular bare protocol
+        // reference is filtered exactly like a still-qualified one.
+        var bareProtocolOwningModule = [String: String]()
+        for qualifiedProto in parser.discoveredProtocols {
+            guard let dotIdx = qualifiedProto.range(of: ".", options: .backwards) else { continue }
+            let owningModule = String(qualifiedProto[..<dotIdx.lowerBound])
+            let bareName = String(qualifiedProto[dotIdx.upperBound...])
+            // A protocol owned by `mod` itself (the dependency whose stub this is) is a
+            // same-module reference, not circular -- e.g. GenerativeFunctionsFoundation's own
+            // Tooling.Arguments: GenerableArguments, where GenerableArguments is also declared
+            // in GenerativeFunctionsFoundation. Excluding it here mirrors the dotted-qualifier
+            // check a few lines up, which already excludes `mod` the same way (`text.contains
+            // ("\($0).")` only tests circularModules, and mod is deliberately not a member of
+            // that set unless it's ALSO currentModule).
+            if circularModules.contains(owningModule), owningModule != mod {
+                bareProtocolOwningModule[bareName] = owningModule
+            }
+        }
+        let lineReferencesCircularModule: (String) -> Bool = { text in
+            // A dotted reference to `mod` ITSELF (e.g. "GenerativeFunctionsFoundation." while
+            // rendering GenerativeFunctionsFoundation's own dependency stub) is never circular —
+            // it's just this type's own home module, fully resolvable within the same file.
+            // `mod` can still land in `circularModules` (added by orchestrate.py's stub-import-
+            // cycle detection when `mod` participates in a cycle with some OTHER module), so it
+            // must be excluded here explicitly rather than relying on circularModules' membership
+            // alone.
+            if circularModules.contains(where: { $0 != mod && text.contains("\($0).") }) { return true }
+            for (bareName, owningModule) in bareProtocolOwningModule where owningModule != mod {
+                if text.containsWord(bareName) { return true }
+            }
+            return false
+        }
         code = code.split(separator: "\n", omittingEmptySubsequences: false).compactMap { line -> Substring? in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard circularModules.contains(where: { trimmed.contains("\($0).") }) else { return line }
+            guard lineReferencesCircularModule(trimmed) else { return line }
             if memberLinePrefixes.contains(where: { trimmed.hasPrefix($0) }) {
                 return nil
             }
@@ -3738,7 +3896,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 let bodyStart = line.index(after: colonIdx)
                 let inheritancePart = String(line[bodyStart..<line.index(before: line.endIndex)])
                 let entries = inheritancePart.splitByCommaRespectingBrackets().map { $0.trimmingCharacters(in: .whitespaces) }
-                let kept = entries.filter { entry in !circularModules.contains(where: { entry.contains("\($0).") }) }
+                let kept = entries.filter { entry in !lineReferencesCircularModule(entry) }
                 if kept.count == entries.count { return line }
                 if kept.isEmpty {
                     return Substring(head + " {")
@@ -3797,20 +3955,6 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 }
             }
         }
-        // simplifyType() (Parser.swift) strips a "defaultModule." prefix from EVERY type
-        // reference — not just conformances — PERMANENTLY into this cached TypeNode's stored
-        // member-signature strings, using whichever module identity was active the FIRST time
-        // this type was parsed/enriched. When the same cached node is rendered again for a
-        // DIFFERENT target build (Stage B/C's state-swapped re-parse is reused across multiple
-        // target builds), a bare name from that original stripping can be flat-out wrong here —
-        // e.g. "Prompt.Component.Value" (originally "PromptKit.Prompt...") rendered while
-        // building TokenGenerationCore, where "Prompt" isn't visible unqualified. Conformances
-        // are already re-qualified at TRUE render time (TypeNode.generateCode's inheritsList
-        // construction, Model.swift) since that list is rebuilt fresh each call; member
-        // signatures are cached as flat strings much earlier and can't cheaply get the same
-        // treatment, so re-qualify bare foreign-module type names as a text-level pass here
-        // instead — bounded to this one rendering path, not a Parser-wide behavior change.
-        code = requalifyBareForeignTypeNames(code, mod: mod, parser: parser)
         // simplifyType()'s ambiguous-protocol disambiguation (Parser.swift, "any
         // ___SHIELDED_<module>___.Foo") is a TEMPORARY placeholder meant to survive just long
         // enough to bypass module-prefix stripping, then get restored to "any <module>.Foo" by
@@ -4350,7 +4494,19 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     if tbdContent != nil { break }
                 }
                 guard let content = tbdContent else { continue }
-                let depSymbols = extractSymbols(from: content)
+                // A dependency's own .tbd can itself be a multi-document file if IT has
+                // reexported-libraries (e.g. GenerativeFunctionsFoundation.tbd's second document
+                // is actually PromptKit's re-exported symbol table, install-name and all).
+                // Scanning the whole raw file (as opposed to just this dependency's own first
+                // document) misattributes a reexported library's real, standalone symbols to
+                // this dependency -- e.g. GenerativeFunctionsFoundation.tbd's doc2 exports
+                // PromptKit.RecursiveSchema.Options's nominal-type-descriptor symbol as a
+                // genuine current export, making it look like GenerativeFunctionsFoundation's
+                // own ABI proof the type is real there, when it's actually only real in
+                // PromptKit's document. Isolate this dependency's own first document exactly
+                // like main.swift's `ownDocument` does for the primary target (line ~35).
+                let ownDepDocument = content.components(separatedBy: "--- !tapi-tbd").dropFirst().first.map { "--- !tapi-tbd" + $0 } ?? content
+                let depSymbols = extractSymbols(from: ownDepDocument)
                 var depDemangledMap: [(mangled: String, demangled: String)] = []
                 for sym in depSymbols {
                     if let dem = demangle(symbol: sym) {
@@ -4391,12 +4547,26 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     let savedPrimaryTarget = parser.primaryTargetModule
                     let savedDefaultModule = parser.defaultModule
                     let savedPrecomputeModule = parser.currentPrecomputeModule
+                    // ownTbdSymbols only gets populated at depth 0 (processSymbols) -- but this
+                    // call is always depth 1, so a member/extension this dependency's own real
+                    // ABI moved via @_originallyDefinedIn (e.g. PromptKit's RecursiveSchema.
+                    // Options.init(rawValue:), which really lives in PromptKit's OWN .tbd, not
+                    // GenerativeFunctionsFoundation's) never satisfies originallyDefinedInExtensions'
+                    // `ownTbdSymbols.contains(mangled)` check here, even though primaryTargetModule
+                    // is correctly repointed at `mod` a few lines below. Temporarily add this
+                    // dependency's own symbols so that check succeeds for symbols genuinely
+                    // exported by `mod`'s own .tbd, then restore -- must not leak into the real
+                    // target's own ownTbdSymbols, which drives Stage F's cross-target movedFromModule
+                    // detection for OTHER modules and would misfire if left polluted.
+                    let savedOwnTbdSymbols = parser.ownTbdSymbols
+                    parser.ownTbdSymbols.formUnion(depSymbols)
                     parser.primaryTargetModule = mod
                     parser.defaultModule = mod
                     processSymbols(depSymbols, parser: parser, module: mod, depth: 1)
                     parser.primaryTargetModule = savedPrimaryTarget
                     parser.defaultModule = savedDefaultModule
                     parser.currentPrecomputeModule = savedPrecomputeModule
+                    parser.ownTbdSymbols = savedOwnTbdSymbols
                 }
             }
 
@@ -4533,6 +4703,32 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                                     if let targetModule = parser.modules[currentModule] {
                                         let shortName = noAny.components(separatedBy: ".").last ?? noAny
                                         if let protoNode = targetModule.nestedTypes[shortName], protoNode.kind == "protocol" {
+                                            return nil
+                                        }
+                                    }
+                                }
+                                // This memberless StubNode fallback path (its type had no real
+                                // members/nested types, so renderEnrichedType's own circular
+                                // filter -- which only ever runs on real enriched member/decl
+                                // text -- never gets a chance to see this conformance at all) can
+                                // still carry a bare protocol name whose owning module differs
+                                // from `mod` -- e.g. GenerativeModelsFoundation.SelfAttention
+                                // conforming to PromptKit.PromptComponentValueConvertible, already
+                                // stripped bare by Model.swift's discoveredProtocols-driven
+                                // qualifier stripping. If that owning module is circular relative
+                                // to `mod` (PromptKit imports GenerativeModelsFoundation, so a
+                                // GenerativeModelsFoundation stub can't import PromptKit back),
+                                // drop the conformance exactly like renderEnrichedType does for
+                                // circular bare protocol references on a real-enriched type.
+                                if !noAny.contains("."), noAny != "AnyObject",
+                                   let qualifiedMatch = parser.discoveredProtocols.first(where: { $0.hasSuffix("." + noAny) }) {
+                                    let owningModule = String(qualifiedMatch.dropLast(noAny.count + 1))
+                                    if owningModule != mod {
+                                        var circularModules = Set([currentModule])
+                                        if let buildingEnv = ProcessInfo.processInfo.environment["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"], !buildingEnv.isEmpty {
+                                            circularModules.formUnion(buildingEnv.split(separator: ",").map(String.init))
+                                        }
+                                        if circularModules.contains(owningModule) {
                                             return nil
                                         }
                                     }
@@ -4911,12 +5107,49 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                                                            FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(qualifier).framework") ||
                                                            FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/Frameworks/\(qualifier).framework")
                         if qualifier != "Swift", qualifier != "Foundation", qualifier != mod,
-                           !circularModules.contains(qualifier),
+                           qualifier != currentModule,
+                           !(circularModules.contains(mod) && circularModules.contains(qualifier)),
                            !isGenericPlaceholder, !selfDeclaredStubTypeNames.contains(qualifier),
                            qualifierIsPrivateFramework {
                             extraImports.insert(qualifier)
                         }
                     }
+                }
+            }
+            // A real member's conformance list can reference a cross-module PROTOCOL by its
+            // bare (unqualified) name -- Model.swift's inheritsList-cleaning (TypeNode.init)
+            // permanently strips a protocol's module qualifier whenever that protocol's dotted
+            // name is present in parser.discoveredProtocols, on the assumption it'll be visible
+            // in whatever file the type is finally rendered into. That assumption fails here: a
+            // dependency stub is split one-file-per-module, so a bare protocol name declared in
+            // a DIFFERENT dependency's stub file (e.g. PromptKit.PromptComponentValueConvertible
+            // referenced bare from GenerativeModelsFoundation's real, Stage-B-enriched
+            // SelfAttention) is unresolvable without its own explicit import -- there is no
+            // "Qualifier." prefix left for the dotted-qualifier scan above to catch. Recover the
+            // owning module from discoveredProtocols' dotted form for every bare protocol name
+            // that appears as a whole word in this stub's body.
+            if let bareWordRegex = try? NSRegularExpression(pattern: "(?<![A-Za-z0-9_$.])[A-Za-z_][A-Za-z0-9_]*", options: []) {
+                let nsRange = NSRange(fileContent.startIndex..<fileContent.endIndex, in: fileContent)
+                var bareWords = Set<String>()
+                for m in bareWordRegex.matches(in: fileContent, options: [], range: nsRange) {
+                    if let range = Range(m.range, in: fileContent) {
+                        bareWords.insert(String(fileContent[range]))
+                    }
+                }
+                for qualifiedProto in parser.discoveredProtocols {
+                    guard let dotIdx = qualifiedProto.range(of: ".", options: .backwards) else { continue }
+                    let owningModule = String(qualifiedProto[..<dotIdx.lowerBound])
+                    let bareName = String(qualifiedProto[dotIdx.upperBound...])
+                    guard owningModule != mod, owningModule != "Swift", owningModule != "Foundation",
+                          owningModule != currentModule,
+                          !(circularModules.contains(mod) && circularModules.contains(owningModule)),
+                          !selfDeclaredStubTypeNames.contains(bareName),
+                          bareWords.contains(bareName) else { continue }
+                    let owningModuleIsPrivateFramework = FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/PrivateFrameworks/\(owningModule).framework") ||
+                                                          FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/SubFrameworks/\(owningModule).framework") ||
+                                                          FileManager.default.fileExists(atPath: "\(sdkRoot)/System/Library/Frameworks/\(owningModule).framework")
+                    guard owningModuleIsPrivateFramework else { continue }
+                    extraImports.insert(owningModule)
                 }
             }
             // Real member signatures can also reference a system-framework type by its bare

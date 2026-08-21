@@ -684,17 +684,23 @@ stub_sources_built = {}
 def _split_top_level_decls(source_text):
     """Split a generated stub source into (imports, {decl_name: decl_text}). Each top-level
     decl is a contiguous run of lines starting at a `public protocol|struct|enum|class NAME`
-    header and ending when brace depth returns to 0. Two independent --generate-stubs scans
-    of the same dependency module (one per calling target, each only seeing the types ITS OWN
-    interface references) can produce two files with disjoint declarations -- e.g. one scan's
-    output declares `Schema`/`ToolDefinition` and never mentions `ChatLanguageModelResponse
-    StringStream`, while another's does the reverse. Neither is a subset of the other, so a
-    single file can't just be swapped for the "richer" one; the two must be merged by decl name."""
+    header (optionally preceded by attribute lines like @available/@_originallyDefinedIn) and
+    ending when brace depth returns to 0. A top-level `extension Foo { ... }` block (e.g. the
+    generator's own renderOriginallyDefinedInExtensions output) is captured the same way, keyed
+    as "extension Foo" so it never collides with -- and is never dropped in favor of -- a same-
+    named type declaration. Two independent --generate-stubs scans of the same dependency module
+    (one per calling target, each only seeing the types ITS OWN interface references) can produce
+    two files with disjoint declarations -- e.g. one scan's output declares `Schema`/
+    `ToolDefinition` and never mentions `ChatLanguageModelResponseStringStream`, while another's
+    does the reverse. Neither is a subset of the other, so a single file can't just be swapped
+    for the "richer" one; the two must be merged by decl name."""
     import re as _re3
     imports = set()
     decls = {}
     lines = source_text.splitlines(keepends=True)
     header_re = _re3.compile(r'^public (?:protocol|struct|enum|class|final class)\s+`?([A-Za-z_][A-Za-z0-9_]*)`?')
+    ext_re = _re3.compile(r'^extension\s+([A-Za-z_][A-Za-z0-9_.`]*)')
+    attr_re = _re3.compile(r'^@[A-Za-z_]')
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -702,16 +708,28 @@ def _split_top_level_decls(source_text):
             imports.add(line.strip())
             i += 1
             continue
-        m = header_re.match(line)
-        if m:
-            name = m.group(1)
+        # Attribute lines (@available, @_originallyDefinedIn, ...) immediately preceding a
+        # decl/extension header belong to that same decl -- they must not be scanned as
+        # standalone lines (the `else: i += 1` branch below would silently drop them one at a
+        # time, and the decl's own depth tracking would never see them either).
+        j = i
+        while j < len(lines) and attr_re.match(lines[j]):
+            j += 1
+        m = header_re.match(lines[j]) if j < len(lines) else None
+        em = ext_re.match(lines[j]) if j < len(lines) else None
+        if m or em:
+            name = m.group(1) if m else "extension " + em.group(1)
             start = i
-            depth = line.count("{") - line.count("}")
-            i += 1
-            while i < len(lines) and depth > 0:
-                depth += lines[i].count("{") - lines[i].count("}")
-                i += 1
-            decls[name] = "".join(lines[start:i])
+            depth = 0
+            k = j
+            while k < len(lines):
+                depth += lines[k].count("{") - lines[k].count("}")
+                k += 1
+                if depth <= 0:
+                    break
+            text = "".join(lines[start:k])
+            decls[name] = decls.get(name, "") + text
+            i = k
         else:
             i += 1
     return imports, decls
