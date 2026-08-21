@@ -1352,10 +1352,25 @@ class Parser {
                         }
                         let isExternal = getTopLevelModule(for: node) != primaryTargetModule
                         let symbolModule = extensionModule ?? Parser.getMangledModule(mangled) ?? currentModule
+                        // A PROTOCOL's own requirement (mangled "...ProtoNameP...", no "AAE"/
+                        // "PA...rlE" extension marker) is never an extension member even when
+                        // the protocol itself lives in a different module than primaryTargetModule
+                        // -- `isExternal`/movedFromModule below only make sense for a CONCRETE
+                        // type's real members; a protocol has no "moved wholesale" concept (only
+                        // struct/class/enum ever gets movedFromModule set), so routing its own
+                        // requirement through that gate silently drops it. Confirmed via
+                        // TokenGeneration.PromptCompletionEvent.responseIdentifier: only its
+                        // "Tj"/"Tq" dispatch-thunk/method-descriptor variants exist in any .tbd
+                        // (no protocol has a real getter/setter symbol of its own -- those belong
+                        // to conformers), so this only ever reaches here via the Tj/Tq-stripping
+                        // path above, for a protocol requirement declared bare (no default body).
+                        let isProtocolRequirement = node.kind == "protocol" && extensionModule == nil && !mangled.contains("PAAE") && !(mangled.contains("PA") && mangled.contains("rlE"))
                         if let constraints = constraints {
                             if symbolModule == primaryTargetModule {
                                 node.constrainedExtensions[constraints, default: [:]][initFull] = .initializer(initFull)
                             }
+                        } else if isProtocolRequirement {
+                            node.members[initFull] = .initializer(initFull)
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
                             if symbolModule == primaryTargetModule {
                                 node.extensionMembers[initFull] = .initializer(initFull)
@@ -1373,10 +1388,15 @@ class Parser {
                         }
                         let isExternal = getTopLevelModule(for: node) != primaryTargetModule
                         let symbolModule = extensionModule ?? Parser.getMangledModule(mangled) ?? currentModule
+                        // See the matching comment on the initializer branch above -- a
+                        // protocol's own requirement is never an extension member.
+                        let isProtocolRequirement = node.kind == "protocol" && extensionModule == nil && !mangled.contains("PAAE") && !(mangled.contains("PA") && mangled.contains("rlE"))
                         if let constraints = constraints {
                             if symbolModule == primaryTargetModule {
                                 node.constrainedExtensions[constraints, default: [:]][fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                             }
+                        } else if isProtocolRequirement {
+                            node.members[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
                         } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
                             if symbolModule == primaryTargetModule {
                                 node.extensionMembers[fixedSignature] = .method(name: escapedMemberName, signature: fixedSignature, isStatic: isStatic)
@@ -1588,10 +1608,16 @@ class Parser {
                 }
                 let isExternal = getTopLevelModule(for: node) != primaryTargetModule
                 let symbolModule = extensionModule ?? Parser.getMangledModule(mangled) ?? currentModule
+                // See the matching comment on the initializer branch (~line 1359 above) -- a
+                // protocol's own requirement is never an extension member, even when the
+                // protocol itself lives in a module other than primaryTargetModule.
+                let isProtocolRequirement = node.kind == "protocol" && extensionModule == nil && !mangled.contains("PAAE") && !(mangled.contains("PA") && mangled.contains("rlE"))
                 if let constraints = constraints {
                     if symbolModule == primaryTargetModule {
                         node.constrainedExtensions[constraints, default: [:]][storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                     }
+                } else if isProtocolRequirement {
+                    node.members[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
                 } else if mangled.contains("PAAE") || mangled.contains("PA") && mangled.contains("rlE") || isExternal {
                     if symbolModule == primaryTargetModule {
                         node.extensionMembers[storageKey] = .property(name: escapedMemberName, type: type, isReadOnly: isReadOnly, isStatic: isStatic)
@@ -3257,8 +3283,10 @@ class Parser {
         // "OrigModule.MovedTypeName" pair collected above and strip just that qualifier --
         // bounded to the exact moved-type names, so an unrelated OrigModule.OtherType
         // reference (a type that did NOT move) is left alone.
-        for qualifier in movedQualifiersToStrip {
-            output = output.replacingOccurrences(of: "\(qualifier).", with: "\(qualifier.components(separatedBy: ".").last!).")
+        for qualifier in movedQualifiersToStrip.sorted(by: { $0.count > $1.count }) {
+            if let typeName = qualifier.components(separatedBy: ".").last {
+                output = output.replacingOccurrences(of: "\(qualifier)", with: "\(typeName)")
+            }
         }
 
         return output
@@ -3452,7 +3480,7 @@ class Parser {
             // member-level originallyDefinedInExtensions gate (node.movedFromModule == symbolModule)
             // fire correctly for members of THIS specific node.
             if module != currentModule, currentModule == primaryTargetModule,
-               ["struct", "class", "enum"].contains(kind), ownTbdSymbols.contains(mangled) {
+               ["struct", "class", "enum", "protocol"].contains(kind), ownTbdSymbols.contains(mangled) {
                 node.movedFromModule = module
             }
         }

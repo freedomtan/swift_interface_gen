@@ -4703,6 +4703,29 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                                 if noAny.contains("ExpressibleBy") {
                                     return nil
                                 }
+                                // A still dot-qualified conformance (e.g. "GenerativeFunctionsFoundation.
+                                // ChatLanguageModelResponseStringStreamString") whose owning module is
+                                // circular relative to `mod` is exactly as unresolvable here as the
+                                // bare-name case handled below -- this memberless StubNode fallback
+                                // never goes through renderEnrichedType's own circular-line filter, so
+                                // without this check a genuinely circular qualified reference survives
+                                // verbatim into the stub (confirmed via TokenGeneration.Token, whose
+                                // GenerativeFunctionsFoundation-qualified conformance list compiled fine
+                                // in isolation but failed once GenerativeFunctionsFoundation joined the
+                                // detected stub-import cycle and its own dependency stub -- which this
+                                // Token reference needs -- stopped being importable here).
+                                if let dotIdx = noAny.range(of: ".", options: .backwards) {
+                                    let owningModule = String(noAny[..<dotIdx.lowerBound])
+                                    if owningModule != mod {
+                                        var circularModules = Set([currentModule])
+                                        if let buildingEnv = ProcessInfo.processInfo.environment["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"], !buildingEnv.isEmpty {
+                                            circularModules.formUnion(buildingEnv.split(separator: ",").map(String.init))
+                                        }
+                                        if circularModules.contains(owningModule) {
+                                            return nil
+                                        }
+                                    }
+                                }
                                 // Filter out conformances to protocols defined in the target module
                                 // (currentModule). simplifyType strips the currentModule prefix, so
                                 // e.g. TokenGenerationCore.XPCRevivable becomes bare XPCRevivable
