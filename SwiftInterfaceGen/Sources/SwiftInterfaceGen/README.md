@@ -18,9 +18,9 @@ Regression suite (`run_regression_tests.py`), 9 targets — all `SUCCESS`. First
 | ModelCatalogRuntime | 0 | 0 |
 | UnifiedAssetFramework | 0 (pure ObjC, no Swift symbols) | 0 |
 | AppleIntelligenceReporting | 88 | 0 |
-| TokenGenerationCore | ~2168 | 0 |
+| TokenGenerationCore | 0 | 0 |
 
-`AppleIntelligenceReporting`'s remaining stubs stem from `protocol Source<Stream>` — a primary-associated-type protocol the generator doesn't detect (see [Key Design Decisions](#key-design-decisions) — primary associated types), forcing constrained-existential usages like `any Source<Self.Stream == A>` to erase to `any Source<Any>` (assembly-stub territory) rather than the valid `any Source<A>`. `TokenGenerationCore`'s count reflects its size and deep dependency chain (InternalSwiftProtobuf/PromptKit) rather than a single root cause; see `TODO.md` for per-framework fix history.
+`AppleIntelligenceReporting`'s remaining stubs stem from `protocol Source<Stream>` — a primary-associated-type protocol the generator doesn't detect (see [Key Design Decisions](#key-design-decisions) — primary associated types), forcing constrained-existential usages like `any Source<Self.Stream == A>` to erase to `any Source<Any>` (assembly-stub territory) rather than the valid `any Source<A>`. `TokenGenerationCore` used to sit at ~2168 first-pass stubs (its size and deep dependency chain — InternalSwiftProtobuf/PromptKit — surfaced a whole class of whole-type `@_originallyDefinedIn` moves the generator didn't handle) until that root cause was fixed; see [Key Design Decisions](#key-design-decisions) — whole-type `@_originallyDefinedIn` moves, and `TODO.md`/`PLAN_stage_e_tokengeneration_flattening.md` for the full fix history.
 
 Public-framework ground-truth suite (`verify_public.py`), 18 curated SDK frameworks — 18/18 PASS (compiles cleanly against real SDK `.swiftinterface`/`.tbd`, independent of the regression suite above).
 
@@ -164,6 +164,11 @@ class TypeNode {
     var conformances: Set<String>  // Only TBD-declared conformances
     var isGeneric: Bool
     var finalMembers: Set<String>  // Members without dispatch thunk → emit as final
+    var movedFromModule: String?   // Set when the type's own descriptor now lives in a
+                                    // different module than where it was originally declared
+                                    // (whole-type @_originallyDefinedIn move)
+    var originallyDefinedInExtensions: [String: [String: MemberKind]] // real ABI witnesses for
+                                    // a moved type/member, keyed by the pre-move module name
     weak var parent: TypeNode?
 }
 
@@ -210,6 +215,13 @@ For protocol existentials, a sentinel struct `_Default_Protocol` is synthesised 
 
 ### `@_originallyDefinedIn` cross-module extension members
 Some frameworks retroactively move a type's extension members into a *different* module via `@_originallyDefinedIn`, while the ABI symbol's own mangled-module prefix still names the original module — so the symbol is neither a same-module member nor a normal cross-module `(extension in X):` marker. `Parser.swift` detects these (present in `ownTbdSymbols` with no `extensionModule`) and routes them into a dedicated `originallyDefinedInExtensions[module]` bucket on `TypeNode`; `Model.swift` emits each bucket as its own `@_originallyDefinedIn(module: "...", macOS 10.15)`-annotated extension. This closed out CoreAIDelegates' last 3 first-pass stubs.
+
+### Whole-type `@_originallyDefinedIn` moves
+Apple sometimes moves a type's entire ABI ownership between modules, not just individual extension members — e.g. `GenerationSchema` moved from `GenerativeFunctionsFoundation` into `PromptKit`, and `SamplingParameters`/`Prompt`/~78 others moved from the private `TokenGeneration` framework into the public `TokenGenerationCore`. The type's own nominal-type-descriptor symbol (`Mn`) now lives in the *new* module's `.tbd`; the old module's `.tbd` only carries it inside a `$ld$previous$...` back-deployment compatibility string. `Parser.swift`'s `discoverNominalTypes` detects this (`ownTbdSymbols.contains(mangled)` for the type's own descriptor while its module differs from `primaryTargetModule`) and sets `TypeNode.movedFromModule`, independently of the enclosing type — a nested type (e.g. `RecursiveSchema.Options`) can move separately from its parent, and this applies to `struct`/`class`/`enum`/`protocol` alike.
+
+`generateAll()`'s Phase 0.5 renders every such type as one of the primary target's own top-level declarations (real bare name, not the usual dependency-flattened `Module_Name` form), tagged with a matching `@_originallyDefinedIn(module: "OrigModule", macOS 10.15)` attribute so the compiled symbol still mangles under its pre-move module — matching the real target's ABI exactly. A moved protocol's own bare requirement (as opposed to a default-implementation extension member) is routed into `members`, not misclassified as an external extension. Critically, `TypeNode.generateCode()` also merges `originallyDefinedInExtensions[movedFromModule]` directly into `members` before rendering, so the type's real ABI witnesses (`init(from:)`, `encode(to:)`, protocol requirements, etc.) become part of its own declaration body rather than being silently dropped or only available via a separate extension-only render path that a later re-generation pass might not reach. `OptionSet`/`SetAlgebra` conformances get a generic `rawValue` synthesis (not enum-only) for exactly this reason — many moved types are structs. `init(from:)` is excluded from extension-block rendering for struct/enum types, since Swift disallows designated initializers in extensions on value types.
+
+This closed out TokenGenerationCore's remaining ~2168 first-pass stubs entirely (see the frameworks table above) — see `PLAN_stage_e_tokengeneration_flattening.md` for the investigation and fix history.
 
 ### Primary associated types (not yet supported)
 The generator has no mechanism to detect or emit primary associated types (`protocol Source<Stream>`). Symbols using constrained-existential syntax against such a protocol (e.g. `any Source<Self.Stream == A>`) can't be reconstructed as `any Source<A>` without the protocol declaring `<Stream>` — `postProcess()` instead erases them to `any Source<Any>`, which is valid but doesn't match the real ABI symbol, so it falls back to an assembly stub. This is `AppleIntelligenceReporting`'s main remaining stub source (see the frameworks table above).
