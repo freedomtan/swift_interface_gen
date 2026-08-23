@@ -3753,9 +3753,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     // carries a literal trailing " infix"/" prefix"/" postfix" marker (mirroring
                     // Model.swift's own generateOneExtension handling of the same MemberKind) --
                     // strip it and force `static`, since Swift requires operator methods be static.
-                    let cleanSig = sig.replacingOccurrences(of: " infix", with: "")
-                        .replacingOccurrences(of: " prefix", with: "")
-                        .replacingOccurrences(of: " postfix", with: "")
+                    let cleanSig = sig.strippingOperatorFixityMarkers()
                     if cleanSig != sig { isStatic = true }
                     if node.members.values.contains(where: { if case .method(let n, let s, let st) = $0 { return (s == sig || s == cleanSig || n == name) && st == isStatic } else { return false } }) { continue }
                     extBody += "    public \(isStatic ? "static " : "")func \(cleanSig) { fatalError() }\n"

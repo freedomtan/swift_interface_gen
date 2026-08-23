@@ -1702,7 +1702,7 @@ class TypeNode {
                 // description/hash/debugDescription above — skip for ObjC-bridged extensions.
                 if isObjcBridged && baseClass == "NSObject" && n == "isEqual" { continue }
                 var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
-                let cleanN = n.replacingOccurrences(of: " infix", with: "").replacingOccurrences(of: " prefix", with: "").replacingOccurrences(of: " postfix", with: "").trimmingCharacters(in: .whitespaces)
+                let cleanN = n.strippingOperatorFixityMarkers().trimmingCharacters(in: .whitespaces)
                 let isOperator = !cleanN.isEmpty && cleanN.allSatisfy { "+-*/=<>&|^~%!?.".contains($0) }
                 if isOperator {
                     isStatic = true
@@ -2870,10 +2870,8 @@ class TypeNode {
                         }
                     }
                 case .method(let name, let sig, var isStatic):
-                    var cleanedSig = sig.replacingOccurrences(of: " infix", with: "")
-                                        .replacingOccurrences(of: " prefix", with: "")
-                                        .replacingOccurrences(of: " postfix", with: "")
-                    let cleanN = name.replacingOccurrences(of: " infix", with: "").replacingOccurrences(of: " prefix", with: "").replacingOccurrences(of: " postfix", with: "").trimmingCharacters(in: .whitespaces)
+                    var cleanedSig = sig.strippingOperatorFixityMarkers()
+                    let cleanN = name.strippingOperatorFixityMarkers().trimmingCharacters(in: .whitespaces)
                     let isOperator = !cleanN.isEmpty && cleanN.allSatisfy { "+-*/=<>&|^~%!?.".contains($0) }
                     if isOperator {
                         isStatic = true
@@ -3139,7 +3137,7 @@ class TypeNode {
                     case .initializer(let sig):
                         return !members.values.contains(where: { if case .initializer(let s) = $0 { return s == sig } else { return false } })
                     case .method(let name, let sig, let isStatic):
-                        let cleanSig = sig.replacingOccurrences(of: " infix", with: "").replacingOccurrences(of: " prefix", with: "").replacingOccurrences(of: " postfix", with: "")
+                        let cleanSig = sig.strippingOperatorFixityMarkers()
                         return !members.values.contains(where: { if case .method(let n, let s, let st) = $0 { return (s == sig || s == cleanSig || n == name) && st == isStatic } else { return false } })
                     case .property(let name, _, _, let isStatic):
                         return !members.values.contains(where: { if case .property(let n, _, _, let st) = $0 { return n == name && st == isStatic } else { return false } })

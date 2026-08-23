@@ -1,6 +1,18 @@
 import Foundation
 
 extension String {
+    // An operator method's stored name/signature carries a literal trailing " infix"/" prefix"/
+    // " postfix" marker (from the demangled text). Most call sites just need it gone to render a
+    // plain "public func ==(...)"-style declaration or to compare against a member already
+    // present without the marker -- this covers exactly that "strip all three, nothing fancier"
+    // case. Callers that need to distinguish prefix/postfix to re-emit them as a Swift
+    // declaration-site keyword (e.g. `prefix func -(...)`) have their own logic and don't use this.
+    func strippingOperatorFixityMarkers() -> String {
+        replacingOccurrences(of: " infix", with: "")
+            .replacingOccurrences(of: " prefix", with: "")
+            .replacingOccurrences(of: " postfix", with: "")
+    }
+
     // 1. stripLongNumbers: removes any sequence of 5 or more consecutive digits.
     func stripLongNumbers() -> String {
         var result = ""
