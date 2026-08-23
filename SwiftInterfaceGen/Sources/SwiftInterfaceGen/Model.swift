@@ -82,6 +82,66 @@ class TypeNode {
                conformances.contains(where: { $0.hasSuffix(".\(proto)") })
     }
 
+    // A real ABI-enriched member can land in extensionMembers/originallyDefinedInExtensions
+    // instead of `members` (e.g. Codable/Hashable synthesis on a dependency-stub type whose
+    // descriptor moved via @_originallyDefinedIn) -- checking only `members` would miss it and
+    // synthesize a duplicate declaration. constrainedExtensions is excluded by default: a member
+    // declared there only exists under an ADDITIONAL generic constraint (e.g. "extension
+    // PubSub.Completion where A: Decodable") and does NOT satisfy the type's own unconditional
+    // conformance for every A -- pass `includingConstrained: true` only when that distinction
+    // genuinely doesn't matter for the caller's check.
+    func gatherMemberContainers(includingConstrained: Bool = false) -> [[String: MemberKind]] {
+        var containers: [[String: MemberKind]] = [members, extensionMembers] + Array(originallyDefinedInExtensions.values)
+        if includingConstrained {
+            containers += Array(constrainedExtensions.values)
+        }
+        return containers
+    }
+
+    // Whether any gathered container already has a `rawValue` property, and the signature of a
+    // real `init(rawValue:)` if one exists -- shared by the enum-RawRepresentable and generic
+    // OptionSet/SetAlgebra rawValue-synthesis blocks below, which otherwise duplicate this same
+    // container scan with slightly different container scopes.
+    func rawValueMemberInfo(in containers: [[String: MemberKind]]) -> (hasProp: Bool, initSignature: String?) {
+        let hasProp = containers.contains {
+            $0.values.contains { if case .property(let pname, _, _, _) = $0, pname == "rawValue" { return true }; return false }
+        }
+        var initSignature: String? = nil
+        outer: for container in containers {
+            for member in container.values {
+                if case .initializer(let s) = member, s.contains("rawValue:") {
+                    initSignature = s
+                    break outer
+                }
+            }
+        }
+        return (hasProp, initSignature)
+    }
+
+    // Parses the raw type out of a real `init(rawValue: <Type>)` signature (e.g. "Swift.Int" from
+    // "init(rawValue: Swift.Int)"), stopping at the first top-level comma/closing bracket so a
+    // multi-parameter initializer's trailing params aren't swept in. Returns nil if `rawValue:`
+    // isn't present or has no type text after it.
+    static func parseRawValueType(from signature: String) -> String? {
+        guard let range = signature.range(of: "rawValue:") else { return nil }
+        let scanner = String(signature[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+        var typeStr = ""
+        var depth = 0
+        for char in scanner {
+            if char == "(" || char == "<" {
+                depth += 1
+            } else if char == ")" || char == ">" {
+                depth -= 1
+                if depth < 0 { break }
+            } else if char == "," && depth == 0 {
+                break
+            }
+            typeStr.append(char)
+        }
+        let trimmed = typeStr.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     func getGenericCount(parser: Parser?) -> Int {
         // A non-generic type has 0 generic params — used as the base case when walking
         // up the parent chain (e.g. a top-level type's "parent" is the module, which is
@@ -2009,16 +2069,13 @@ class TypeNode {
 
         // Add explicit conformance stubs for non-protocol types IF not already provided
         if !isProtocol {
-            // A real ABI-enriched member can land in extensionMembers/originallyDefinedInExtensions
-            // instead of `members` (e.g. Codable/Hashable synthesis on a dependency-stub type
-            // whose descriptor moved via @_originallyDefinedIn) -- checking only `members` here
-            // would miss it and synthesize a duplicate declaration. constrainedExtensions is
-            // deliberately EXCLUDED: a member declared there only exists under an ADDITIONAL
-            // generic constraint (e.g. "extension PubSub.Completion where A: Decodable") and does
-            // NOT satisfy the type's own unconditional Codable/Hashable conformance for every A —
-            // treating it as if it did skips synthesizing the real, unconditional init(from:)/
-            // encode(to:)/hash(into:) this type still needs for the general case.
-            let allMemberContainers: [[String: MemberKind]] = [members, extensionMembers] + Array(originallyDefinedInExtensions.values)
+            // constrainedExtensions is deliberately EXCLUDED here: a member declared there only
+            // exists under an ADDITIONAL generic constraint (e.g. "extension PubSub.Completion
+            // where A: Decodable") and does NOT satisfy the type's own unconditional Codable/
+            // Hashable conformance for every A -- treating it as if it did skips synthesizing the
+            // real, unconditional init(from:)/encode(to:)/hash(into:) this type still needs for
+            // the general case.
+            let allMemberContainers = gatherMemberContainers()
             func anyContainerHas(_ predicate: (MemberKind) -> Bool) -> Bool {
                 allMemberContainers.contains { $0.values.contains(where: predicate) }
             }
@@ -2097,39 +2154,9 @@ class TypeNode {
                 }
             }
             if isEnum && hasConformance("RawRepresentable") && !inheritsFromPrimitiveRawType {
-                let hasRawValueProp = members.values.contains {
-                    if case .property(let pname, _, _, _) = $0, pname == "rawValue" { return true }
-                    return false
-                }
-                var rawValueType = "String"
-                let hasRawValueInit = members.values.contains { member in
-                    if case .initializer(let s) = member, s.contains("rawValue:") {
-                        if let range = s.range(of: "rawValue:") {
-                            let after = s[range.upperBound...]
-                            let scanner = String(after).trimmingCharacters(in: .whitespaces)
-                            var typeStr = ""
-                            var depth = 0
-                            for char in scanner {
-                                if char == "(" || char == "<" {
-                                    depth += 1
-                                } else if char == ")" || char == ">" {
-                                    depth -= 1
-                                    if depth < 0 { break }
-                                } else if char == "," && depth == 0 {
-                                    break
-                                }
-                                typeStr.append(char)
-                            }
-                            let trimmedType = typeStr.trimmingCharacters(in: .whitespaces)
-                            if !trimmedType.isEmpty {
-                                rawValueType = trimmedType
-                                return true
-                            }
-                        }
-                    }
-                    return false
-                }
-                if !hasRawValueProp && hasRawValueInit {
+                let (hasRawValueProp, initSignature) = rawValueMemberInfo(in: [members])
+                if !hasRawValueProp, let initSignature {
+                    let rawValueType = TypeNode.parseRawValueType(from: initSignature) ?? "String"
                     lines.append("\(nextIndent)public var rawValue: \(rawValueType) { get { fatalError() } }")
                 }
             }
@@ -2141,25 +2168,18 @@ class TypeNode {
             // synthesized whenever missing, checking members AND extensionMembers/
             // originallyDefinedInExtensions (Stage F's moved-type extension emits the
             // rawValue init there, not in `members`).
-            let allInitContainers: [[String: MemberKind]] = [members, extensionMembers] + Array(originallyDefinedInExtensions.values) + Array(constrainedExtensions.values)
-            let hasEmptyInit = allInitContainers.contains { container in
+            let hasEmptyInit = gatherMemberContainers(includingConstrained: true).contains { container in
                 container.values.contains {
                     if case .initializer(let s) = $0 { return s == "init()" || s.hasPrefix("init()") }
                     return false
                 }
             }
             if hasConformance("OptionSet") {
-                let allContainers: [[String: MemberKind]] = [members, extensionMembers] + Array(originallyDefinedInExtensions.values)
-                let hasRawValueProp = allContainers.contains {
-                    $0.values.contains { if case .property(let pname, _, _, _) = $0, pname == "rawValue" { return true }; return false }
-                }
-                let hasRawValueInit = allContainers.contains {
-                    $0.values.contains { if case .initializer(let s) = $0, s.contains("rawValue:") { return true }; return false }
-                }
+                let (hasRawValueProp, initSignature) = rawValueMemberInfo(in: gatherMemberContainers())
                 if !hasRawValueProp {
                     lines.append("\(nextIndent)public var rawValue: Swift.Int { get { return 0 } }")
                 }
-                if !hasRawValueInit {
+                if initSignature == nil {
                     lines.append("\(nextIndent)public init(rawValue: Swift.Int) { fatalError() }")
                 }
             }
@@ -2322,7 +2342,7 @@ class TypeNode {
                 // constrainedExtensions instead of `members` (e.g. Stage F's moved-type
                 // extension emits a nested type's real init/method there) -- checking only
                 // `members` would miss it and synthesize a duplicate declaration.
-                let allSynthesisMemberContainers: [[String: MemberKind]] = [self.members, self.extensionMembers] + Array(self.originallyDefinedInExtensions.values) + Array(self.constrainedExtensions.values)
+                let allSynthesisMemberContainers = self.gatherMemberContainers(includingConstrained: true)
                 func synthesisContainerHas(_ predicate: (MemberKind) -> Bool) -> Bool {
                     allSynthesisMemberContainers.contains { $0.values.contains(where: predicate) }
                 }
@@ -2578,56 +2598,24 @@ class TypeNode {
         return lines.joined(separator: "\n")
     }
 
-    func hasEqualityOperator() -> Bool {
-        for member in Array(members.values) + Array(extensionMembers.values) {
-            if case .method(let n, _, _) = member {
-                let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
-                if cleanN == "==" {
-                    return true
-                }
-            }
-        }
-        for ext in Array(constrainedExtensions.values) + Array(originallyDefinedInExtensions.values) {
-            for member in ext.values {
-                if case .method(let n, _, _) = member {
+    private func hasOperatorMethod(named op: String) -> Bool {
+        gatherMemberContainers(includingConstrained: true).contains { container in
+            container.values.contains {
+                if case .method(let n, _, _) = $0 {
                     let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
-                    if cleanN == "==" {
-                        return true
-                    }
+                    return cleanN == op
                 }
+                return false
             }
         }
-        return false
     }
 
-    func hasLessThanOperator() -> Bool {
-        for member in Array(members.values) + Array(extensionMembers.values) {
-            if case .method(let n, _, _) = member {
-                let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
-                if cleanN == "<" {
-                    return true
-                }
-            }
-        }
-        for ext in Array(constrainedExtensions.values) + Array(originallyDefinedInExtensions.values) {
-            for member in ext.values {
-                if case .method(let n, _, _) = member {
-                    let cleanN = n.replacingOccurrences(of: " infix", with: "").trimmingCharacters(in: .whitespaces)
-                    if cleanN == "<" {
-                        return true
-                    }
-                }
-            }
-        }
-        return false
-    }
+    func hasEqualityOperator() -> Bool { hasOperatorMethod(named: "==") }
+
+    func hasLessThanOperator() -> Bool { hasOperatorMethod(named: "<") }
 
     func hasDescriptionProperty() -> Bool {
-        if members["description"] != nil { return true }
-        for ext in [extensionMembers] + Array(constrainedExtensions.values) + Array(originallyDefinedInExtensions.values) {
-            if ext["description"] != nil { return true }
-        }
-        return false
+        gatherMemberContainers(includingConstrained: true).contains { $0["description"] != nil }
     }
 
     func generateExtensions(defaultModule: String, parser: Parser? = nil, path: String = "") -> String {
