@@ -3014,7 +3014,8 @@ class Parser {
                     return false
                 }
             }
-            if moduleName != defaultModule && isModuleAvailable(moduleName) && !hasReadOnlyPropertyExtensions && !hasConstrainedExtensions {
+            let hasMovedTypes = module.nestedTypes.values.contains { $0.movedFromModule != nil }
+            if moduleName != defaultModule && isModuleAvailable(moduleName) && !hasReadOnlyPropertyExtensions && !hasConstrainedExtensions && !hasMovedTypes {
                 continue
             }
             let isExternalAvailable = moduleName != defaultModule && isModuleAvailable(moduleName)
@@ -3029,7 +3030,7 @@ class Parser {
                 // us and could turn out to be a protocol, where those forms don't compile — see
                 // commit 24a767e — but that risk doesn't apply once the kind is known.
                 let kindIsKnown = type.kind == "struct" || type.kind == "class" || type.kind == "enum"
-                if isExternalAvailable && !kindIsKnown && type.constrainedExtensions.isEmpty {
+                if type.movedFromModule == nil && isExternalAvailable && !kindIsKnown && type.constrainedExtensions.isEmpty {
                     let hasROP = type.extensionMembers.values.contains {
                         if case .property(_, _, let isReadOnly, _) = $0 { return isReadOnly }
                         return false
@@ -3060,7 +3061,7 @@ class Parser {
                 // otherwise ALWAYS fail — even for types this module's own real members
                 // legitimately extend — discarding real extensionMembers data and falling back
                 // to an empty flattened stub in Phase 4 below.
-                if isExternalAvailable && moduleName != "Swift" && moduleName != "__C" &&
+                if type.movedFromModule == nil && isExternalAvailable && moduleName != "Swift" && moduleName != "__C" &&
                    !type.kindConfirmedFromABI && !isTypeDefinedInFramework(module: moduleName, typeName: type.name) {
                     continue
                 }

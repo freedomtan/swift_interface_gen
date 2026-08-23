@@ -1206,6 +1206,14 @@ class TypeNode {
             }
         }
         
+        if let origModule = movedFromModule, let origMembers = originallyDefinedInExtensions[origModule] {
+            for (k, v) in origMembers {
+                if members[k] == nil {
+                    members[k] = v
+                }
+            }
+        }
+        
         // ContiguousBytes.withUnsafeBytes is declared `rethrows`; the ABI sometimes exposes a
         // spurious `throws`-only overload for it (its actual witness in the real module has no
         // separate throws-only entry) which can't coexist with the synthesized rethrows fallback
@@ -2014,7 +2022,8 @@ class TypeNode {
             func anyContainerHas(_ predicate: (MemberKind) -> Bool) -> Bool {
                 allMemberContainers.contains { $0.values.contains(where: predicate) }
             }
-            let hasInitFrom = anyContainerHas { if case .initializer(let s) = $0, s.contains("init(from:") { return true }; return false }
+            let hasInitFrom = (kind == "class") ? anyContainerHas { if case .initializer(let s) = $0, s.contains("init(from:") { return true }; return false }
+                                                : members.values.contains { if case .initializer(let s) = $0, s.contains("init(from:") { return true }; return false }
             let hasEncodeTo = anyContainerHas { if case .method(let n, _, _) = $0, n == "encode" { return true }; return false }
             let hasHashInto = anyContainerHas { if case .method(let n, _, _) = $0, n == "hash" { return true }; return false }
             let hasCoderInit = anyContainerHas { if case .initializer(let s) = $0, s.contains("init(coder:") { return true }; return false }
@@ -2137,6 +2146,21 @@ class TypeNode {
                 container.values.contains {
                     if case .initializer(let s) = $0 { return s == "init()" || s.hasPrefix("init()") }
                     return false
+                }
+            }
+            if hasConformance("OptionSet") {
+                let allContainers: [[String: MemberKind]] = [members, extensionMembers] + Array(originallyDefinedInExtensions.values)
+                let hasRawValueProp = allContainers.contains {
+                    $0.values.contains { if case .property(let pname, _, _, _) = $0, pname == "rawValue" { return true }; return false }
+                }
+                let hasRawValueInit = allContainers.contains {
+                    $0.values.contains { if case .initializer(let s) = $0, s.contains("rawValue:") { return true }; return false }
+                }
+                if !hasRawValueProp {
+                    lines.append("\(nextIndent)public var rawValue: Swift.Int { get { return 0 } }")
+                }
+                if !hasRawValueInit {
+                    lines.append("\(nextIndent)public init(rawValue: Swift.Int) { fatalError() }")
                 }
             }
             if hasConformance("OptionSet") || hasConformance("SetAlgebra") || hasEmptyInit {
@@ -2760,7 +2784,17 @@ class TypeNode {
             extLines.append("extension \(currentPath)\(retroactiveConformanceSuffix)\(constraintSuffix) {")
             let extNextIndent = "    "
             
-            let sortedExt = membersList.sorted(by: { 
+            let actualKind = (kind == "unknown") ? "struct" : kind
+            let isNominalValueType = (actualKind == "struct" || actualKind == "enum")
+            let filteredMembersList = membersList.filter { member in
+                if isNominalValueType {
+                    if case .initializer(let sig) = member, sig.contains("init(from:") {
+                        return false
+                    }
+                }
+                return true
+            }
+            let sortedExt = filteredMembersList.sorted(by: { 
                 switch ($0, $1) {
                 case (.initializer(_), .initializer(_)): return false
                 case (.initializer(_), _): return true

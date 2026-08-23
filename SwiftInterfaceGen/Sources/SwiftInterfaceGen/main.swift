@@ -3739,6 +3739,10 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             for member in sortedMembers {
                 switch member {
                 case .initializer(let sig):
+                    let actualKind = (node.kind == "unknown") ? "struct" : node.kind
+                    if actualKind == "struct" || actualKind == "enum" {
+                        if sig.contains("init(from:") { continue }
+                    }
                     if node.members.values.contains(where: { if case .initializer(let s) = $0 { return s == sig } else { return false } }) { continue }
                     extBody += "    public \(sig) { fatalError() }\n"
                     emittedAny = true
