@@ -4247,7 +4247,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 }
             }
         }
-        
+
         // A nested type literally named `Type` (or another Swift keyword) demangles/renders
         // backtick-escaped ("ToolDefinition.`Type`"), which the bare identifier character class
         // below doesn't match — missing it here means it's never added to externalTypes and
@@ -4261,6 +4261,11 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         if let regex = try? NSRegularExpression(pattern: pathPattern, options: []) {
             let nsRange = NSRange(outputCode.startIndex..<outputCode.endIndex, in: outputCode)
             let matches = regex.matches(in: outputCode, options: [], range: nsRange)
+            // Hoisted out of the match loop -- rebuilding a full Character array of the entire
+            // (often 1MB+) generated file on EVERY match (this pattern alone can match thousands
+            // of dotted-path references in a large file) turns this into an O(n*k) scan that was
+            // measured taking 40+ seconds on ModelCatalog's ~1MB output. Building it once is O(n).
+            let chars = Array(outputCode)
             for m in matches {
                 if let range = Range(m.range(at: 1), in: outputCode) {
                     // Strip backticks so a keyword-named segment ("`Type`") matches the plain
@@ -4279,12 +4284,11 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                             }
                         }
                     }
-                    
+
                     var genericCount = 0
                     let endIdx = m.range(at: 1).location + m.range(at: 1).length
                     if endIdx < outputCode.count {
                         var scan = endIdx
-                        let chars = Array(outputCode)
                         while scan < chars.count && chars[scan].isWhitespace {
                             scan += 1
                         }
