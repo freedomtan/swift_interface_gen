@@ -17,10 +17,10 @@ Regression suite (`run_regression_tests.py`), 9 targets — all `SUCCESS`. First
 | ModelCatalog | 0 | 0 |
 | ModelCatalogRuntime | 0 | 0 |
 | UnifiedAssetFramework | 0 (pure ObjC, no Swift symbols) | 0 |
-| AppleIntelligenceReporting | 88 | 0 |
+| AppleIntelligenceReporting | 0 | 0 |
 | TokenGenerationCore | 0 | 0 |
 
-`AppleIntelligenceReporting`'s remaining stubs stem from `protocol Source<Stream>` — a primary-associated-type protocol the generator doesn't detect (see [Key Design Decisions](#key-design-decisions) — primary associated types), forcing constrained-existential usages like `any Source<Self.Stream == A>` to erase to `any Source<Any>` (assembly-stub territory) rather than the valid `any Source<A>`. `TokenGenerationCore` used to sit at ~2168 first-pass stubs (its size and deep dependency chain — InternalSwiftProtobuf/PromptKit — surfaced a whole class of whole-type `@_originallyDefinedIn` moves the generator didn't handle) until that root cause was fixed; see [Key Design Decisions](#key-design-decisions) — whole-type `@_originallyDefinedIn` moves, and `TODO.md`/`PLAN_stage_e_tokengeneration_flattening.md` for the full fix history.
+All 9 regression targets are at 0 first-pass stubs (`run_regression_tests.py` now reports this per-framework, see below). `TokenGenerationCore` used to sit at ~2168 first-pass stubs (its size and deep dependency chain — InternalSwiftProtobuf/PromptKit — surfaced a whole class of whole-type `@_originallyDefinedIn` moves the generator didn't handle) until that root cause was fixed; see [Key Design Decisions](#key-design-decisions) — whole-type `@_originallyDefinedIn` moves, and `TODO.md`/`PLAN_stage_e_tokengeneration_flattening.md` for the full fix history. `AppleIntelligenceReporting` previously sat at 88 first-pass stubs stemming from a primary-associated-type protocol the generator doesn't detect (see [Key Design Decisions](#key-design-decisions) — primary associated types); that specific gap has since closed, though the underlying limitation (no primary-associated-type detection) is still real and could resurface for a different protocol shape.
 
 Public-framework ground-truth suite (`verify_public.py`), 18 curated SDK frameworks — 18/18 PASS (compiles cleanly against real SDK `.swiftinterface`/`.tbd`, independent of the regression suite above).
 
@@ -224,7 +224,7 @@ Apple sometimes moves a type's entire ABI ownership between modules, not just in
 This closed out TokenGenerationCore's remaining ~2168 first-pass stubs entirely (see the frameworks table above) — see `PLAN_stage_e_tokengeneration_flattening.md` for the investigation and fix history.
 
 ### Primary associated types (not yet supported)
-The generator has no mechanism to detect or emit primary associated types (`protocol Source<Stream>`). Symbols using constrained-existential syntax against such a protocol (e.g. `any Source<Self.Stream == A>`) can't be reconstructed as `any Source<A>` without the protocol declaring `<Stream>` — `postProcess()` instead erases them to `any Source<Any>`, which is valid but doesn't match the real ABI symbol, so it falls back to an assembly stub. This is `AppleIntelligenceReporting`'s main remaining stub source (see the frameworks table above).
+The generator has no mechanism to detect or emit primary associated types (`protocol Source<Stream>`). Symbols using constrained-existential syntax against such a protocol (e.g. `any Source<Self.Stream == A>`) can't be reconstructed as `any Source<A>` without the protocol declaring `<Stream>` — `postProcess()` instead erases them to `any Source<Any>`, which is valid but doesn't match the real ABI symbol, so it falls back to an assembly stub. This used to be `AppleIntelligenceReporting`'s main stub source (88 first-pass stubs); that specific gap has since closed (see the frameworks table above), but the underlying limitation is unaddressed and could resurface for any other primary-associated-type protocol.
 
 ### `_$ss` / `_$sSf` stdlib-extension filtering
 ODIE defines extensions on `~Escapable` Swift stdlib types (`RawSpan`, `MutableRawSpan`) and on `Swift.Float` / `Swift.Double`. These use mangled prefixes `_$ss` and `_$sSf`. They are filtered from the exports list because our mock library cannot provide them — they require the real ODIE runtime. Assembly stubs cover them instead.
