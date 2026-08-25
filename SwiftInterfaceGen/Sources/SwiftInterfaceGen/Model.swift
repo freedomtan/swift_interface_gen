@@ -352,7 +352,7 @@ class TypeNode {
                 if let colonIdx = trimmed.firstIndex(of: ":") {
                     let typePart = String(trimmed[trimmed.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
                     defaultValue = TypeNode.getDefaultValue(for: typePart)
-                    fputs("applyDefaultArguments key: \(matchedKey) typePart: '\(typePart)' resolved: '\(defaultValue)'\n", stderr)
+                    if ConfigManager.verbose { fputs("applyDefaultArguments key: \(matchedKey) typePart: '\(typePart)' resolved: '\(defaultValue)'\n", stderr) }
                 }
                 newParams.append("\(trimmed) = \(defaultValue)")
             } else {
@@ -2701,7 +2701,7 @@ class TypeNode {
                         }
                     }
                 }
-                fputs("Extension constraint: \(constraint), extInScope: \(extInScope)\n", stderr)
+                if ConfigManager.verbose { fputs("Extension constraint: \(constraint), extInScope: \(extInScope)\n", stderr) }
             }
             
             let extCleanScope = { (s: String) -> String in

@@ -870,7 +870,7 @@ class Parser {
                             let node = findOrCreateType(name: cleanType(typePath))
                             setKind("protocol", for: node, force: true)
                             let simplifiedProto = simplifyType(protoPath)
-                            fputs("Parsed assoc conformance: \(typePath).\(assocName) -> \(simplifiedProto)\n", stderr)
+                            if ConfigManager.verbose { fputs("Parsed assoc conformance: \(typePath).\(assocName) -> \(simplifiedProto)\n", stderr) }
                             
                             let cleanConstraint = simplifiedProto.replacingOccurrences(of: "any ", with: "")
                             var code = "associatedtype \(assocName): \(cleanConstraint)"
@@ -1736,7 +1736,7 @@ class Parser {
     }
 
     private func findOrCreateType(name: String) -> TypeNode {
-        if name.contains("<") { fputs("findOrCreateType with <: \(name)\n", stderr) }
+        if ConfigManager.verbose && name.contains("<") { fputs("findOrCreateType with <: \(name)\n", stderr) }
         var parts = name.components(separatedBy: ".")
         if parts[0] == "A?" || parts[0].hasSuffix("?") {
             parts = ["Swift", "Optional"] + parts.dropFirst()
@@ -2832,7 +2832,7 @@ class Parser {
 
         // systemTypes is defined as class member
 
-        fputs("discoveredProtocols: \(discoveredProtocols)\n", stderr)
+        if ConfigManager.verbose { fputs("discoveredProtocols: \(discoveredProtocols)\n", stderr) }
         // Set all referenced but undefined types to struct
         func defaultUnknownTypes(node: TypeNode) {
             if node.kind == "unknown" {

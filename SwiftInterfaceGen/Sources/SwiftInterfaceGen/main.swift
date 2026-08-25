@@ -4,12 +4,13 @@ import Foundation
 struct SwiftInterfaceGen {
     static func main() {
         let args = CommandLine.arguments
+        ConfigManager.verbose = args.contains("--verbose") || args.contains("--debug")
         if args.contains("--compare") {
             runCompare(args: args)
             return
         }
         if args.count < 2 {
-            print("Usage: swift-interface-gen <path_to_tbd> [--config <path_to_config.json>] or swift-interface-gen --compare <tbd_path> <dylib_path> [aliases_output_path]")
+            print("Usage: swift-interface-gen <path_to_tbd> [--config <path_to_config.json>] [--verbose|--debug] or swift-interface-gen --compare <tbd_path> <dylib_path> [aliases_output_path]")
             return
         }
 
@@ -44,7 +45,7 @@ struct SwiftInterfaceGen {
         for lib in reexportedLibraries {
             let libPath = resolveLibraryPath(lib)
             if let libContent = try? String(contentsOfFile: libPath, encoding: .utf8) {
-                print("Discovered dependency: \(lib) -> \(libPath)", to: &Self.standardError)
+                if ConfigManager.verbose { print("Discovered dependency: \(lib) -> \(libPath)", to: &Self.standardError) }
                 let libModule = (lib as NSString).lastPathComponent.replacingOccurrences(of: ".framework", with: "")
                 // ObjC classes from dependency frameworks appear as __C.ClassName in Swift.
                 // Register them under "__C" so stub generation knows not to create local stubs for them.
@@ -66,11 +67,11 @@ struct SwiftInterfaceGen {
 
         let startGen = Date()
         let allCode = parser.generateAll()
-        print("generateAll took: \(Date().timeIntervalSince(startGen))s", to: &Self.standardError)
+        if ConfigManager.verbose { print("generateAll took: \(Date().timeIntervalSince(startGen))s", to: &Self.standardError) }
 
         let startPost = Date()
         let finalCode = postProcess(allCode, parser: parser)
-        print("postProcess took: \(Date().timeIntervalSince(startPost))s", to: &Self.standardError)
+        if ConfigManager.verbose { print("postProcess took: \(Date().timeIntervalSince(startPost))s", to: &Self.standardError) }
         
         if let stubsIndex = args.firstIndex(of: "--generate-stubs"), stubsIndex + 1 < args.count {
             let outputDir = args[stubsIndex + 1]
@@ -233,7 +234,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 let bridgeImpl   = implLines.joined(separator: "\n")   + "\n"
                 try? bridgeHeader.write(toFile: "\(currentModule)Interface_bridge.h", atomically: true, encoding: .utf8)
                 try? bridgeImpl.write(toFile:   "\(currentModule)Interface_bridge.m", atomically: true, encoding: .utf8)
-                print("Wrote ObjC bridge for \(bridgedTypes.map { $0.name })", to: &Self.standardError)
+                if ConfigManager.verbose { print("Wrote ObjC bridge for \(bridgedTypes.map { $0.name })", to: &Self.standardError) }
             }
         }
     }
@@ -321,8 +322,10 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
     }
 
     static func processSymbols(_ symbols: [String], parser: Parser, module: String, depth: Int = 0) {
-        for symbol in symbols {
-            if symbol.contains("UAF") { fputs("Processing symbol: \(symbol)\n", stderr) }
+        if ConfigManager.verbose {
+            for symbol in symbols {
+                if symbol.contains("UAF") { fputs("Processing symbol: \(symbol)\n", stderr) }
+            }
         }
         parser.tbdSymbols.formUnion(symbols)
         if depth == 0 {
@@ -339,8 +342,8 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         }
         
         let count = symbols.count
-        print("Found \(count) new symbols in \(module). Demangling and precomputing...", to: &Self.standardError)
-        
+        if ConfigManager.verbose { print("Found \(count) new symbols in \(module). Demangling and precomputing...", to: &Self.standardError) }
+
         let start = Date()
         var demangledMap: [(mangled: String, demangled: String)] = []
         for mangled in symbols {
@@ -348,16 +351,16 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 demangledMap.append((mangled: mangled, demangled: demangled))
             }
         }
-        print("Demangling took: \(Date().timeIntervalSince(start))s", to: &Self.standardError)
+        if ConfigManager.verbose { print("Demangling took: \(Date().timeIntervalSince(start))s", to: &Self.standardError) }
 
         let symbolsWithClosures = demangledMap.filter { $0.demangled.contains("->") }.map { $0.mangled }
         if !symbolsWithClosures.isEmpty {
             let startExpand = Date()
             let escapingResults = runDemangleExpand(symbols: symbolsWithClosures, parser: parser)
             parser.symbolEscapingMap.merge(escapingResults) { (_, new) in new }
-            print("Demangle --expand for \(symbolsWithClosures.count) symbols took: \(Date().timeIntervalSince(startExpand))s", to: &Self.standardError)
+            if ConfigManager.verbose { print("Demangle --expand for \(symbolsWithClosures.count) symbols took: \(Date().timeIntervalSince(startExpand))s", to: &Self.standardError) }
         }
-        
+
         // Swift ABI Nominal Type Discovery Pass
         parser.discoverNominalTypes(demangledMap: demangledMap, currentModule: module)
 
@@ -365,7 +368,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         for entry in demangledMap {
             parser.precompute(demangled: entry.demangled)
         }
-        print("Precompute took: \(Date().timeIntervalSince(startPre))s", to: &Self.standardError)
+        if ConfigManager.verbose { print("Precompute took: \(Date().timeIntervalSince(startPre))s", to: &Self.standardError) }
         
         // Pre-pass: collect default argument positions before parsing functions
         for entry in demangledMap {
@@ -391,7 +394,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         for entry in demangledMap {
             parser.parse(mangled: entry.mangled, demangled: entry.demangled, currentModule: module)
         }
-        print("Parse took: \(Date().timeIntervalSince(startParse))s", to: &Self.standardError)
+        if ConfigManager.verbose { print("Parse took: \(Date().timeIntervalSince(startParse))s", to: &Self.standardError) }
     }
 
     static func extractSymbols(from tbd: String) -> [String] {
@@ -3359,8 +3362,10 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         let tbdSyms = extractSymbols(from: tbdContent)
         let dylibSyms = extractDylibSymbols(dylibPath: dylibPath)
         
-        print("Total symbols in expected file: \(tbdSyms.count)")
-        print("Total symbols in Dylib: \(dylibSyms.count)")
+        if ConfigManager.verbose {
+            print("Total symbols in expected file: \(tbdSyms.count)")
+            print("Total symbols in Dylib: \(dylibSyms.count)")
+        }
         
         func normalize(_ sym: String) -> String {
             if sym.hasPrefix("_") {
@@ -3395,22 +3400,29 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         }
         extra.sort()
         
+        // The header+"Count:" lines below are regex-parsed by verify_public.py's run_compare()
+        // as a fallback when "Generated N stubs" isn't present -- keep them unconditional even
+        // though the per-symbol listing that follows is verbose-only.
         print("\n--- Missing Symbols (in TBD/Expected but not in Dylib) ---")
         print("Count: \(missing.count)")
-        for s in missing.prefix(50) {
-            print("  \(s)")
+        if ConfigManager.verbose {
+            for s in missing.prefix(50) {
+                print("  \(s)")
+            }
+            if missing.count > 50 {
+                print("  ... and \(missing.count - 50) more")
+            }
         }
-        if missing.count > 50 {
-            print("  ... and \(missing.count - 50) more")
-        }
-        
+
         print("\n--- Extra Symbols (in Dylib but not in TBD/Expected) ---")
         print("Count: \(extra.count)")
-        for s in extra.prefix(50) {
-            print("  \(s)")
-        }
-        if extra.count > 50 {
-            print("  ... and \(extra.count - 50) more")
+        if ConfigManager.verbose {
+            for s in extra.prefix(50) {
+                print("  \(s)")
+            }
+            if extra.count > 50 {
+                print("  ... and \(extra.count - 50) more")
+            }
         }
         
         // Generate stubs.s
@@ -3583,7 +3595,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         }
         missing.sort()
         
-        fputs("Self-alignment: found \(missing.count) missing symbols to stub.\n", stderr)
+        if ConfigManager.verbose { fputs("Self-alignment: found \(missing.count) missing symbols to stub.\n", stderr) }
         
         if missing.isEmpty {
             return code
@@ -4706,7 +4718,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         var fileContentsByModule = [String: String]()
 
         for (mod, items) in externalTypes {
-            print("Stubbing: \(mod) has \(items.count) items: \(items.map { $0.typeName })", to: &Self.standardError)
+            if ConfigManager.verbose { print("Stubbing: \(mod) has \(items.count) items: \(items.map { $0.typeName })", to: &Self.standardError) }
             var fileContent = "import Foundation\n\n"
             let root = StubNode(name: mod)
             for item in items {
@@ -5359,7 +5371,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             let filePath = "\(outputDir)/\(mod).swift"
             do {
                 try updated.write(toFile: filePath, atomically: true, encoding: .utf8)
-                print("Generated stub source for \(mod) at \(filePath)", to: &Self.standardError)
+                if ConfigManager.verbose { print("Generated stub source for \(mod) at \(filePath)", to: &Self.standardError) }
             } catch {
                 print("Error: Could not write stub file to \(filePath)", to: &Self.standardError)
             }
@@ -5388,7 +5400,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             guard !FileManager.default.fileExists(atPath: filePath) else { continue }
             let emptyStub = "import Foundation\n// Empty stub for \(modName)\n"
             try? emptyStub.write(toFile: filePath, atomically: true, encoding: .utf8)
-            print("Generated empty stub for \(modName) at \(filePath)", to: &Self.standardError)
+            if ConfigManager.verbose { print("Generated empty stub for \(modName) at \(filePath)", to: &Self.standardError) }
         }
     }
 
