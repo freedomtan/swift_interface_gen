@@ -2079,8 +2079,15 @@ class TypeNode {
             func anyContainerHas(_ predicate: (MemberKind) -> Bool) -> Bool {
                 allMemberContainers.contains { $0.values.contains(where: predicate) }
             }
-            let hasInitFrom = (kind == "class") ? anyContainerHas { if case .initializer(let s) = $0, s.contains("init(from:") { return true }; return false }
-                                                : members.values.contains { if case .initializer(let s) = $0, s.contains("init(from:") { return true }; return false }
+            // Unlike hasEncodeTo/hasHashInto/etc. below, this used to check only `members` (not
+            // every container) for struct/enum kinds -- missing a real init(from:) that lives in
+            // originallyDefinedInExtensions (e.g. a moved type like TokenGenerationCore's
+            // OneShotRequest, whose real Decodable init is added via a TokenGenerationCore
+            // extension, not the enum's own body). That caused this fallback to synthesize a
+            // SECOND, wrongly-placed init(from:) directly in the type body -- which mangles under
+            // the moved-from module with no "extension in" marker, not matching the real ABI's
+            // "(extension in TokenGenerationCore)" symbol, so the real one never got emitted.
+            let hasInitFrom = anyContainerHas { if case .initializer(let s) = $0, s.contains("init(from:") { return true }; return false }
             let hasEncodeTo = anyContainerHas { if case .method(let n, _, _) = $0, n == "encode" { return true }; return false }
             let hasHashInto = anyContainerHas { if case .method(let n, _, _) = $0, n == "hash" { return true }; return false }
             let hasCoderInit = anyContainerHas { if case .initializer(let s) = $0, s.contains("init(coder:") { return true }; return false }
@@ -2772,13 +2779,18 @@ class TypeNode {
             extLines.append("extension \(currentPath)\(retroactiveConformanceSuffix)\(constraintSuffix) {")
             let extNextIndent = "    "
             
-            let actualKind = (kind == "unknown") ? "struct" : kind
-            let isNominalValueType = (actualKind == "struct" || actualKind == "enum")
+            // Used to unconditionally drop every extension-rendered init(from:) for struct/enum
+            // kinds, on the assumption generateCode()'s own Codable-completeness fallback always
+            // covers it -- but that fallback used to check only the type's own `members` for
+            // struct/enum, so a real init(from:) living ONLY in an extension (e.g. a moved type
+            // like TokenGenerationCore's OneShotRequest, whose real Decodable init is added via a
+            // TokenGenerationCore extension, not the enum's own body) got dropped from BOTH the
+            // body (correctly, nothing to duplicate) AND this extension (incorrectly, silently
+            // losing the only declaration of it), so it was never emitted anywhere. Only strip it
+            // here when `members` already has a real one to avoid a duplicate declaration.
             let filteredMembersList = membersList.filter { member in
-                if isNominalValueType {
-                    if case .initializer(let sig) = member, sig.contains("init(from:") {
-                        return false
-                    }
+                if case .initializer(let sig) = member, sig.contains("init(from:") {
+                    return !members.values.contains(where: { if case .initializer(let s) = $0 { return s.contains("init(from:") } else { return false } })
                 }
                 return true
             }

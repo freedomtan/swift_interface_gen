@@ -628,7 +628,22 @@ class Parser {
                                 idx = funcName.index(after: idx)
                             }
                             if let close = closeAngle, whereRange.lowerBound > openAngle, whereRange.lowerBound < close {
-                                funcName = String(funcName[..<whereRange.lowerBound]) + ">" + String(funcName[funcName.index(after: close)...])
+                                let placeholderSegment = funcName[funcName.index(after: openAngle)..<whereRange.lowerBound]
+                                if placeholderSegment.trimmingCharacters(in: .whitespaces).isEmpty {
+                                    // A TYPE-level constrained-extension clause (e.g.
+                                    // "GenerativeConfigurationProtocol< where A.PromptType ==
+                                    // PromptKit.CompletionPrompt>.methodName") has nothing between
+                                    // "<" and " where " -- unlike a method's own generic clause
+                                    // ("makeArray<A where A: X>", handled below), there's no
+                                    // placeholder to preserve. Dropping the whole "<...>" leaves an
+                                    // empty "<>" that never matches injectDefaultArguments'
+                                    // candidateKeys (which have no generic suffix for a constrained-
+                                    // extension protocol type), silently orphaning the entry so its
+                                    // default argument never gets injected. Strip it entirely instead.
+                                    funcName = String(funcName[..<openAngle]) + String(funcName[funcName.index(after: close)...])
+                                } else {
+                                    funcName = String(funcName[..<whereRange.lowerBound]) + ">" + String(funcName[funcName.index(after: close)...])
+                                }
                             }
                         }
                         let paramsStr = String(funcPart[funcPart.index(after: openParen)..<closeParen])
@@ -769,7 +784,23 @@ class Parser {
         var extensionModule: String? = nil
         if let extRange = demangled.range(of: "(extension in "),
            let closeParenIdx = demangled[extRange.upperBound...].firstIndex(of: ")") {
-            extensionModule = String(demangled[extRange.upperBound..<closeParenIdx]).trimmingCharacters(in: .whitespaces)
+            // `range(of:)` finds the FIRST occurrence anywhere in the string -- but a function
+            // whose OWN declaration is native (no extension) can still have this exact marker
+            // embedded deep inside a PARAMETER or RETURN TYPE reference (e.g.
+            // "TokenGeneration.Prompt.renderPromptFragments(...) throws -> [(extension in
+            // TokenGenerationCore):TokenGeneration.Prompt.RenderedPromptFragment]", where only the
+            // return type's element, not the function itself, lives in a TokenGenerationCore
+            // extension). Treating that as the FUNCTION's own extension module misattributed the
+            // whole member to the wrong module, routing it into extensionMembers with a symbolModule
+            // it should never have had and silently losing its real, correctly-un-extended
+            // rendering. A genuine function-level marker is only ever preceded by bare modifier
+            // keywords (e.g. "static ", "mutating ", "async function pointer to static ") -- never
+            // by "(", ")", ".", "->", "[", or ":", which only appear once we're already inside a
+            // type/parameter reference.
+            let prefix = demangled[..<extRange.lowerBound]
+            if !prefix.contains(where: { "().:[]".contains($0) }) && !prefix.contains("->") {
+                extensionModule = String(demangled[extRange.upperBound..<closeParenIdx]).trimmingCharacters(in: .whitespaces)
+            }
         }
 
         if d_orig.starts(with: "associated type descriptor for ") {

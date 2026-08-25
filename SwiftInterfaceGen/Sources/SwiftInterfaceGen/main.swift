@@ -3752,10 +3752,15 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
             for member in sortedMembers {
                 switch member {
                 case .initializer(let sig):
-                    let actualKind = (node.kind == "unknown") ? "struct" : node.kind
-                    if actualKind == "struct" || actualKind == "enum" {
-                        if sig.contains("init(from:") { continue }
-                    }
+                    // Used to unconditionally skip init(from:) here on the assumption that
+                    // generateCode()'s own Codable-completeness fallback (Model.swift) already
+                    // covers it -- but that fallback used to check only a struct/enum's own
+                    // `members`, missing this real one living in originallyDefinedInExtensions,
+                    // and synthesized a SECOND, wrongly-placed init(from:) directly in the type
+                    // body instead (mangling under the moved-from module with no "extension in"
+                    // marker, not matching the real ABI). Now that the fallback correctly checks
+                    // every container (including this one) and skips synthesis when a real one is
+                    // found here, this real member needs to actually be emitted.
                     if node.members.values.contains(where: { if case .initializer(let s) = $0 { return s == sig } else { return false } }) { continue }
                     extBody += "    public \(sig) { fatalError() }\n"
                     emittedAny = true
