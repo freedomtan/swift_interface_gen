@@ -110,8 +110,21 @@ struct SwiftInterfaceGen {
             }
             if sym.hasPrefix("_$s") || sym.hasPrefix("$s") {
                 if let mod = Parser.getMangledModule(sym), mod != currentModule {
-                    let extMarker = "\(currentModule.count)\(currentModule)E"
-                    let isExtension = sym.contains(extMarker)
+                    // Can't just check for the literal "<currentModule.count><currentModule>E"
+                    // substring -- Swift's mangler substitutes repeated identifier prefixes with
+                    // back-references (e.g. CoreAIDelegates's shared "CoreAI" prefix with an
+                    // earlier-mangled CoreAICompiler collapses "15CoreAIDelegatesE" down to
+                    // "0A11AIDelegatesE"), so the literal marker silently never matches and a
+                    // real cross-module extension member (e.g. CoreAIDelegates's own
+                    // `extension Compiler { static func compileModel(...) }`) gets dropped from
+                    // the exports list entirely, breaking linking for anything that calls it.
+                    let isExtension: Bool
+                    if let demangled = demangle(symbol: sym) {
+                        isExtension = demangled.contains("(extension in \(currentModule))")
+                    } else {
+                        let extMarker = "\(currentModule.count)\(currentModule)E"
+                        isExtension = sym.contains(extMarker)
+                    }
                     let isMoved = movedTypeNames.contains(where: { sym.contains($0) })
                     if !isExtension && !isMoved {
                         return false
