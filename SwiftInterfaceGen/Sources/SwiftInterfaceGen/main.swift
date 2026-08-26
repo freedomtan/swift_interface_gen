@@ -1323,10 +1323,62 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(of: "public struct AnyPublisher<A, B>:", with: "public struct AnyPublisher<A, B: Swift.Error>:")
             c = c.replacingOccurrences(of: "public struct AnySubject<A, B>:", with: "public struct AnySubject<A, B: Swift.Error>:")
             c = c.replacingOccurrences(of: "public enum Completion<A>:", with: "public enum Completion<A: Swift.Error>:")
-            c = c.replacingOccurrences(of: "public enum Completion<A: Swift.Error>: Codable, Hashable", with: "public enum Completion<A: Swift.Error>: Codable")
-            c = c.replacingOccurrences(of: "extension PubSub.Completion where A: Equatable", with: "extension PubSub.Completion where A: Equatable")
-            c = c.replacingOccurrences(of: "extension PubSub.Completion where A: Hashable", with: "extension PubSub.Completion where A: Hashable")
+            // Completion<A>'s Codable/Hashable conformances are each individually CONDITIONAL
+            // in the real ABI (confirmed via swift-demangle -expand on their conformance
+            // descriptors: "where A: Swift.Encodable"/"Decodable"/"Hashable"), not the single
+            // unconditional "Codable, Hashable" the generator infers from the TBD's flat
+            // conformance list. init(from:)/encode(to:) already exist as unconditional members
+            // below (their fatalError() bodies don't actually need A to conform to anything),
+            // so declaring the conditional conformances via separate empty extensions is enough
+            // to pick those members up as the requirement witnesses.
+            c = c.replacingOccurrences(of: "public enum Completion<A: Swift.Error>: Codable, Hashable, @unchecked Sendable", with: "public enum Completion<A: Swift.Error>: @unchecked Sendable")
+            c = c.replacingOccurrences(of: "public enum Completion<A: Swift.Error>: Codable, @unchecked Sendable", with: "public enum Completion<A: Swift.Error>: @unchecked Sendable")
+            c = c.replacingOccurrences(
+                of: "extension PubSub.Completion where A: Equatable {\n    public static func == (lhs: Self, rhs: Self) -> Swift.Bool { true }\n}",
+                with: """
+                extension PubSub.Completion: Swift.Equatable where A: Swift.Equatable {
+                    public static func == (lhs: Self, rhs: Self) -> Swift.Bool { true }
+                }
+                extension PubSub.Completion: Swift.Hashable where A: Swift.Hashable {
+                    public func hash(into hasher: inout Hasher) { fatalError() }
+                }
+                extension PubSub.Completion: Swift.Encodable where A: Swift.Encodable {}
+                extension PubSub.Completion: Swift.Decodable where A: Swift.Decodable {}
+                """)
             c = c.replacingOccurrences(of: "public struct RawRepresentableWrapper<A>:", with: "public struct RawRepresentableWrapper<A: RawRepresentable>:")
+            // Same conditional-conformance shape as Completion<A> above, but keyed off
+            // A.RawValue (confirmed via swift-demangle -expand: "where A.RawValue: Swift.X")
+            // rather than A itself.
+            c = c.replacingOccurrences(
+                of: "public struct RawRepresentableWrapper<A: RawRepresentable>: Codable, Hashable, @unchecked Sendable {",
+                with: "public struct RawRepresentableWrapper<A: RawRepresentable>: @unchecked Sendable {")
+            c = c.replacingOccurrences(
+                of: """
+                public struct RawRepresentableWrapper<A: RawRepresentable>: @unchecked Sendable {
+                    public init(_ arg1: A) { fatalError() }
+                    public var rawValue: A.RawValue { get { fatalError() } }
+                    public var value: A { get { fatalError() } }
+                    public init(from decoder: any Swift.Decoder) throws { fatalError() }
+                    public func encode(to encoder: Swift.Encoder) throws { fatalError() }
+                    public func hash(into hasher: inout Hasher) { fatalError() }
+                }
+                """,
+                with: """
+                public struct RawRepresentableWrapper<A: RawRepresentable>: @unchecked Sendable {
+                    public init(_ arg1: A) { fatalError() }
+                    public var rawValue: A.RawValue { get { fatalError() } }
+                    public var value: A { get { fatalError() } }
+                    public init(from decoder: any Swift.Decoder) throws { fatalError() }
+                    public func encode(to encoder: Swift.Encoder) throws { fatalError() }
+                    public func hash(into hasher: inout Hasher) { fatalError() }
+                }
+                extension RawRepresentableWrapper: Swift.Equatable where A.RawValue: Swift.Equatable {
+                    public static func == (lhs: Self, rhs: Self) -> Swift.Bool { fatalError() }
+                }
+                extension RawRepresentableWrapper: Swift.Hashable where A.RawValue: Swift.Hashable {}
+                extension RawRepresentableWrapper: Swift.Encodable where A.RawValue: Swift.Encodable {}
+                extension RawRepresentableWrapper: Swift.Decodable where A.RawValue: Swift.Decodable {}
+                """)
             c = c.removeAnyConstraintsFromWhereClause()
 
             c += """
