@@ -28,6 +28,10 @@ class TypeNode {
     var rawType: String?
     var finalMembers: Set<String> = []
     var isObjcBridged: Bool = false  // true when this is an ObjC class extended in Swift (So-prefix symbols)
+    // Set when a native Swift class also appears in the TBD's objc-classes: list with this
+    // plain (unmangled) name -- without an explicit @objc(name), Swift emits the ObjC class
+    // record under its auto-mangled _TtC<module><Class> name instead of the real ABI's plain one.
+    var objcExplicitName: String? = nil
     var hasDeinit: Bool = false  // true when the ABI has a "...deinit" (VfD/Cfd) symbol for this type
     weak var parent: TypeNode? = nil
     // Names of protocol requirements this type is KNOWN to implement via a "protocol witness
@@ -1257,7 +1261,8 @@ class TypeNode {
                 }
             }
             let fixedLayoutAttr = (finalKind == "class") ? "@_fixed_layout " : ""
-            lines.append("\(indent)\(fixedLayoutAttr)\(classVisibility) \(finalKind) \(displayTypeName)\(inheritance) {")
+            let objcNameAttr = (finalKind == "class" && objcExplicitName != nil) ? "@objc(\(objcExplicitName!)) " : ""
+            lines.append("\(indent)\(objcNameAttr)\(fixedLayoutAttr)\(classVisibility) \(finalKind) \(displayTypeName)\(inheritance) {")
         }
         
         let nextIndent = indent + "    "

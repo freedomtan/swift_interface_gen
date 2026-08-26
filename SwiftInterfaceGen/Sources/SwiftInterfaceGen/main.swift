@@ -552,6 +552,12 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                     node.baseClass = nsUnitSubclasses.contains(objcClass) ? "NSUnit" : "NSObject"
                 }
             }
+            // A native class visible under a plain (unmangled) ObjC name needs an explicit
+            // @objc(name) annotation, or Swift emits its ObjC class record under the
+            // auto-mangled _TtC<module><Class> name instead of the real ABI's plain one.
+            if isNativeSwiftClass {
+                node.objcExplicitName = objcClass
+            }
         }
         
         // Special case: UAFSubscriptionDownloadStatus is an ObjC enum in UnifiedAssetFramework.
