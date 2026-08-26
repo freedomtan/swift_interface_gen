@@ -972,7 +972,12 @@ class TypeNode {
             if !hasHashableMc { toStrip.insert("Hashable") }
             if !hasEquatableMc { toStrip.insert("Equatable") }
             if !hasCodableMc { toStrip.formUnion(["Codable", "Encodable", "Decodable"]) }
-            inheritsList = inheritsList.filter { !toStrip.contains($0) }
+            // NSObject already conforms to these via Foundation's own extension, so restating
+            // them on a subclass is a redundant-conformance compile error, not just a stub gap.
+            if baseClass == "NSObject" {
+                toStrip.formUnion(["CustomStringConvertible", "CustomDebugStringConvertible"])
+            }
+            inheritsList = inheritsList.filter { !toStrip.contains($0.replacingOccurrences(of: "Swift.", with: "")) }
             
             var needsUncheckedSendable = false
             for inheritsType in inheritsList {

@@ -534,13 +534,23 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             if objcClass.hasPrefix("_Tt") {
                 continue
             }
+            // `.tbd`'s `objc-classes:` list conflates two different things: classes genuinely
+            // implemented in Objective-C, and native Swift classes that merely subclass NSObject
+            // (any `@objc`/NSObject-derived Swift class gets an ObjC runtime class record too).
+            // Only the former need the extension-based ObjC-bridge rendering; a native class has
+            // its own nominal type descriptor symbol in the TBD, which the latter never do.
+            let nominalTypeDescriptor = "_$s\(module.count)\(module)\(objcClass.count)\(objcClass)CMn"
+            let isNativeSwiftClass = parser.tbdSymbols.contains(nominalTypeDescriptor)
             let node = parser.findOrCreateDiscoveredTypePath(module: module, path: [objcClass])
             if node.kind == "unknown" {
                 parser.setKind("class", for: node)
                 node.baseClass = nsUnitSubclasses.contains(objcClass) ? "NSUnit" : "NSObject"
-                node.isObjcBridged = true
+                node.isObjcBridged = !isNativeSwiftClass
             } else if node.kind == "class" {
-                node.isObjcBridged = true
+                node.isObjcBridged = !isNativeSwiftClass
+                if isNativeSwiftClass && node.baseClass == nil {
+                    node.baseClass = nsUnitSubclasses.contains(objcClass) ? "NSUnit" : "NSObject"
+                }
             }
         }
         
@@ -2275,7 +2285,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         // These are SPI/internal types (e.g. `_AxisContentOutputs` in Charts) that appear as
         // parameter or return types but whose definitions aren't in the public TBD.
         var declaredTypes = Set<String>()
-        let declPattern = "(?:public\\s+(?:struct|class|enum|protocol|typealias)|typealias|extension)\\s+(_[A-Za-z][A-Za-z0-9_]*)"
+        let declPattern = "(?:(?:public|open)\\s+(?:struct|class|enum|protocol|typealias)|typealias|extension)\\s+(_[A-Za-z][A-Za-z0-9_]*)"
         if let declRegex = try? NSRegularExpression(pattern: declPattern, options: []) {
             let nsRange = NSRange(c.startIndex..<c.endIndex, in: c)
             for m in declRegex.matches(in: c, options: [], range: nsRange) {
