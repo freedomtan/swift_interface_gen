@@ -1864,29 +1864,80 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 networkFixed.append(fixedLine)
             }
             c = networkFixed.joined(separator: "\n")
-            // Strip `where Self: ~Copyable` extensions (not valid in standard Swift 6 mode).
-            // The extension body contains member declarations with their own "{}" (e.g. stub
-            // function bodies), so a naive "[^}]*}" regex closes on the FIRST brace it finds —
-            // typically a member's own empty body — truncating the match and leaving the rest
-            // of the real extension body as orphaned top-level text (manifests as cascading
-            // "extraneous '}' at top level" errors). Scan brace depth instead.
-            if let headerRegex = try? NSRegularExpression(
-                pattern: "extension\\s+\\S+\\s+where\\s+Self\\s*:\\s*~Copyable[^{]*\\{", options: []) {
-                var searchStart = c.startIndex
-                while let match = headerRegex.firstMatch(in: c, range: NSRange(searchStart..<c.endIndex, in: c)),
-                      let matchRange = Range(match.range, in: c) {
-                    var depth = 1
-                    var idx = matchRange.upperBound
-                    var braceEnd = idx
-                    while idx < c.endIndex {
-                        if c[idx] == "{" { depth += 1 }
-                        else if c[idx] == "}" { depth -= 1; if depth == 0 { braceEnd = c.index(after: idx); break } }
-                        idx = c.index(after: idx)
+            // A protocol default-implementation extension constrained `where Self: ~Copyable`
+            // (e.g. OneToOneStreamProtocol's real getOutboundStreamDataRoomAvailable(_:), whose
+            // symbol demangles to "(extension in Network):Network.OneToOneStreamProtocol< where
+            // A: ~Swift.Copyable>...") only compiles if the protocol ITSELF opts out of the
+            // implicit `Self: Copyable` requirement (confirmed via a minimal swiftc repro:
+            // `protocol Foo {}; extension Foo where Self: ~Copyable {}` fails with "'Self'
+            // required to be 'Copyable'"; adding `~Copyable` to Foo's own declaration fixes it).
+            // Swift requires every protocol in an inheritance chain to agree on this, so
+            // transitively close over ancestors too (e.g. OneToOneStreamProtocol:
+            // OneToOneDatapathProtocol: OneToOneProtocolHandler: ...: ProtocolInstance all need
+            // it, even though only some of them have their own `~Copyable`-constrained
+            // extension). This used to strip the whole extension instead, silently dropping
+            // every default-implementation method it provided (the majority of Network's
+            // first-pass stub count).
+            var needsCopyable = Set<String>()
+            if let extRegex = try? NSRegularExpression(
+                pattern: "extension\\s+(\\S+)\\s+where\\s+Self\\s*:\\s*~Copyable[^{]*\\{", options: []) {
+                let nsRange = NSRange(c.startIndex..<c.endIndex, in: c)
+                for m in extRegex.matches(in: c, options: [], range: nsRange) {
+                    if let r = Range(m.range(at: 1), in: c) {
+                        needsCopyable.insert(String(c[r]))
                     }
-                    c.removeSubrange(matchRange.lowerBound..<braceEnd)
-                    searchStart = matchRange.lowerBound
                 }
             }
+            if !needsCopyable.isEmpty {
+                var ancestors = [String: [String]]()
+                if let declRegex = try? NSRegularExpression(
+                    pattern: "public protocol (\\S+?)(?:<[^>]*>)?(?:\\s*:\\s*([^{]+))?\\s*\\{", options: []) {
+                    let nsRange = NSRange(c.startIndex..<c.endIndex, in: c)
+                    for m in declRegex.matches(in: c, options: [], range: nsRange) {
+                        guard let nameRange = Range(m.range(at: 1), in: c) else { continue }
+                        let protoName = String(c[nameRange])
+                        var protoAncestors = [String]()
+                        if m.range(at: 2).location != NSNotFound, let listRange = Range(m.range(at: 2), in: c) {
+                            protoAncestors = String(c[listRange]).components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                        }
+                        ancestors[protoName] = protoAncestors
+                    }
+                }
+                var frontier = Array(needsCopyable)
+                while let protoName = frontier.popLast() {
+                    for ancestor in ancestors[protoName] ?? [] where !needsCopyable.contains(ancestor) {
+                        needsCopyable.insert(ancestor)
+                        frontier.append(ancestor)
+                    }
+                }
+                for protoName in needsCopyable {
+                    let withInheritance = "public protocol \(protoName): "
+                    if let range = c.range(of: withInheritance) {
+                        c.insert(contentsOf: "~Copyable, ", at: range.upperBound)
+                    } else if let range = c.range(of: "public protocol \(protoName) {") {
+                        c.replaceSubrange(range, with: "public protocol \(protoName): ~Copyable {")
+                    }
+                }
+            }
+            // BottomProtocolHandler/OneToOneProtocolHandler's own `upper` requirement really has
+            // type `Self.UpperProtocol` (confirmed via swift-demangle -expand on
+            // BottomProtocolHandler.upper's dispatch thunk: "A.UpperProtocol", A = Self) --
+            // real, ABI-confirmed associated types genuinely missing from both protocols' own
+            // reconstruction (unrelated to the ~Copyable fix above), rendered as the generic
+            // `Any` fallback instead. Without it, every constrained extension on either protocol
+            // referencing `Self.UpperProtocol` (e.g. "where Self.UpperProtocol ==
+            // InboundDatagramLinkage") fails with "'UpperProtocol' is not a member type of type
+            // 'Self'", forcing those default implementations to fall back to stubs.
+            for protoName in ["BottomProtocolHandler", "OneToOneProtocolHandler"] {
+                for header in ["public protocol \(protoName): ~Copyable, ", "public protocol \(protoName): "] {
+                    if let colonEnd = c.range(of: header)?.upperBound,
+                       let braceRange = c.range(of: " {\n", range: colonEnd..<c.endIndex) {
+                        c.insert(contentsOf: "    associatedtype UpperProtocol: UpperProtocolLinkage\n", at: braceRange.upperBound)
+                        break
+                    }
+                }
+            }
+            c = c.replacingOccurrences(of: "var upper: Any { get set }", with: "var upper: UpperProtocol { get set }")
             // Strip a spurious ", Self: ~Copyable" tacked onto an otherwise-valid constrained
             // extension (e.g. "extension TopProtocolHandler where Self.LowerProtocol ==
             // OutboundDatagramLinkage,  Self: ~Copyable {") — unlike the bare "where Self:
