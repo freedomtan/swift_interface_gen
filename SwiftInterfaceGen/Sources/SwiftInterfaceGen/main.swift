@@ -1940,13 +1940,32 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(of: "var upper: Any { get set }", with: "var upper: UpperProtocol { get set }")
             // Strip a spurious ", Self: ~Copyable" tacked onto an otherwise-valid constrained
             // extension (e.g. "extension TopProtocolHandler where Self.LowerProtocol ==
-            // OutboundDatagramLinkage,  Self: ~Copyable {") — unlike the bare "where Self:
-            // ~Copyable" case above, these extensions' base protocols (TopProtocolHandler,
-            // OneToOneProtocolHandler, BottomProtocolHandler) were never declared `~Copyable` in
-            // the first place, so the whole extension is valid once this one clause is dropped;
-            // stripping the entire extension here would throw away real default-method bodies.
-            c = c.replacingOccurrences(of: ",  Self: ~Copyable {", with: " {")
-            c = c.replacingOccurrences(of: ", Self: ~Copyable {", with: " {")
+            // OutboundDatagramLinkage,  Self: ~Copyable {") -- UNLESS the extension's own
+            // protocol is one we just declared `~Copyable` above (needsCopyable), in which case
+            // the combined constraint is real ABI (the mangled symbol only matches when BOTH
+            // clauses are present on the same extension, confirmed empirically:
+            // OneToOneProtocolHandler.invokeReceiveDatagrams(maximumDatagramCount:) still needed
+            // a stub after dropping just the ~Copyable clause here, even though the method itself
+            // rendered fine) and dropping it would leave the extension real but ABI-mismatched.
+            // For every OTHER protocol (never declared ~Copyable), the whole extension is valid
+            // once this one clause is dropped; stripping the entire extension here would throw
+            // away real default-method bodies.
+            if let spuriousRegex = try? NSRegularExpression(
+                pattern: "extension\\s+(\\S+)\\s+where\\s+([^{]*?),\\s*Self:\\s*~Copyable\\s*\\{", options: []) {
+                let nsRange = NSRange(c.startIndex..<c.endIndex, in: c)
+                var replacements: [(Range<String.Index>, String)] = []
+                for m in spuriousRegex.matches(in: c, options: [], range: nsRange) {
+                    guard let fullRange = Range(m.range, in: c),
+                          let nameRange = Range(m.range(at: 1), in: c),
+                          let restRange = Range(m.range(at: 2), in: c) else { continue }
+                    let protoName = String(c[nameRange])
+                    guard !needsCopyable.contains(protoName) else { continue }
+                    replacements.append((fullRange, "extension \(protoName) where \(c[restRange]) {"))
+                }
+                for (range, replacement) in replacements.reversed() {
+                    c.replaceSubrange(range, with: replacement)
+                }
+            }
             // Deserializer<A>/SerializerSpanFactory/InPlaceSerializer<A>: several extensions and
             // static methods relax their generic parameter to `~Copyable`/`~Escapable` (e.g.
             // "extension Deserializer where A: ~Copyable, A: ~Escapable", Serializer.serialize's
