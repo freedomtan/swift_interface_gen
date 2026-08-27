@@ -1815,6 +1815,30 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                     of: "extension BuilderTuple where A: \(proto) {",
                     with: "extension BuilderTuple where repeat each A: \(proto) {")
             }
+            // Same missing-retroactive-conformance-restatement gap as Optional/Never/BuilderTuple
+            // above, for the rest of Charts's result-builder plumbing: each of these types has a
+            // real conformance descriptor per protocol (confirmed via the .tbd) but the generator
+            // only emits the bare "extension X where <param>: Y" default-implementation block.
+            for (type, protos) in [
+                ("BuilderConditional", ["AxisContent", "AxisMark", "Chart3DContent", "ChartContent", "ContourContent"]),
+                ("BuilderPair", ["AxisContent", "AxisMark", "ChartContent"]),
+            ] {
+                for proto in protos {
+                    c = c.replacingOccurrences(
+                        of: "extension \(type) where A: \(proto),  B: \(proto) {",
+                        with: "extension \(type): \(proto) where A: \(proto),  B: \(proto) {")
+                }
+            }
+            // BarPlot/RectanglePlot/SectorPlot's `body` renders as `some SwiftUI.View`, which
+            // can't satisfy ChartContent's "associatedtype Body: ChartContent" (an opaque View
+            // isn't a ChartContent-conforming nominal type) -- so restating ": ChartContent"
+            // here doesn't type-check; their conformance descriptor's ChartContent/
+            // VectorizedChartContent requirements stay an accepted, unreproducible stub.
+            // ChartModifiedContent<A, B>'s real conformance forwards to whichever protocol A
+            // itself is (SwiftUI's ModifiedContent<Content, Modifier>: Content shape) -- but
+            // Swift doesn't support conforming to a generic parameter as if it were a protocol
+            // name ("extension X: A" is rejected as "inheritance from non-protocol type 'A'"),
+            // so this one has no source-level fix either; also left as an accepted stub.
             // PlottableProjection<A, B>'s own declaration has no bound on B, so a constrained
             // extension referencing "B.PrimitivePlottable" can't resolve it as an associated
             // type -- the real constraint also requires B: Plottable (PrimitivePlottable is
