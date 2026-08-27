@@ -1447,6 +1447,30 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 of: "NSObject & HKDataCacheProviding.Type",
                 with: "(NSObject & HKDataCacheProviding).Type")
 
+            // CodableBox<A>/CodableBoxArray<A>/CodableBoxDictionary<A, B> each conditionally
+            // conform to Equatable/Hashable (confirmed via their real conformance descriptors),
+            // but the generator only emits the bare default-implementation extension without
+            // restating "X: Equatable"/"X: Hashable" as the actual conformance -- same gap as
+            // the Charts result-builder types fixed in prior commits.
+            for (type, param) in [("CodableBox", "A"), ("CodableBoxArray", "A"), ("CodableBoxDictionary", "B"), ("OptionalCodableBox", "A")] {
+                c = c.replacingOccurrences(
+                    of: "extension \(type) where \(param): Equatable {",
+                    with: "extension \(type): Equatable where \(param): Equatable {")
+                c = c.replacingOccurrences(
+                    of: "extension \(type) where \(param): Hashable {",
+                    with: "extension \(type): Hashable where \(param): Hashable {")
+            }
+            // These box types generically wrap a Codable payload -- the boxed type parameter
+            // itself is Codable-constrained on the real struct declaration, not just where the
+            // generic-conditional Equatable/Hashable extensions apply. Missing that struct-level
+            // bound changes the mangled generic signature of every member (confirmed via a
+            // minimal repro: "<A>" vs "<A: Codable>" mangles CodableBox's Hashable extension's
+            // hash(into:) as ...SHRzlE... vs the real ABI's ...SHRzrlE...), so every member
+            // stayed a stub even once the extension's own conformance/header matched.
+            c = c.replacingOccurrences(of: "public struct CodableBox<A>: Codable, DefaultEncodable {", with: "public struct CodableBox<A: Codable>: Codable, DefaultEncodable {")
+            c = c.replacingOccurrences(of: "public struct CodableBoxArray<A>: Codable, DefaultEncodable {", with: "public struct CodableBoxArray<A: Codable>: Codable, DefaultEncodable {")
+            c = c.replacingOccurrences(of: "public struct CodableBoxDictionary<A: Hashable, B>: Codable, DefaultEncodable {", with: "public struct CodableBoxDictionary<A: Hashable, B: Codable>: Codable, DefaultEncodable {")
+            c = c.replacingOccurrences(of: "public struct OptionalCodableBox<A>: Codable {", with: "public struct OptionalCodableBox<A: Codable>: Codable {")
             // Fix: BirthDateType/CategoryType/QuantityType/ScoredAssessmentType<A> conform to
             // SampleType (-> BasicObservableHealthType -> ObservableHealthType, ListHealthType),
             // whose observe(configuration:)/query(configuration:) requirements need
