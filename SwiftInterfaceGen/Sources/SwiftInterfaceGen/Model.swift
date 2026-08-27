@@ -2747,7 +2747,7 @@ class TypeNode {
             // the bare placeholder (e.g. "init(_ arg1: MLDataColumn<A>)" on an Array extension,
             // where A means Element).
             let stdlibPlaceholderRename: (String) -> String
-            if name == "Array" && path == "Swift" {
+            if (name == "Array" || name == "ArraySlice" || name == "ContiguousArray") && path == "Swift" {
                 stdlibPlaceholderRename = { $0.replaceWord("A", with: "Element") }
             } else if name == "Dictionary" && path == "Swift" {
                 stdlibPlaceholderRename = { $0.replaceWord("A", with: "Key").replaceWord("B", with: "Value") }

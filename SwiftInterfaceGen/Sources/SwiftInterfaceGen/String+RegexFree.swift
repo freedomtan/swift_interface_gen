@@ -2955,6 +2955,34 @@ extension String {
         return fixed.joined(separator: "\n")
     }
 
+    // Drop `public struct [A]: Protocol { ... }` declarations -- an extension on Array<A> was
+    // emitted as a bogus struct; the real conformance is provided by the framework at runtime.
+    // Depth-aware (unlike a `.*`-based regex, which is greedy across the WHOLE remaining string
+    // and, backtracking to find the next line ending in a lone "}", can swallow every
+    // declaration in between as part of one "match" -- confirmed via Charts, where this deleted
+    // ~50KB spanning dozens of real types/extensions after a single "public struct [A]: Foo {").
+    func stripBogusArrayExtensionStructs() -> String {
+        let lines = self.components(separatedBy: "\n")
+        var output = [String]()
+        var skipping = false
+        var depth = 0
+        for line in lines {
+            if !skipping, line.hasPrefix("public struct [") {
+                skipping = true
+                depth = line.reduce(0) { $0 + ($1 == "{" ? 1 : 0) - ($1 == "}" ? 1 : 0) }
+                if depth <= 0 { skipping = false }
+                continue
+            }
+            if skipping {
+                depth += line.reduce(0) { $0 + ($1 == "{" ? 1 : 0) - ($1 == "}" ? 1 : 0) }
+                if depth <= 0 { skipping = false }
+                continue
+            }
+            output.append(line)
+        }
+        return output.joined(separator: "\n")
+    }
+
     func stripRawRepresentableWrapperExtensions() -> String {
         let lines = self.components(separatedBy: "\n")
         var output = [String]()

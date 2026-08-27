@@ -1067,11 +1067,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
 
         // Fix: `struct [A]: Protocol` — an extension on Array<A> was emitted as a struct.
         // Drop these lines; the conformance is provided by the real framework at runtime.
-        if let regex = try? NSRegularExpression(pattern: "^public struct \\[[^\\]]+\\].*\\{[^\\}]*\\}\\s*$",
-                                                options: [.anchorsMatchLines, .dotMatchesLineSeparators]) {
-            c = regex.stringByReplacingMatches(
-                in: c, range: NSRange(c.startIndex..<c.endIndex, in: c), withTemplate: "")
-        }
+        c = c.stripBogusArrayExtensionStructs()
 
         // Fix: `TypeName<A><A, A1>` double-generic — method-level generic was appended alongside
         // a struct-level generic. Merge consecutive `<X><Y>` into `<X>` (keep only the first).
@@ -1714,31 +1710,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 with: "    public final var results: Results { get { fatalError() } }")
         }
 
-        // Fix: Charts's ChartContent requires `associatedtype Body: ChartContent`. Mark types
-        // (AreaMark/LineMark/PointMark/etc.) render entirely through the static
-        // _makeChartContent/_layoutChartContent/_renderChartContent hooks and never expose a
-        // concrete Body type via the ABI, so their `body` property is retyped to `Swift.Never`
-        // above (see the "n == \"body\"" property-emission fixup in Model.swift) — but `Never`
-        // only conforms to ChartContent via a real-module extension we never discover from the
-        // ABI (Charts.tbd has no symbols for it since it's implemented entirely via default
-        // protocol-extension witnesses). Add it explicitly.
         if parser.defaultModule == "Charts" {
-            c += """
-
-
-            extension Swift.Never: ChartContent {
-                public var body: Never { fatalError() }
-                public static func _layoutChartContent(_ content: Never, _ inputs: _ChartContentLayoutInputs) {}
-                public static func _renderChartContent(_ content: Never, _ inputs: _ChartContentRenderInputs) -> _ChartContentRenderOutputs { fatalError() }
-                public static func _collectChartContent(content: Never, inputs: _ChartContentCollectInputs) -> _ChartContentCollectOutputs { fatalError() }
-                public static func _chartContentCount(inputs: _ChartContentInputs) -> Int? { return nil }
-                public static func _makeChartContent(content: SwiftUI._GraphValue<Never>, inputs: _ChartContentInputs) -> _ChartContentOutputs { fatalError() }
-            }
-            extension Swift.Never: Chart3DContent {
-                public static func _makeChart3DContent(content: SwiftUI._GraphValue<Never>, inputs: _Chart3DContentInputs) -> _Chart3DContentOutputs { fatalError() }
-            }
-
-            """
             // AnyChartSymbolShape/BasicChartSymbolShape conform to ChartSymbolShape (which
             // requires SwiftUI.Shape's nonisolated `path(in:)`). Our synthesized init/path
             // witnesses default to the enclosing (main-actor-inferred) isolation, which the
@@ -1758,6 +1730,17 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             // to a bare capitalized name that looks like a real bridged ObjC type, but it isn't
             // one). Stub it out.
             c += "\npublic struct SPAngle: Hashable, Sendable {}\n"
+            // Same private-C-type gap as SPAngle above, but for Chart3DContentModifier's
+            // symbolRotation(_:) parameter.
+            c += "\npublic struct SPRotation3D: Hashable, Sendable {}\n"
+            // Foundation.Date retroactively conforms to Plottable/PrimitivePlottableProtocol in
+            // the real module (confirmed via its conformance-descriptor symbols in the .tbd:
+            // "Date: Charts.Plottable"/"Date: Charts.PrimitivePlottableProtocol") -- needed by
+            // PlottableProjection's "where B.PrimitivePlottable == Date" extension above. Our
+            // parser never discovers extensions on external Foundation types, so this conformance
+            // (and the one real member it needs beyond PrimitivePlottableProtocol's own default
+            // init?(primitivePlottable:)/primitivePlottable implementations) has to be hand-added.
+            c += "\nextension Foundation.Date: Plottable, PrimitivePlottableProtocol {\n    public static var _primitivePlottableKind: _PrimitivePlottableKind<Foundation.Date> { fatalError() }\n}\n"
             // AnyChartContent's `_makeChartContent`/`body` witnesses are satisfied via a
             // "protocol witness for ..." ABI thunk, but ChartContent's own default-extension
             // implementation for them is never emitted by this generator (protocol-extension
@@ -1779,37 +1762,22 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(
                 of: "public struct AnyChartContent: ChartContent {",
                 with: "@frozen\npublic struct AnyChartContent: ChartContent {\n    public var body: Never { fatalError() }\n    public static func _makeChartContent(content: SwiftUI._GraphValue<AnyChartContent>, inputs: _ChartContentInputs) -> _ChartContentOutputs { fatalError() }")
-            // The real module declares `extension Optional: ChartContent/AxisMark/
+            // The real module declares `extension Optional: ChartContent/AxisContent/AxisMark/
             // Chart3DContent/ContourContent where Wrapped: <same protocol>` so that optional
             // chart content (`if let ... { SomeMark(...) }`) participates directly in the
-            // result-builder chain. These conditional extensions have real exported ABI symbols
-            // (required by the .tbd's exports list) but the extension declarations themselves
-            // are never discovered/emitted since our generator doesn't parse stdlib-type
-            // conditional-conformance extensions from demangled symbols.
-            c += """
-
-            extension Swift.Optional: ChartContent where Wrapped: ChartContent {
-                public var body: Never { fatalError() }
-                public static func _layoutChartContent(_ content: Wrapped?, _ inputs: _ChartContentLayoutInputs) {}
-                public static func _renderChartContent(_ content: Wrapped?, _ inputs: _ChartContentRenderInputs) -> _ChartContentRenderOutputs { fatalError() }
-                public static func _collectChartContent(content: Wrapped?, inputs: _ChartContentCollectInputs) -> _ChartContentCollectOutputs { fatalError() }
-                public static func _makeChartContent(content: SwiftUI._GraphValue<Wrapped?>, inputs: _ChartContentInputs) -> _ChartContentOutputs { fatalError() }
-                public static func _chartContentCount(inputs: _ChartContentInputs) -> Int? { return nil }
+            // result-builder chain. Now that stripBogusArrayExtensionStructs() no longer deletes
+            // half the file (see its doc comment), the generator's ordinary constrained-extension
+            // machinery DOES discover and emit these members from the demangled symbols after
+            // all -- it just renders the header as bare "extension Optional where Wrapped: X"
+            // without restating "Swift.Optional: X", so the retroactive conformance itself never
+            // gets declared. Add it via a header-only textual patch rather than a full duplicate
+            // block (a previous version of this fixup duplicated the members outright, which
+            // caused "invalid redeclaration" once the real extensions stopped being deleted).
+            for proto in ["AxisContent", "AxisMark", "Chart3DContent", "ChartContent", "ContourContent"] {
+                c = c.replacingOccurrences(
+                    of: "extension Optional where Wrapped: \(proto) {",
+                    with: "extension Swift.Optional: \(proto) where Wrapped: \(proto) {")
             }
-            extension Swift.Optional: Chart3DContent where Wrapped: Chart3DContent {
-                public var body: Never { fatalError() }
-                public static func _makeChart3DContent(content: SwiftUI._GraphValue<Wrapped?>, inputs: _Chart3DContentInputs) -> _Chart3DContentOutputs { fatalError() }
-            }
-            extension Swift.Optional: AxisMark where Wrapped: AxisMark {
-                public static func _layoutAxisMark(_ content: Wrapped?, _ inputs: _AxisMarkLayoutInputs) {}
-                public static func _renderAxisMark(_ content: Wrapped?, _ inputs: _AxisMarkRenderInputs) -> _AxisMarkRenderOutputs { fatalError() }
-                public static func _collectAxisMark(_ content: Wrapped?, _ inputs: _AxisMarkCollectInputs) -> _AxisMarkCollectOutputs { fatalError() }
-            }
-            extension Swift.Optional: ContourContent where Wrapped: ContourContent {
-                public static func _makeContourContent(_ content: Wrapped?, _ inputs: _ContourContentInputs) -> _ContourContentOutputs { fatalError() }
-            }
-
-            """
             // The Vectorized*PlotContent<Data> family (Area/Bar/Line/Point/Rectangle/Rule/
             // Sector) all conform to VectorizedChartContent, which requires `associatedtype
             // DataElement`; the real module resolves it to `Data.Element` (also requiring
@@ -1838,6 +1806,22 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(
                 of: "public init(elements: (repeat A)) { fatalError() }\n    public var elements: (repeat A) { get { fatalError() } set {} }\n    public init(from decoder: any Swift.Decoder) throws { fatalError() }\n    public func encode(to encoder: Swift.Encoder) throws { fatalError() }\n    public func hash(into hasher: inout Hasher) { fatalError() }\n    public static func ==(_ lhs: BuilderTuple<A>, _ rhs: BuilderTuple<A>) -> Bool { fatalError() }",
                 with: "public init(elements: (repeat each A)) { fatalError() }\n    public var elements: (repeat each A) { get { fatalError() } }")
+            // BuilderTuple's own constrained default-implementation extensions (e.g.
+            // "extension BuilderTuple where A: ChartContent") hit the same parameter-pack gap:
+            // a `where` clause constraining a pack's element type needs "repeat each A: Protocol",
+            // not the ordinary generic "A: Protocol" the constrained-extension renderer emits.
+            for proto in ["AxisContent", "AxisMark", "Chart3DContent", "ChartContent", "ContourContent"] {
+                c = c.replacingOccurrences(
+                    of: "extension BuilderTuple where A: \(proto) {",
+                    with: "extension BuilderTuple where repeat each A: \(proto) {")
+            }
+            // PlottableProjection<A, B>'s own declaration has no bound on B, so a constrained
+            // extension referencing "B.PrimitivePlottable" can't resolve it as an associated
+            // type -- the real constraint also requires B: Plottable (PrimitivePlottable is
+            // Plottable's own associated type).
+            c = c.replacingOccurrences(
+                of: "extension PlottableProjection where B.PrimitivePlottable == Date {",
+                with: "extension PlottableProjection where B: Plottable, B.PrimitivePlottable == Date {")
             // Chart<Content>.init(_:content:)'s real constraint is
             // `Content == ForEach<Data, Data.Element.ID, C>` (an associated-type chain through
             // Data.Element's Identifiable conformance), which the generic-placeholder-path
