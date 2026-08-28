@@ -958,10 +958,18 @@ class Parser {
             }
         }
         
-        if d_orig.contains("deinit") ||
+        // Plain .contains("deinit") also matches real, differently-named methods that merely
+        // contain "deinit" as a substring (e.g. MetalPerformanceShadersGraph.MPSGraphDelegateKernel's
+        // real `deinitNDX()` method, demangled as "...MPSGraphDelegateKernel.deinitNDX() -> ()"),
+        // silently discarding them via the early `return` below instead of routing them to
+        // `.members` like any other real method. The genuine deinitializer's demangled form
+        // always ends in "deinit" as its own word (".deinit" / ".__deallocating_deinit", optionally
+        // behind a descriptor prefix) -- require a word boundary so "deinitNDX" doesn't match.
+        let isRealDeinit = d_orig.range(of: "\\bdeinit\\b", options: .regularExpression) != nil
+        if isRealDeinit ||
            d_orig.contains("initializeBufferWithCopy") ||
            d_orig.contains("async function pointer") {
-            if d_orig.contains("deinit") {
+            if isRealDeinit {
                 var typePath = d_orig
                     .replacingOccurrences(of: ".__deallocating_deinit", with: "")
                     .replacingOccurrences(of: ".deinit", with: "")
