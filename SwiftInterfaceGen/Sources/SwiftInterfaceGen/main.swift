@@ -2626,6 +2626,15 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 of: #"public static var counter: (?:Synchronization\.)?Atomic<.*?>.*"#,
                 with: "public static let counter: Synchronization.Atomic<Swift.UInt32> = .init(0)",
                 options: .regularExpression)
+            // The real initializer above makes Swift synthesize the "vau" (unsafeMutableAddressor)
+            // accessor for `counter` on its own -- but the parser's generic stored-static-property
+            // handling (Parser.swift's silgenSymbols, added for cases with no such initializer,
+            // e.g. BiomeEventReporter/Logging.assetBringUp) doesn't know that and ALSO emits a
+            // manual @_silgen_name stub for the identical symbol, causing "multiple definitions".
+            // Drop the now-redundant manual stub; the vpZ one is a separate symbol, still needed.
+            c = c.replacingOccurrences(
+                of: "    @_silgen_name(\"$s28MetalPerformanceShadersGraph22MPSGraphDelegateKernelC7counter15Synchronization6AtomicVys6UInt32VGvau\")\n    public static func _stub__s28MetalPerformanceShadersGraph22MPSGraphDelegateKernelC7counter15Synchronization6AtomicVys6UInt32VGvau() { fatalError() }\n",
+                with: "")
             // Model.swift's own `required` synthesis (isRequired, for a non-final class
             // conforming to a protocol) can already have prepended "required " to this exact
             // initializer -- blindly prepending a second one here produces the illegal

@@ -58,6 +58,7 @@ CURATED = [
     "Speech",
     "Vision",
     "NearbyInteraction",
+    "MetalPerformanceShadersGraph",
 ]
 
 SYSTEM_MODULES = {
