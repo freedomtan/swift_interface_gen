@@ -231,6 +231,27 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
 
 """
                 }
+                // MPSGraphNDXRuntime is only ever referenced as a property/parameter type
+                // (MPSGraphDelegateKernel.ndxRuntime, MPSGraphDelegate.Executables.ndxRuntimeBase)
+                // and never extended, so registerObjcClasses' So-prefix-extension-symbol
+                // discovery never finds it and no declaration for it ends up in bridgedTypes
+                // above -- yet the real ABI mangles every reference to it via the ClangImporter
+                // "So" prefix (confirmed via swift-demangle: "__C.MPSGraphNDXRuntime"), meaning
+                // it's a genuine ObjC class, not a native Swift one. A prior fix rendered it as
+                // a plain native `public class MPSGraphNDXRuntime {}`, which compiles fine but
+                // mangles under this module instead of "So", so every accessor/field-offset
+                // symbol for properties of this type permanently mismatches the real ABI's
+                // expected symbols no matter what the property bodies do. Forward-declaring it
+                // here instead makes Swift import it through ClangImporter with the correct "So"
+                // mangling, matching real usage elsewhere in this same file (e.g.
+                // MPSGraphExecutable).
+                if currentModule == "MetalPerformanceShadersGraph" {
+                    bridgeHeader += """
+@interface MPSGraphNDXRuntime : NSObject
+@end
+
+"""
+                }
                 let bridgeImpl   = implLines.joined(separator: "\n")   + "\n"
                 try? bridgeHeader.write(toFile: "\(currentModule)Interface_bridge.h", atomically: true, encoding: .utf8)
                 try? bridgeImpl.write(toFile:   "\(currentModule)Interface_bridge.m", atomically: true, encoding: .utf8)
@@ -2646,10 +2667,6 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(
                 of: "required required public init(_ arg1: ODIE.DelegateProgramArguments)",
                 with: "required public init(_ arg1: ODIE.DelegateProgramArguments)")
-            c += """
-
-            public class MPSGraphNDXRuntime {}
-            """
         }
 
         if parser.defaultModule == "PromptKit" {
