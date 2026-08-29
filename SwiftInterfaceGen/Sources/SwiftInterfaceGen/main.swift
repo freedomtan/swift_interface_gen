@@ -1471,6 +1471,50 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(
                 of: "associatedtype PoseJointName: Decodable",
                 with: "associatedtype PoseJointName: Decodable, Hashable")
+            // Fix: PoseProviding's real ABI also has associated conformance descriptors for
+            // PoseJointName: RawRepresentable/Encodable and PoseJointsGroupName: RawRepresentable
+            // (confirmed via swift-demangle) that the current bounds (Decodable/Hashable and
+            // CaseIterable respectively) don't cover.
+            c = c.replacingOccurrences(
+                of: "associatedtype PoseJointName: Decodable, Hashable",
+                with: "associatedtype PoseJointName: Decodable, Encodable, Hashable, RawRepresentable")
+            c = c.replacingOccurrences(
+                of: "associatedtype PoseJointsGroupName: CaseIterable",
+                with: "associatedtype PoseJointsGroupName: CaseIterable, RawRepresentable")
+            // Fix: GenerateIterativeSegmentationRequest.init(seedScribbleBuffer:_:) and
+            // OpticalFlowObservation/PixelBufferObservation's init?(_:VNPixelBufferObservation)
+            // all render their sole class-typed parameter with an explicit `borrowing` keyword
+            // copied verbatim from the swiftinterface's printed ownership annotation -- same
+            // "the annotation reflects the implicit default convention, not a real source-level
+            // keyword" gap already fixed for MetalPerformanceShadersGraph's Executables.init:
+            // re-emitting it literally adds an "h" ownership-convention marker the real mangled
+            // symbols don't have (confirmed via a minimal repro).
+            c = c.replacingOccurrences(
+                of: "seedScribbleBuffer: borrowing CVReadOnlyPixelBuffer",
+                with: "seedScribbleBuffer: CVReadOnlyPixelBuffer")
+            c = c.replacingOccurrences(
+                of: "init?(_ arg1: borrowing VNPixelBufferObservation) { fatalError() }",
+                with: "init?(_ arg1: VNPixelBufferObservation) { fatalError() }")
+            // Fix: DownloadableAssetsRequest.assetStatus (and its GenerateIterativeSegmentationRequest
+            // conformance) render as plain synchronous computed properties, but their real ABI
+            // needs "async function pointer" symbols -- same "{ get async }" gap already fixed
+            // for Translation's isReady/supportedLanguages (confirmed via a minimal repro that
+            // only a `{ get async }` accessor produces those).
+            c = c.replacingOccurrences(
+                of: "var assetStatus: DownloadableAssetsRequestStatus { get }",
+                with: "var assetStatus: DownloadableAssetsRequestStatus { get async }")
+            c = c.replacingOccurrences(
+                of: "public final var assetStatus: DownloadableAssetsRequestStatus { get { fatalError() } }",
+                with: "public final var assetStatus: DownloadableAssetsRequestStatus { get async { fatalError() } }")
+            // Fix: VisionRequestIntrospectionManager.LogLevel's real ABI has a standalone,
+            // hand-written `>=` operator (confirmed via swift-demangle: "static ...LogLevel.>=
+            // infix" -- a minimal repro shows Comparable's synthesized default `>=`/`<=`/`>` are
+            // plain stdlib protocol-extension methods with no per-conformer ABI symbol at all, so
+            // this can't be from Comparable conformance; it must be a real, separate declaration),
+            // but the generator never rendered it.
+            c = c.replacingOccurrences(
+                of: "public static func ==(_ lhs: LogLevel, _ rhs: LogLevel) -> Bool { fatalError() }\n    }\n    public struct VisionRequestEntry:",
+                with: "public static func ==(_ lhs: LogLevel, _ rhs: LogLevel) -> Bool { fatalError() }\n        public static func >= (lhs: LogLevel, rhs: LogLevel) -> Bool { fatalError() }\n    }\n    public struct VisionRequestEntry:")
         }
 
         if parser.defaultModule == "Combine" {
