@@ -1528,6 +1528,20 @@ extension Locale.Language {
 }
 
 """
+            // Accepted, documented-unfixable gap (4 remaining stubs): Serialization.decode/
+            // encode and VisionInferenceProvider.requestOneShotInternal all reference
+            // XPC.XPCCodableObject, and the real ABI genuinely mangles it as belonging to module
+            // XPC -- but this SDK's real XPC module doesn't export that type at all (confirmed:
+            // `import XPC; XPC.XPCCodableObject` fails to resolve even in isolation). Our local
+            // opaque-struct fallback for it mangles under Vision's own module instead, which
+            // can't be changed from declaration syntax alone. Forcing the correct module-
+            // qualified mangling would require pulling "XPC" out of verify_public.py's
+            // SYSTEM_MODULES (so a local per-target stub gets built instead of resolving the
+            // real system module) and hand-populating that stub with XPCCodableObject -- but XPC
+            // is shared with Network, which genuinely depends on the REAL module's XPCDictionary
+            // (confirmed still resolving today), so a global SYSTEM_MODULES change would silently
+            // swap Network's real XPC resolution for an empty one too. Left as-is rather than
+            // diverging from real-module groundtruth for a 4-stub gain.
         }
 
         if parser.defaultModule == "Combine" {
