@@ -1515,6 +1515,19 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(
                 of: "public static func ==(_ lhs: LogLevel, _ rhs: LogLevel) -> Bool { fatalError() }\n    }\n    public struct VisionRequestEntry:",
                 with: "public static func ==(_ lhs: LogLevel, _ rhs: LogLevel) -> Bool { fatalError() }\n        public static func >= (lhs: LogLevel, rhs: LogLevel) -> Bool { fatalError() }\n    }\n    public struct VisionRequestEntry:")
+            // Fix: Locale.Language.encodeCustom(to:)/createProperty(from:) are real ABI (confirmed
+            // via swift-demangle) but never rendered at all. Neither has a protocol-conformance-
+            // descriptor or witness-table symbol alongside it, so they're plain free-standing
+            // members of a retroactive extension, not a protocol requirement -- add them directly
+            // (confirmed via a minimal repro to produce an exact match).
+            c += """
+
+extension Locale.Language {
+    public func encodeCustom(to encoder: Swift.Encoder) throws {}
+    public static func createProperty(from: Any) throws -> Locale.Language { fatalError() }
+}
+
+"""
         }
 
         if parser.defaultModule == "Combine" {
