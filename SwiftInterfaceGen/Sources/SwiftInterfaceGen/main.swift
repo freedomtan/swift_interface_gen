@@ -252,6 +252,19 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
 
 """
                 }
+                // _LTTextSessionDelegate is only ever referenced as TranslationSession's
+                // `textSessionDelegate` property type, never extended, so it's never discovered
+                // as an isObjcBridged type -- but its real ABI mangles it as an existential
+                // protocol ("So..._p", confirmed via swift-demangle), not a native Swift struct.
+                // Forward-declare it as an @objc protocol (same technique as HealthKit's
+                // HKWorkoutMetricsDelegate above).
+                if currentModule == "Translation" {
+                    bridgeHeader += """
+@protocol _LTTextSessionDelegate <NSObject>
+@end
+
+"""
+                }
                 let bridgeImpl   = implLines.joined(separator: "\n")   + "\n"
                 try? bridgeHeader.write(toFile: "\(currentModule)Interface_bridge.h", atomically: true, encoding: .utf8)
                 try? bridgeImpl.write(toFile:   "\(currentModule)Interface_bridge.m", atomically: true, encoding: .utf8)
@@ -2262,6 +2275,64 @@ public func mxSignpost(_ type: OSSignpostType, dso: UnsafeRawPointer, log: OSLog
 """
         }
 
+        // Fix (general, not module-gated): every module that adds its own `XAttributes:
+        // AttributeScope` conformer inside `extension AttributeScopes { ... }` (the standard
+        // AttributedString custom-scope pattern -- Translation's TranslationAttributes, Speech's
+        // SpeechAttributes, etc.) also needs two more members the generator never renders at all:
+        // a scope-accessor property on AttributeScopes itself (e.g. `var translation:
+        // TranslationAttributes.Type`) and a `AttributeDynamicLookup.subscript(dynamicMember:)`
+        // overload keyed to that scope type, both confirmed via a minimal repro to produce exact
+        // matches to the real mangled symbols. The scope-accessor's name is derived by dropping
+        // the "Attributes" suffix and lowercasing the first letter, matching the real ABI's own
+        // naming (confirmed for Translation: "TranslationAttributes" -> "translation").
+        if let scopeRegex = try? NSRegularExpression(
+            pattern: "public struct (\\w+)Attributes: (?:Foundation\\.)?AttributeScope\\b", options: []) {
+            let nsRange = NSRange(c.startIndex..<c.endIndex, in: c)
+            var scopeNames = [String]()
+            for m in scopeRegex.matches(in: c, options: [], range: nsRange) {
+                if let r = Range(m.range(at: 1), in: c) {
+                    scopeNames.append(String(c[r]))
+                }
+            }
+            for base in Set(scopeNames) {
+                let typeName = "\(base)Attributes"
+                let accessorName = base.prefix(1).lowercased() + base.dropFirst()
+                c += """
+
+extension AttributeScopes {
+    public var \(accessorName): AttributeScopes.\(typeName).Type { AttributeScopes.\(typeName).self }
+}
+extension AttributeDynamicLookup {
+    public subscript<A: AttributedStringKey>(dynamicMember keyPath: KeyPath<AttributeScopes.\(typeName), A>) -> A {
+        self[A.self]
+    }
+}
+
+"""
+            }
+        }
+
+        if parser.defaultModule == "Translation" {
+            // TranslationSession's `textSessionDelegate` property is real ABI (confirmed via
+            // swift-demangle: getter/setter/modify/property-descriptor all present) but never
+            // rendered at all. A minimal repro confirms `(any _LTTextSessionDelegate)?` produces
+            // an exact match to the real "So..._p" existential-protocol-typed symbols.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class TranslationSession {",
+                with: "@_fixed_layout public class TranslationSession {\n    public var textSessionDelegate: (any _LTTextSessionDelegate)?")
+            // LanguageAvailability.supportedLanguages / TranslationSession.isReady both render as
+            // plain synchronous computed getters, but their real ABI needs "async function
+            // pointer to dispatch thunk of ...getter" symbols -- confirmed via a minimal repro
+            // that only a `{ get async }` accessor produces those (their signatures otherwise
+            // match already).
+            c = c.replacingOccurrences(
+                of: "public var supportedLanguages: [Locale.Language] { get { return [] } }",
+                with: "public var supportedLanguages: [Locale.Language] { get async { return [] } }")
+            c = c.replacingOccurrences(
+                of: "public var isReady: Swift.Bool { get { fatalError() } }",
+                with: "public var isReady: Swift.Bool { get async { fatalError() } }")
+        }
+
         // Fix: SwiftData's DefaultHistoryDelete<A>/DefaultHistoryInsert<A>/DefaultHistoryUpdate<A>
         // conform to HistoryDelete/HistoryInsert/HistoryUpdate via their own generic parameter
         // (associatedtype Model: PersistentModel), matching the real module's
@@ -2525,6 +2596,17 @@ public func mxSignpost(_ type: OSSignpostType, dso: UnsafeRawPointer, log: OSLog
         if !underscoreStubs.isEmpty {
             c += "\n// --- Auto-generated stubs for undeclared SPI types ---\n"
             c += underscoreStubs
+        }
+        if parser.defaultModule == "Translation" {
+            // _LTTextSessionDelegate needs the @objc-protocol bridge-header forward-declaration
+            // added in generateExports (this file's writeGeneratedFiles/bridge-header logic), not
+            // the generic native-Swift-struct placeholder the "undeclared SPI type" fallback just
+            // above renders for any bare underscore-prefixed identifier -- must run after that
+            // fallback since it runs unconditionally for any bare `_LTTextSessionDelegate`
+            // reference still in `c` at this point, re-adding the struct if stripped earlier.
+            c = c.replacingOccurrences(
+                of: "public struct _LTTextSessionDelegate: Hashable, Sendable {}",
+                with: "")
         }
 
         var sentinelProtocols = [String]()
