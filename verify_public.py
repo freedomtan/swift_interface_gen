@@ -67,8 +67,10 @@ SYSTEM_MODULES = {
     "Synchronization", "MetricKit", "Combine", "CoreAI", "CoreFoundation",
     # Standard-library modules under usr/lib/swift (not under System/Library/Frameworks),
     # so the sdk_fw existence check below never finds them and they'd otherwise get an
-    # empty emit_empty_stub() with none of their real types (e.g. Observation.Observable).
-    "Observation", "Distributed",
+    # empty emit_empty_stub() with none of their real types (e.g. Observation.Observable,
+    # simd.simd_quatf/simd_float4x4/simd_float3x3 -- Vision's FaceObservation.Pose.quaternion/
+    # matrix needed these and got a same-named empty local stub shadowing the real module).
+    "Observation", "Distributed", "simd",
 }
 
 # ---------------------------------------------------------------------------

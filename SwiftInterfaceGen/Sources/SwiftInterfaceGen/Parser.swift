@@ -2058,7 +2058,15 @@ class Parser {
                     } else {
                         isWordCharBefore = false
                     }
-                    let followedByLowercase = range.upperBound < result.endIndex && result[range.upperBound].isLowercase
+                    // "simd_quatf"/"simd_float4x4"/"simd_float3x3" etc. are lowercase/snake_case
+                    // like a private C typedef, but ARE real, Swift-visible types importable via
+                    // `import simd` (confirmed via a minimal repro) -- unlike genuinely private
+                    // internals (e.g. "ccec_cp"), so exempt the "simd_" family from the
+                    // private-C heuristic below; otherwise the whole member gets silently dropped
+                    // by removePrivateObjCTypeReferences() (e.g. Vision's
+                    // FaceObservation.Pose.quaternion/matrix).
+                    let isKnownRealLowercaseType = result[range.upperBound...].hasPrefix("simd_")
+                    let followedByLowercase = !isKnownRealLowercaseType && range.upperBound < result.endIndex && result[range.upperBound].isLowercase
                     if !isWordCharBefore && !followedByLowercase {
                         result.replaceSubrange(range, with: "")
                         startSearch = range.lowerBound

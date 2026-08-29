@@ -289,6 +289,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         
         if code.contains("MTL") || code.contains("MPS") { imports.insert("Metal"); imports.insert("MetalPerformanceShaders") }
         if code.contains("IOSurface") { imports.insert("IOSurface") }
+        if code.contains("simd_") { imports.insert("simd") }
         if code.contains("CGImage") || code.contains("CGRect") || code.contains("CGSize") || code.contains("CGFloat") { imports.insert("CoreGraphics") }
         if code.contains("CVPixelBuffer") || code.contains("CVBuffer") { imports.insert("CoreVideo") }
         if code.contains("CMTime") { imports.insert("CoreMedia") }
