@@ -1423,6 +1423,56 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             """
         }
 
+        if parser.defaultModule == "TabularData" {
+            // Fix: ShapedData<A>'s real ABI conditionally conforms to Hashable/Equatable
+            // (confirmed via swift-demangle: separate constrained conformance descriptors), but
+            // the generator declares Hashable unconditionally on the struct's own header (with
+            // hash(into:) inside the unconditional body, and no hashValue at all), and the
+            // existing "where A: Equatable" extension never restates the conformance -- same
+            // gap already fixed for StoreKit's VerificationResult<A> and elsewhere this session.
+            c = c.replacingOccurrences(
+                of: "public struct ShapedData<A>: Codable, Hashable, @unchecked Sendable {",
+                with: "public struct ShapedData<A>: Codable, @unchecked Sendable {")
+            c = c.replacingOccurrences(
+                of: "    public func hash(into hasher: inout Hasher) { fatalError() }\n}\npublic enum SummaryColumnIDs",
+                with: "}\nextension ShapedData: Hashable where A: Hashable {\n    public func hash(into hasher: inout Hasher) { fatalError() }\n    public var hashValue: Swift.Int { fatalError() }\n}\npublic enum SummaryColumnIDs")
+            c = c.replacingOccurrences(
+                of: "extension ShapedData where A: Equatable {",
+                with: "extension ShapedData: Equatable where A: Equatable {")
+
+            // Fix: Column<A>'s real ABI conditionally conforms to Decodable/Encodable/Equatable/
+            // Hashable (confirmed via swift-demangle), but none of the existing per-bound
+            // extensions restate the conformance -- same conformance-restatement gap.
+            for proto in ["Decodable", "Encodable", "Equatable", "Hashable"] {
+                c = c.replacingOccurrences(
+                    of: "extension Column where A: \(proto) {",
+                    with: "extension Column: \(proto) where A: \(proto) {")
+            }
+
+            // Fix: DataFrame.init<A: Sequence>(columns:) where A.Element == AnyColumn is real
+            // ABI (confirmed via swift-demangle) but never rendered at all.
+            c = c.replacingOccurrences(
+                of: "public struct DataFrame: CustomDebugStringConvertible, CustomReflectable, CustomStringConvertible, DataFrameProtocol, ExpressibleByDictionaryLiteral, Hashable {",
+                with: "public struct DataFrame: CustomDebugStringConvertible, CustomReflectable, CustomStringConvertible, DataFrameProtocol, ExpressibleByDictionaryLiteral, Hashable {\n    public init<GenericA>(columns: GenericA) where GenericA: Swift.Sequence, GenericA.Element == AnyColumn { fatalError() }")
+
+            // Fix: {CSV,JSON}ReadingOptions.addDateParseStrategy<A>(_:) is missing the real ABI's
+            // ParseInput/ParseOutput associated-type constraints (confirmed via swift-demangle:
+            // "A.ParseInput == Swift.String, A.ParseOutput == Foundation.Date").
+            c = c.replacingOccurrences(
+                of: "public func addDateParseStrategy<GenericA>(_ arg1: GenericA) -> () where GenericA: ParseStrategy {}",
+                with: "public func addDateParseStrategy<GenericA>(_ arg1: GenericA) -> () where GenericA: ParseStrategy, GenericA.ParseInput == Swift.String, GenericA.ParseOutput == Foundation.Date {}")
+
+            // Fix: DiscontiguousColumnSlice's UnboundedRange subscript (`x[...]`) IS already
+            // rendered, but as `subscript(_ arg1: @escaping (UnboundedRange_) -> ()) -> ...`
+            // instead of the correct `subscript(bounds: UnboundedRange) -> ...` -- the shorthand
+            // "..." subscript syntax apparently got parsed as if UnboundedRange were a closure
+            // parameter. Confirmed via a minimal repro that the plain, non-closure form is what
+            // produces the exact required mangled shape.
+            c = c.replacingOccurrences(
+                of: "public subscript(_ arg1: @escaping (UnboundedRange_) -> ()) -> DiscontiguousColumnSlice<A> { get { fatalError() } set {} }",
+                with: "public subscript(bounds: UnboundedRange) -> DiscontiguousColumnSlice<A> { get { fatalError() } set {} }")
+        }
+
         // Fix: StoreKit `StoreProductManager` is declared as an actor but Swift 6 strict
         // concurrency emits a [#ConformanceIsolation] error for explicit Actor conformance.
         // Convert it to a final class with @unchecked Sendable for compilation purposes.
