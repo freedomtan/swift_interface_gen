@@ -1438,17 +1438,35 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             // doesn't produce (that gives get+set+modify for both the property and its
             // projection) -- `private(set)` on the @Published property is what narrows it down to
             // match (confirmed via a minimal repro).
+            // Each "_proj_X"/real-property pair is removed/rewritten as two INDEPENDENT
+            // replacements, not one combined adjacent-lines match -- CollectionObserver declares
+            // both "_proj_error" and "_proj_storage" back-to-back BEFORE either real property
+            // (not interleaved pairwise), so a match requiring the two lines to be adjacent only
+            // happened to work for SingleObserver/SubscriptionGroupObserver (which each have only
+            // one such property).
             c = c.replacingOccurrences(
-                of: "public final var _proj_storage: Published<[StoreProductManager.CollectionObserver.Storage]>.Publisher { get { fatalError() } }\n        public final var storage: [StoreProductManager.CollectionObserver.Storage] { get { return [] } }",
+                of: "public final var _proj_storage: Published<[StoreProductManager.CollectionObserver.Storage]>.Publisher { get { fatalError() } }\n",
+                with: "")
+            c = c.replacingOccurrences(
+                of: "public final var storage: [StoreProductManager.CollectionObserver.Storage] { get { return [] } }",
                 with: "@Published public final private(set) var storage: [StoreProductManager.CollectionObserver.Storage] = []")
             c = c.replacingOccurrences(
-                of: "public final var _proj_error: Published<Error?>.Publisher { get { fatalError() } }\n        public final var error: Error? { get { return nil } }",
+                of: "public final var _proj_error: Published<Error?>.Publisher { get { fatalError() } }\n",
+                with: "")
+            c = c.replacingOccurrences(
+                of: "public final var error: Error? { get { return nil } }",
                 with: "@Published public final private(set) var error: Error? = nil")
             c = c.replacingOccurrences(
-                of: "public final var _proj_state: Published<SingleObserver.Storage>.Publisher { get { fatalError() } }\n        public final var state: SingleObserver.Storage { get { fatalError() } }",
+                of: "public final var _proj_state: Published<SingleObserver.Storage>.Publisher { get { fatalError() } }\n",
+                with: "")
+            c = c.replacingOccurrences(
+                of: "public final var state: SingleObserver.Storage { get { fatalError() } }",
                 with: "@Published public final private(set) var state: SingleObserver.Storage = .loading")
             c = c.replacingOccurrences(
-                of: "public final var _proj_state: Published<SubscriptionGroupObserver.Storage>.Publisher { get { fatalError() } }\n        public final var state: SubscriptionGroupObserver.Storage { get { fatalError() } }",
+                of: "public final var _proj_state: Published<SubscriptionGroupObserver.Storage>.Publisher { get { fatalError() } }\n",
+                with: "")
+            c = c.replacingOccurrences(
+                of: "public final var state: SubscriptionGroupObserver.Storage { get { fatalError() } }",
                 with: "@Published public final private(set) var state: SubscriptionGroupObserver.Storage = .loading")
 
             // Fix: VerificationResult<A>'s real ABI conditionally conforms to Hashable/Equatable
@@ -1553,6 +1571,28 @@ extension Swift.BinaryInteger {
             ] {
                 c = c.replacingOccurrences(of: from, with: to)
             }
+
+            // Fix: Message.acknowledge(bundleID:message:offer:overrideAuditToken:logKey:) and
+            // Product.PurchaseOption.clientOverride(auditToken:) are real ABI (confirmed via
+            // swift-demangle) but never rendered at all; both take/pass a real `audit_token_t`
+            // (from Darwin, confirmed resolvable via a minimal repro) not otherwise imported here.
+            c = c.replacingOccurrences(
+                of: "public struct Message: Hashable {",
+                with: "public struct Message: Hashable {\n    public static func acknowledge(bundleID: Swift.String?, message: Message.Reason, offer: Product.SubscriptionOffer, overrideAuditToken: audit_token_t?, logKey: Swift.String) async {}")
+            // Product's own PurchaseOption is a distinct nested type from the other
+            // (identically-textually-headed) PurchaseOption elsewhere in this file -- anchor on
+            // Product's own unique header via a lazy multiline span, same technique as
+            // MetricKit's baseUnit fix.
+            if let regex = try? NSRegularExpression(
+                pattern: "(public struct Product: CustomDebugStringConvertible, Hashable, Identifiable \\{[\\s\\S]*?public struct PurchaseOption: CustomDebugStringConvertible, Hashable \\{\\n)",
+                options: []) {
+                c = regex.stringByReplacingMatches(
+                    in: c, range: NSRange(c.startIndex..<c.endIndex, in: c),
+                    withTemplate: "$1        public static func clientOverride(auditToken: audit_token_t) -> PurchaseOption { fatalError() }\n")
+            }
+            c = c.replacingOccurrences(
+                of: "import Foundation",
+                with: "import Darwin\nimport Foundation")
         }
 
         if parser.defaultModule == "Vision" {
