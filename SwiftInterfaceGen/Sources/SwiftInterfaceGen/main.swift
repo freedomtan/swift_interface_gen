@@ -3206,6 +3206,25 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "var persistentBackingData: any BackingData { get set }",
                 with: "var persistentBackingData: any BackingData<Self> { get set }")
+
+            // Fix: DataStoreBatchDeleteRequest<A>/FetchDescriptor<A>/HistoryDescriptor<A>/
+            // ResultsObserver<A, B>.predicate|filterBy, plus ModelContext.delete<GenericA>(where:),
+            // all render `Foundation.Predicate<Any>` instead of `Foundation.Predicate<{their own
+            // generic parameter}>` (confirmed via swift-demangle: real ABI is
+            // "Foundation.Predicate<Pack{A}>", since Predicate is declared with a variadic-
+            // generic `each Input` and each of these passes its own generic parameter as a
+            // single-element pack) -- same generic-placeholder-resolved-as-Any gap seen elsewhere
+            // this session, confirmed via a minimal repro to produce the exact required mangled
+            // shape. A first attempt globally replaced every "Predicate<Any>" with "Predicate<A>",
+            // which broke ModelContext.delete<GenericA>(...) (generic over "GenericA", not "A") --
+            // fixed with a targeted per-line replacement instead of a blind global one.
+            c = c.replacingOccurrences(of: "Predicate<Any>?, sortBy: [SortDescriptor<A>])", with: "Predicate<A>?, sortBy: [SortDescriptor<A>])")
+            c = c.replacingOccurrences(of: "Predicate<Any>?) { fatalError() }", with: "Predicate<A>?) { fatalError() }")
+            c = c.replacingOccurrences(of: "public var predicate: Predicate<Any>?", with: "public var predicate: Predicate<A>?")
+            c = c.replacingOccurrences(of: "public final var filterBy: Predicate<Any>?", with: "public final var filterBy: Predicate<A>?")
+            c = c.replacingOccurrences(
+                of: "public func delete<GenericA>(model: GenericA.Type, where: Predicate<Any>?, includeSubclasses: Swift.Bool) throws -> () where GenericA: PersistentModel {}",
+                with: "public func delete<GenericA>(model: GenericA.Type, where: Predicate<GenericA>?, includeSubclasses: Swift.Bool) throws -> () where GenericA: PersistentModel {}")
             // DefaultStore's HistoryProviding.historyType witness returns
             // `DefaultHistoryTransaction.Type` (a concrete metatype), but the protocol
             // requirement is typed `Any` (another generic-placeholder-path erasure — the real
