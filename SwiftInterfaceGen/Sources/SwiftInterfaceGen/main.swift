@@ -1425,20 +1425,62 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
 
         if parser.defaultModule == "TabularData" {
             // Fix: ShapedData<A>'s real ABI conditionally conforms to Hashable/Equatable
-            // (confirmed via swift-demangle: separate constrained conformance descriptors), but
-            // the generator declares Hashable unconditionally on the struct's own header (with
-            // hash(into:) inside the unconditional body, and no hashValue at all), and the
-            // existing "where A: Equatable" extension never restates the conformance -- same
-            // gap already fixed for StoreKit's VerificationResult<A> and elsewhere this session.
+            // (confirmed via swift-demangle: separate constrained conformance descriptors). The
+            // generator already emits the correct conditional "where A: Equatable"/"where A:
+            // Hashable" extensions with real hash(into:)/==/hashValue bodies, but ALSO declares
+            // Hashable unconditionally on the struct's own header with a DUPLICATE unconditional
+            // hash(into:)/== inside the base body -- redundant with (and ambiguous against) the
+            // conditional extension members. Removing the unconditional header conformance and
+            // duplicate members, and restating the conformance on the extensions (same gap
+            // already fixed for StoreKit's VerificationResult<A> and elsewhere this session).
             c = c.replacingOccurrences(
                 of: "public struct ShapedData<A>: Codable, Hashable, @unchecked Sendable {",
                 with: "public struct ShapedData<A>: Codable, @unchecked Sendable {")
             c = c.replacingOccurrences(
-                of: "    public func hash(into hasher: inout Hasher) { fatalError() }\n}\npublic enum SummaryColumnIDs",
-                with: "}\nextension ShapedData: Hashable where A: Hashable {\n    public func hash(into hasher: inout Hasher) { fatalError() }\n    public var hashValue: Swift.Int { fatalError() }\n}\npublic enum SummaryColumnIDs")
-            c = c.replacingOccurrences(
                 of: "extension ShapedData where A: Equatable {",
                 with: "extension ShapedData: Equatable where A: Equatable {")
+            // Unlike Column/ColumnSlice/DiscontiguousColumnSlice, the generator never emits a
+            // separate "extension ShapedData where A: Hashable" -- hash(into:) only ever exists
+            // as a duplicate, unconditional member inside the base struct body (removed above
+            // along with Hashable on the header). Extract it into a new conditional extension
+            // via a structural span match rather than an exact adjacent-member literal, since
+            // member order inside the struct body is nondeterministic across generator runs
+            // (same root cause as Speech's TimeRangeAttribute/ConfidenceAttribute fix).
+            if let structRe = try? NSRegularExpression(
+                pattern: "public struct ShapedData<A>: Codable, @unchecked Sendable \\{([\\s\\S]*?)\\n\\}\\n"),
+               let m = structRe.firstMatch(in: c, range: NSRange(c.startIndex..., in: c)),
+               let bodyRange = Range(m.range(at: 1), in: c),
+               let fullRange = Range(m.range, in: c) {
+                let body = String(c[bodyRange])
+                let newBody = body.replacingOccurrences(
+                    of: "\n    public func hash(into hasher: inout Hasher) { fatalError() }",
+                    with: "")
+                if newBody != body {
+                    let replacement = "public struct ShapedData<A>: Codable, @unchecked Sendable {\(newBody)\n}\nextension ShapedData: Hashable where A: Hashable {\n    public func hash(into hasher: inout Hasher) { fatalError() }\n    public var hashValue: Swift.Int { fatalError() }\n}\n"
+                    c.replaceSubrange(fullRange, with: replacement)
+                }
+            }
+
+            // Fix: same unconditional-Hashable-header + duplicate-hash(into:)/== gap for
+            // ColumnSlice<A> and DiscontiguousColumnSlice<A> -- each already has correct
+            // conditional "where A: Equatable"/"where A: Hashable" extensions with real bodies.
+            for name in ["ColumnSlice", "DiscontiguousColumnSlice"] {
+                c = c.replacingOccurrences(
+                    of: "    public func hash(into hasher: inout Hasher) { fatalError() }\n    public static func ==(_ lhs: \(name)<A>, _ rhs: \(name)<A>) -> Bool { fatalError() }\n}\n",
+                    with: "}\n")
+                c = c.replacingOccurrences(
+                    of: "extension \(name) where A: Equatable {",
+                    with: "extension \(name): Equatable where A: Equatable {")
+                c = c.replacingOccurrences(
+                    of: "extension \(name) where A: Hashable {",
+                    with: "extension \(name): Hashable where A: Hashable {")
+            }
+            c = c.replacingOccurrences(
+                of: "public struct ColumnSlice<A>: BidirectionalCollection, Codable, Collection, ColumnProtocol, CustomDebugStringConvertible, CustomReflectable, CustomStringConvertible, Hashable, MutableCollection, OptionalColumnProtocol, RandomAccessCollection, @unchecked Sendable, Sequence {",
+                with: "public struct ColumnSlice<A>: BidirectionalCollection, Codable, Collection, ColumnProtocol, CustomDebugStringConvertible, CustomReflectable, CustomStringConvertible, MutableCollection, OptionalColumnProtocol, RandomAccessCollection, @unchecked Sendable, Sequence {")
+            c = c.replacingOccurrences(
+                of: "public struct DiscontiguousColumnSlice<A>: BidirectionalCollection, Codable, Collection, ColumnProtocol, CustomDebugStringConvertible, CustomReflectable, CustomStringConvertible, Hashable, MutableCollection, OptionalColumnProtocol, @unchecked Sendable, Sequence {",
+                with: "public struct DiscontiguousColumnSlice<A>: BidirectionalCollection, Codable, Collection, ColumnProtocol, CustomDebugStringConvertible, CustomReflectable, CustomStringConvertible, MutableCollection, OptionalColumnProtocol, @unchecked Sendable, Sequence {")
 
             // Fix: Column<A>'s real ABI conditionally conforms to Decodable/Encodable/Equatable/
             // Hashable (confirmed via swift-demangle), but none of the existing per-bound
