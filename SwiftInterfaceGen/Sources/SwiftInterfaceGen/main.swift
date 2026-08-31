@@ -2989,6 +2989,32 @@ extension AttributeDynamicLookup {
         // it explicitly and provide the associated-type alias the same way TipKit's RuleInput fix
         // does for Event<A>/Parameter<A>.
         if parser.defaultModule == "SwiftData" {
+            // Fix: HistoryDelete/HistoryInsert/HistoryUpdate/HistoryToken/HistoryTransaction's
+            // associated types are missing extra real-ABI bounds (confirmed via swift-demangle:
+            // each needs an "associated conformance descriptor ... : Swift.Hashable" that a
+            // Comparable-only or Decodable-only bound can't produce, since Hashable isn't implied
+            // by either). Each fix is a single-line, order-independent global replace -- member
+            // order within these protocol bodies is nondeterministic across generator runs (same
+            // root cause as Speech's TimeRangeAttribute/ConfidenceAttribute fix), so an earlier
+            // attempt matching adjacent multi-line blocks only fired when two associatedtype
+            // lines happened to land in the assumed order, producing a flaky 89-94 stub count
+            // across repeated runs. "associatedtype TransactionIdentifier: Comparable" and
+            // "associatedtype ChangeIdentifier: Comparable" are intentionally replaced globally
+            // (`replaceAll`-equivalent via a single non-anchored match) since the identical fixed
+            // text is correct everywhere they appear (HistoryDelete/HistoryInsert/HistoryUpdate).
+            c = c.replacingOccurrences(
+                of: "associatedtype TransactionIdentifier: Comparable\n",
+                with: "associatedtype TransactionIdentifier: Comparable, Hashable\n")
+            c = c.replacingOccurrences(
+                of: "associatedtype ChangeIdentifier: Comparable\n",
+                with: "associatedtype ChangeIdentifier: Comparable, Hashable\n")
+            c = c.replacingOccurrences(
+                of: "associatedtype TokenType: Decodable\n",
+                with: "associatedtype TokenType: Decodable, Encodable, Hashable\n")
+            c = c.replacingOccurrences(
+                of: "associatedtype TokenType: Identifiable\n",
+                with: "associatedtype TokenType: Identifiable, Comparable, Hashable\n")
+
             for historyType in ["DefaultHistoryDelete", "DefaultHistoryInsert", "DefaultHistoryUpdate"] {
                 let protoName = historyType.replacingOccurrences(of: "Default", with: "")
                 c = c.replacingOccurrences(
