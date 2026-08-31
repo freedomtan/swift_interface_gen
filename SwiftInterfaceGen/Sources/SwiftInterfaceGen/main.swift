@@ -1688,6 +1688,17 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
         if parser.defaultModule == "StoreKit" {
             c = c.replacingOccurrences(of: "public actor StoreProductManager",
                                         with: "public final class StoreProductManager: @unchecked Sendable")
+
+            // Fix: Storefront._locale's real ABI additionally needs a "read" coroutine accessor
+            // (confirmed via swift-demangle: "Storefront._locale.read"), alongside the getter the
+            // generator already renders correctly. A plain `get` never produces one -- a minimal
+            // repro showed only an explicit `_read { ... }` accessor body (the underscored,
+            // library-internal coroutine-accessor syntax) makes the compiler synthesize both the
+            // getter thunk AND the read accessor from a single declaration.
+            c = c.replacingOccurrences(
+                of: "public var _locale: Locale { get { fatalError() } }",
+                with: "public var _locale: Locale { _read { fatalError() } }")
+
             // Fix: StoreProductManager.{CollectionObserver,SingleObserver,SubscriptionGroupObserver}
             // manually fake a "_proj_X" placeholder property for the real "$state"/"$error"/
             // "$storage" property-wrapper projections instead of using @Published (whose
