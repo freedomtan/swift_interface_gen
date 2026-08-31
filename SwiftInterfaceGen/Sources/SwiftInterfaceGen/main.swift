@@ -3013,6 +3013,26 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "func setValue<GenericA>(forKey: KeyPath<Self.Model, GenericA>, to: GenericA) -> () where GenericA: RelationshipCollection",
                 with: "func setValue<GenericA, GenericB>(forKey: KeyPath<Self.Model, GenericA>, to: GenericA) -> () where GenericA: RelationshipCollection, GenericB == GenericA.PersistentElement")
+
+            // Fix: [A]/A? (Array/Optional) conditionally conform to RelationshipCollection in
+            // the real module (confirmed via swift-demangle: "protocol conformance descriptor
+            // for <A where A: PersistentModel> [A] : RelationshipCollection" and "<A where A:
+            // Sequence, A.Element: PersistentModel> A? : RelationshipCollection"), but the
+            // generator never renders these retroactive stdlib-type conformances at all --
+            // confirmed via a minimal repro to produce the exact required conformance-descriptor
+            // symbols (RelationshipCollection has no method requirements, only an associated
+            // type, so no witness table is needed/emitted for either -- the still-remaining
+            // witness-table stubs for these two conformances are a separate, unresolved gap).
+            c += """
+
+
+            extension Array: RelationshipCollection where Element: PersistentModel {
+                public typealias PersistentElement = Element
+            }
+            extension Optional: RelationshipCollection where Wrapped: Sequence, Wrapped.Element: PersistentModel {
+                public typealias PersistentElement = Wrapped.Element
+            }
+            """
             // Fix: HistoryDelete/HistoryInsert/HistoryUpdate/HistoryToken/HistoryTransaction's
             // associated types are missing extra real-ABI bounds (confirmed via swift-demangle:
             // each needs an "associated conformance descriptor ... : Swift.Hashable" that a
@@ -3088,6 +3108,14 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "where A: PersistentModel,  B: RandomAccessCollection,  C: Hashable",
                 with: "where A: PersistentModel, A == B.Element, B: RandomAccessCollection, C: Hashable")
+            // Also drop the erroneously-added `@escaping` on `resolveSection` (real ABI shows a
+            // plain, non-escaping closure type: "resolveSection: (A) -> C?") -- same
+            // erroneously-added-@escaping gap already fixed for MetalPerformanceShadersGraph's
+            // reorderInputsAndOutputs and StoreKit's BackingValue.value(atKeyPath:), confirmed
+            // via a minimal repro.
+            c = c.replacingOccurrences(
+                of: "resolveSection: @escaping (A) -> C?",
+                with: "resolveSection: (A) -> C?")
             // DefaultSerialModelExecutor is non-final but must conform to Sendable (required by
             // SerialExecutor/Executor); the real class declares this via `@unchecked Sendable`.
             c = c.replacingOccurrences(
