@@ -2989,6 +2989,20 @@ extension AttributeDynamicLookup {
         // it explicitly and provide the associated-type alias the same way TipKit's RuleInput fix
         // does for Event<A>/Parameter<A>.
         if parser.defaultModule == "SwiftData" {
+            // Fix: BackingData<Model>'s real ABI init requirement is "init(for: Self.Model.Type)"
+            // (confirmed via swift-demangle: "BackingData.init(for: A.Model.Type) -> A"), but the
+            // generator renders it as "init(for: Any)" -- an unrelated bogus "associatedtype A"
+            // (with no real ABI presence at all) sits right above it, suggesting the parser
+            // mis-resolved the parameter's associated-type path to a fresh, meaningless
+            // placeholder instead of "Self.Model". PersistentModel's init(backingData:)/
+            // persistentBackingData similarly need the primary-associated-type-qualified "any
+            // BackingData<Self>" existential (confirmed via swift-demangle: "any
+            // SwiftData.BackingData<Self.Model == A>"), not the bare unconstrained "any
+            // BackingData" the generator renders -- both fixes confirmed via a minimal repro to
+            // produce the exact required dispatch-thunk/method-descriptor symbols.
+            c = c.replacingOccurrences(
+                of: "public protocol BackingData<Model> {\n    associatedtype A\n    init(for: Any)",
+                with: "public protocol BackingData<Model> {\n    init(for: Self.Model.Type)")
             // Fix: HistoryDelete/HistoryInsert/HistoryUpdate/HistoryToken/HistoryTransaction's
             // associated types are missing extra real-ABI bounds (confirmed via swift-demangle:
             // each needs an "associated conformance descriptor ... : Swift.Hashable" that a
@@ -3178,6 +3192,20 @@ extension AttributeDynamicLookup {
             // above doesn't catch it) rather than dropping it — BackingData has no primary
             // associated type, so any `<...>` on it is invalid.
             c = c.replacingOccurrences(of: "any BackingData<Any>", with: "any BackingData")
+            // PersistentModel.init(backingData:)/persistentBackingData reference `any
+            // BackingData<Self.Model == A>` in the real module (confirmed via swift-demangle),
+            // which needs BackingData's primary associated type argument restored as `<Self>`
+            // (PersistentModel's own Self satisfies BackingData's Model bound) -- confirmed via a
+            // minimal repro to produce the exact required dispatch-thunk/method-descriptor
+            // symbols. This must run after the "any BackingData<Any>" strip right above, since
+            // at the point the SwiftData block earlier in postProcess runs, this text is still
+            // in its unstripped, generic-placeholder-eraser form and doesn't match yet.
+            c = c.replacingOccurrences(
+                of: "init(backingData: any BackingData)",
+                with: "init(backingData: any BackingData<Self>)")
+            c = c.replacingOccurrences(
+                of: "var persistentBackingData: any BackingData { get set }",
+                with: "var persistentBackingData: any BackingData<Self> { get set }")
             // DefaultStore's HistoryProviding.historyType witness returns
             // `DefaultHistoryTransaction.Type` (a concrete metatype), but the protocol
             // requirement is typed `Any` (another generic-placeholder-path erasure — the real
