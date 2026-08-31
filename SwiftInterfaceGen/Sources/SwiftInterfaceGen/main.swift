@@ -3003,6 +3003,16 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "public protocol BackingData<Model> {\n    associatedtype A\n    init(for: Any)",
                 with: "public protocol BackingData<Model> {\n    init(for: Self.Model.Type)")
+            // Fix: same missing-second-generic-parameter gap as PersistentModel's getValue/
+            // setValue extension methods (see below), but for BackingData's own protocol
+            // requirements -- confirmed via a minimal repro to produce the exact required
+            // dispatch-thunk/method-descriptor symbols.
+            c = c.replacingOccurrences(
+                of: "func getValue<GenericA>(forKey: KeyPath<Self.Model, GenericA>) -> GenericA where GenericA: RelationshipCollection",
+                with: "func getValue<GenericA, GenericB>(forKey: KeyPath<Self.Model, GenericA>) -> GenericA where GenericA: RelationshipCollection, GenericB == GenericA.PersistentElement")
+            c = c.replacingOccurrences(
+                of: "func setValue<GenericA>(forKey: KeyPath<Self.Model, GenericA>, to: GenericA) -> () where GenericA: RelationshipCollection",
+                with: "func setValue<GenericA, GenericB>(forKey: KeyPath<Self.Model, GenericA>, to: GenericA) -> () where GenericA: RelationshipCollection, GenericB == GenericA.PersistentElement")
             // Fix: HistoryDelete/HistoryInsert/HistoryUpdate/HistoryToken/HistoryTransaction's
             // associated types are missing extra real-ABI bounds (confirmed via swift-demangle:
             // each needs an "associated conformance descriptor ... : Swift.Hashable" that a
@@ -3069,12 +3079,14 @@ extension AttributeDynamicLookup {
                 with: "@_fixed_layout final public class ResultsObserver<A, B>: CustomDebugStringConvertible, Observation.Observable where B: Hashable {")
             // `_computeSections`'s real constraint is `A == B.Element` (A is B's element type),
             // but replaceGenericPlaceholderPathsWithAny (applied generically to all top-level
-            // global function signatures) erases "B.Element" to "Any" since it can't distinguish
-            // a meaningful associated-type reference on a generic parameter from an unresolvable
-            // demangler placeholder path — producing the self-contradictory "A == Any, A:
-            // PersistentModel". Restore the real constraint.
+            // global function signatures) can't distinguish a meaningful associated-type
+            // reference on a generic parameter from an unresolvable demangler placeholder path.
+            // An earlier fix assumed this erased "B.Element" to a literal "A == Any" clause, but
+            // the constraint is now dropped entirely instead (confirmed via direct inspection of
+            // the generated interface) -- restore it by anchoring on the still-present
+            // "A: PersistentModel,  B: RandomAccessCollection" pair.
             c = c.replacingOccurrences(
-                of: "where A: PersistentModel, A == Any, B: RandomAccessCollection, C: Hashable",
+                of: "where A: PersistentModel,  B: RandomAccessCollection,  C: Hashable",
                 with: "where A: PersistentModel, A == B.Element, B: RandomAccessCollection, C: Hashable")
             // DefaultSerialModelExecutor is non-final but must conform to Sendable (required by
             // SerialExecutor/Executor); the real class declares this via `@unchecked Sendable`.
@@ -3176,16 +3188,20 @@ extension AttributeDynamicLookup {
             // BackingData<Model>`), so constrained-existential usages like `any
             // BackingData<Self.Model == A1>` (left behind above as just `any BackingData`,
             // since stripConstrainedExistentialGenerics drops the whole `<...>` clause) are
-            // already fixed by that strip. What's left is that A1 no longer appears anywhere
-            // in these two extension methods' signatures once the constraint is gone, which
-            // the compiler rejects as an unused generic parameter — add a same-named phantom
-            // parameter so A1 appears in the parameter list too.
+            // left with A1 not appearing anywhere in these two extension methods' signatures,
+            // which the compiler rejects as an unused generic parameter. BackingData actually
+            // DOES have a primary associated type (`protocol BackingData<Model>`, fixed earlier
+            // this session), so instead of the unused-parameter workaround this used previously
+            // (a phantom `as type: A1.Type` parameter, which doesn't match the real ABI's
+            // parameter list), restore the constraint as `any BackingData<A1>` -- BackingData's
+            // primary associated type argument -- which both keeps A1 used AND mangles to the
+            // exact real ABI shape (confirmed via swift-demangle and a minimal repro).
             c = c.replacingOccurrences(
                 of: "public func _generateCurrentClassBackingData<A1>() -> any BackingData where A1: PersistentModel { fatalError() }",
-                with: "public func _generateCurrentClassBackingData<A1>(as type: A1.Type) -> any BackingData where A1: PersistentModel { fatalError() }")
+                with: "public func _generateCurrentClassBackingData<A1>() -> any BackingData<A1> where A1: PersistentModel { fatalError() }")
             c = c.replacingOccurrences(
                 of: "public func _superClassBackingData<A1>(of: any PersistentModel.Type) -> any BackingData where A1: PersistentModel { fatalError() }",
-                with: "public func _superClassBackingData<A1>(of: any PersistentModel.Type, as type: A1.Type) -> any BackingData where A1: PersistentModel { fatalError() }")
+                with: "public func _superClassBackingData<A1>(of: any PersistentModel.Type) -> any BackingData<A1> where A1: PersistentModel { fatalError() }")
             // `init(backingData:)`/`persistentBackingData` reference `any BackingData<Self.Model
             // == A>` in the real module; here the generic-placeholder-path eraser reduces the
             // constraint to plain `<Any>` (no `==` survives, so stripConstrainedExistentialGenerics
@@ -3206,6 +3222,42 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "var persistentBackingData: any BackingData { get set }",
                 with: "var persistentBackingData: any BackingData<Self> { get set }")
+
+            // Fix: PersistentModel.getValue/setValue's RelationshipCollection-bound overloads
+            // are missing a second, structurally-required generic parameter tied via `==` to
+            // A1.PersistentElement (confirmed via swift-demangle: "getValue<A, B where A1:
+            // RelationshipCollection, B1 == A1.PersistentElement>" -- the mangler tracks
+            // A1.PersistentElement as its own substitution slot, requiring a second declared
+            // generic parameter even though it's otherwise unused in the visible signature).
+            // Confirmed via a minimal repro to produce the exact required symbol. The Decodable/
+            // Encodable-combined RelationshipCollection overloads need the same B1 parameter but
+            // demangle with "A1: Swift.Decodable, A1: RelationshipCollection" in a specific
+            // canonical requirement order that doesn't appear to be controllable from source
+            // order (tried both orderings in a minimal repro, both produced RelationshipCollection
+            // first regardless) -- left unfixed, not yet root-caused.
+            c = c.replacingOccurrences(
+                of: "public func getValue<A1>(forKey: KeyPath<Self, A1>) -> A1 where A1: RelationshipCollection { fatalError() }",
+                with: "public func getValue<A1, B1>(forKey: KeyPath<Self, A1>) -> A1 where A1: RelationshipCollection, B1 == A1.PersistentElement { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public func setValue<A1>(forKey: KeyPath<Self, A1>, to: A1) -> () where A1: RelationshipCollection {}",
+                with: "public func setValue<A1, B1>(forKey: KeyPath<Self, A1>, to: A1) -> () where A1: RelationshipCollection, B1 == A1.PersistentElement {}")
+
+            // Fix: ResultsObserverDelegate has the same bogus-associatedtype pattern as
+            // BackingData -- an unrelated `associatedtype A`/`associatedtype B` pair (no real
+            // ABI presence) sits alongside the real Element/SectionTitle associated types, and
+            // the protocol isn't declared with them as primary associated types at all.
+            // ResultsObserver.delegate's real ABI is `any ResultsObserverDelegate<Self.Element ==
+            // A, Self.SectionTitle == B>` (confirmed via swift-demangle), which requires
+            // ResultsObserverDelegate<Element, SectionTitle> primary-associated-type syntax on
+            // the protocol declaration and `any ResultsObserverDelegate<A, B>` (ResultsObserver's
+            // own generic parameters) at the usage site -- confirmed via a minimal repro to
+            // produce the exact required symbols.
+            c = c.replacingOccurrences(
+                of: "public protocol ResultsObserverDelegate {\n    associatedtype A\n    associatedtype B\n",
+                with: "public protocol ResultsObserverDelegate<Element, SectionTitle> {\n")
+            c = c.replacingOccurrences(
+                of: "public final var delegate: (any ResultsObserverDelegate)? { get { return nil } set {} }",
+                with: "public final var delegate: (any ResultsObserverDelegate<A, B>)? { get { return nil } set {} }")
 
             // Fix: DataStoreBatchDeleteRequest<A>/FetchDescriptor<A>/HistoryDescriptor<A>/
             // ResultsObserver<A, B>.predicate|filterBy, plus ModelContext.delete<GenericA>(where:),
