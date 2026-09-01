@@ -1032,6 +1032,25 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(of: "Curve.KeyAgreement", with: "Curve25519.KeyAgreement")
             c = c.replacingOccurrences(of: "Curve.Signing", with: "Curve25519.Signing")
 
+            // Fix: P256/P384/P521 already implement CorecryptoSupportedNISTCurve's requirements
+            // (curveType, hash2fieldL) but never declare the conformance itself, and are missing
+            // the associatedtype H witness entirely; similarly MLKEM768/MLKEM1024 already
+            // implement CorecryptoSupportedMLKEMKEM's requirements (createPublicKey, kemType,
+            // unmaskedKemType) but never declare the conformance, missing the associatedtype
+            // publicKeyType witness. Confirmed via swift-demangle that both conformances (and
+            // their witness tables, since these are concrete, non-generic types -- unlike the
+            // generic-conformance witness-table gap seen elsewhere this session) are real ABI.
+            for (curve, hashFn) in [("P256", "SHA256"), ("P384", "SHA384"), ("P521", "SHA512")] {
+                c = c.replacingOccurrences(
+                    of: "public enum \(curve) {",
+                    with: "public enum \(curve): CorecryptoSupportedNISTCurve {\n    public typealias H = \(hashFn)")
+            }
+            for kem in ["MLKEM768", "MLKEM1024"] {
+                c = c.replacingOccurrences(
+                    of: "public enum \(kem) {",
+                    with: "public enum \(kem): CorecryptoSupportedMLKEMKEM {\n    public typealias publicKeyType = \(kem).PublicKey")
+            }
+
             // `SecureEnclave.P256`/`.P384`/`.P521`/`.Curve25519` are distinct nested enums that
             // shadow the top-level `P256`/`P384`/`P521`/`Curve25519` types of the same name. Bare
             // references like `P256.KeyAgreement.PublicKey` written inside SecureEnclave's own
