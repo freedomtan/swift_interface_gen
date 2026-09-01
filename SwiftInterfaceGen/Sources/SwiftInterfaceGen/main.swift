@@ -3300,6 +3300,12 @@ extension AttributeDynamicLookup {
             // fixed with a targeted per-line replacement instead of a blind global one.
             c = c.replacingOccurrences(of: "Predicate<Any>?, sortBy: [SortDescriptor<A>])", with: "Predicate<A>?, sortBy: [SortDescriptor<A>])")
             c = c.replacingOccurrences(of: "Predicate<Any>?) { fatalError() }", with: "Predicate<A>?) { fatalError() }")
+            // Same Predicate<Any>-instead-of-Predicate<A> gap for ResultsObserver's
+            // convenience init(filterBy:...) overloads specifically (missed by the targeted
+            // replacements above, which didn't anticipate "init(filterBy:" as a distinct call
+            // site) -- confirmed via the same swift-demangle evidence and repro as the other
+            // Predicate<Any> fixes above.
+            c = c.replacingOccurrences(of: "init(filterBy: Predicate<Any>?", with: "init(filterBy: Predicate<A>?")
             c = c.replacingOccurrences(of: "public var predicate: Predicate<Any>?", with: "public var predicate: Predicate<A>?")
             c = c.replacingOccurrences(of: "public final var filterBy: Predicate<Any>?", with: "public final var filterBy: Predicate<A>?")
             c = c.replacingOccurrences(
