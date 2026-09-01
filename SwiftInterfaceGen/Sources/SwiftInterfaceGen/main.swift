@@ -1114,6 +1114,49 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(of: "Curve.KeyAgreement", with: "Curve25519.KeyAgreement")
             c = c.replacingOccurrences(of: "Curve.Signing", with: "Curve25519.Signing")
 
+            // Fix: HPKEDiffieHellmanPrivateKey/HPKEKEMPrivateKey render as empty-bodied protocol
+            // refinements, but their real ABI needs an "associated conformance descriptor"
+            // narrowing the inherited PublicKey associatedtype to the HPKE-specific public-key
+            // protocol (DiffieHellmanKeyAgreement.PublicKey -> HPKEDiffieHellmanPublicKey,
+            // KEMPrivateKey.PublicKey -> HPKEKEMPublicKey) -- confirmed via a minimal repro that
+            // redeclaring the associatedtype with the narrower bound produces exactly this symbol.
+            c = c.replacingOccurrences(
+                of: "public protocol HPKEDiffieHellmanPrivateKey: DiffieHellmanKeyAgreement {\n}",
+                with: "public protocol HPKEDiffieHellmanPrivateKey: DiffieHellmanKeyAgreement {\n    associatedtype PublicKey: HPKEDiffieHellmanPublicKey\n}")
+            c = c.replacingOccurrences(
+                of: "public protocol HPKEKEMPrivateKey: KEMPrivateKey {\n}",
+                with: "public protocol HPKEKEMPrivateKey: KEMPrivateKey {\n    associatedtype PublicKey: HPKEKEMPublicKey\n}")
+
+            // Fix: a bogus, truncated-name duplicate of XWingMLKEM768X25519 ("XWingMLKEM768X",
+            // missing the "25519" suffix) is auto-generated alongside our hand-written real type
+            // -- no real ABI symbol ever demangles to bare "XWingMLKEM768X" (confirmed by
+            // grepping every demangled CryptoKit.tbd symbol), so this is a phantom placeholder,
+            // same "bogus auto-generated duplicate" family as the Curve/Curve25519 fix above.
+            // It compiled harmlessly as an unconstrained conformance until the associated
+            // conformance descriptor fix above required an explicit `PublicKey` witness -- delete
+            // the whole phantom block outright via balanced-brace scan (member order inside it is
+            // nondeterministic across generator runs, so a literal multi-line match is unsafe).
+            if let markerRange = c.range(of: "public enum XWingMLKEM768X: Hashable, @unchecked Sendable {") {
+                var depth = 1
+                var idx = markerRange.upperBound
+                var endIdx: String.Index? = nil
+                while idx < c.endIndex {
+                    let ch = c[idx]
+                    if ch == "{" { depth += 1 } else if ch == "}" {
+                        depth -= 1
+                        if depth == 0 { endIdx = c.index(after: idx); break }
+                    }
+                    idx = c.index(after: idx)
+                }
+                if let endIdx {
+                    var removeEnd = endIdx
+                    if removeEnd < c.endIndex, c[removeEnd] == "\n" {
+                        removeEnd = c.index(after: removeEnd)
+                    }
+                    c.removeSubrange(markerRange.lowerBound..<removeEnd)
+                }
+            }
+
             // Fix: P256/P384/P521 already implement CorecryptoSupportedNISTCurve's requirements
             // (curveType, hash2fieldL) but never declare the conformance itself, and are missing
             // the associatedtype H witness entirely; similarly MLKEM768/MLKEM1024 already
