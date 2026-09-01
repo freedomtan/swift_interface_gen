@@ -1094,6 +1094,23 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                     }
                 }
                 """)
+            // Fix: HPKE.Recipient/Sender's authenticatedBy/recipientKey params render as bare
+            // "Any" instead of the real associated-type reference "A.PublicKey" (confirmed via
+            // swift-demangle: DiffieHellmanKeyAgreement declares `associatedtype PublicKey:
+            // HPKEDiffieHellmanPublicKey`, and A: HPKEDiffieHellmanPrivateKey inherits it) --
+            // same generic-placeholder-resolved-as-Any gap seen elsewhere this session.
+            c = c.replacingOccurrences(
+                of: "authenticatedBy: Any, presharedKey: SymmetricKey, presharedKeyIdentifier: Data) throws where A: HPKEDiffieHellmanPrivateKey { fatalError() }",
+                with: "authenticatedBy: A.PublicKey, presharedKey: SymmetricKey, presharedKeyIdentifier: Data) throws where A: HPKEDiffieHellmanPrivateKey { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "authenticatedBy: Any) throws where A: HPKEDiffieHellmanPrivateKey { fatalError() }",
+                with: "authenticatedBy: A.PublicKey) throws where A: HPKEDiffieHellmanPrivateKey { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public init<A>(recipientKey: Any, ciphersuite: HPKE.Ciphersuite, info: Data, authenticatedBy: A, presharedKey: SymmetricKey, presharedKeyIdentifier: Data) throws where A: HPKEDiffieHellmanPrivateKey { fatalError() }",
+                with: "public init<A>(recipientKey: A.PublicKey, ciphersuite: HPKE.Ciphersuite, info: Data, authenticatedBy: A, presharedKey: SymmetricKey, presharedKeyIdentifier: Data) throws where A: HPKEDiffieHellmanPrivateKey { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public init<A>(recipientKey: Any, ciphersuite: HPKE.Ciphersuite, info: Data, authenticatedBy: A) throws where A: HPKEDiffieHellmanPrivateKey { fatalError() }",
+                with: "public init<A>(recipientKey: A.PublicKey, ciphersuite: HPKE.Ciphersuite, info: Data, authenticatedBy: A) throws where A: HPKEDiffieHellmanPrivateKey { fatalError() }")
             c = c.replacingOccurrences(of: "Curve.KeyAgreement", with: "Curve25519.KeyAgreement")
             c = c.replacingOccurrences(of: "Curve.Signing", with: "Curve25519.Signing")
 
