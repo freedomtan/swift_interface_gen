@@ -3306,6 +3306,54 @@ extension AttributeDynamicLookup {
             // site) -- confirmed via the same swift-demangle evidence and repro as the other
             // Predicate<Any> fixes above.
             c = c.replacingOccurrences(of: "init(filterBy: Predicate<Any>?", with: "init(filterBy: Predicate<A>?")
+
+            // Fix: _SectionExpression<A>'s cases render `Expression<Any, ...>` instead of
+            // `Expression<A, ...>` (confirmed via swift-demangle: real ABI is
+            // "Foundation.Expression<Pack{A}, Swift.String>", since Expression is declared with
+            // a variadic generic `each Input` and this type passes its own generic parameter as
+            // a single-element pack) -- same generic-placeholder-resolved-as-Any/Pack gap as the
+            // Predicate<Any> fixes above, confirmed via a minimal repro.
+            c = c.replacingOccurrences(of: "Expression<Any, Swift.String>", with: "Expression<A, Swift.String>")
+            c = c.replacingOccurrences(of: "Expression<Any, Swift.String?>", with: "Expression<A, Swift.String?>")
+            // The Expression<A,...> fix alone wasn't enough -- a byte-level symbol comparison
+            // (nm on our fp dylib vs the required stub) showed the real enum case constructor
+            // additionally mangles in a "where A: PersistentModel" constraint that
+            // _SectionExpression<A>'s bare, unconstrained header doesn't carry.
+            c = c.replacingOccurrences(
+                of: "public enum _SectionExpression<A>: Codable, Hashable, @unchecked Sendable {",
+                with: "public enum _SectionExpression<A>: Codable, Hashable, @unchecked Sendable where A: PersistentModel {")
+
+            // Fix: Schema.Index.Types<B>'s `binary`/`rtree` cases reference a bogus top-level
+            // "A1" (the generator's auto-generated placeholder struct for an undeclared type,
+            // confirmed via grep: "public struct A1: Hashable, Codable, Sendable {}" elsewhere in
+            // this file) instead of Types' own generic parameter "B" -- the parser apparently
+            // fell through to the undeclared-type stub path instead of binding to the enclosing
+            // generic parameter. Confirmed via a minimal repro to produce the exact required
+            // "enum case for ...Types.binary/rtree" symbols once corrected to "B".
+            c = c.replacingOccurrences(of: "case binary(_: [PartialKeyPath<A1>])", with: "case binary(_: [PartialKeyPath<B>])")
+            c = c.replacingOccurrences(of: "case rtree(_: [PartialKeyPath<A1>])", with: "case rtree(_: [PartialKeyPath<B>])")
+            // Same byte-level finding as _SectionExpression above: the real enum case
+            // constructor symbols additionally mangle in "where A: PersistentModel, B:
+            // PersistentModel" constraints that Schema.Index<A>/Types<B>'s bare, unconstrained
+            // headers don't carry.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class Index<A>: Codable, CustomDebugStringConvertible, Hashable, SchemaProperty {",
+                with: "@_fixed_layout public class Index<A>: Codable, CustomDebugStringConvertible, Hashable, SchemaProperty where A: PersistentModel {")
+            c = c.replacingOccurrences(
+                of: "public enum Types<B>: Codable, Hashable, @unchecked Sendable {",
+                with: "public enum Types<B>: Codable, Hashable, @unchecked Sendable where B: PersistentModel {")
+            // Types<B>'s == also wrongly self-references "Types<Any>" instead of "Types<B>"
+            // (same bogus-placeholder-Any pattern as the case payloads above) -- harmless before
+            // the `where B: PersistentModel` bound was added, but now a hard compile error since
+            // Any doesn't conform to PersistentModel.
+            c = c.replacingOccurrences(
+                of: "public static func ==(_ lhs: Types<Any>, _ rhs: Types<Any>) -> Bool { fatalError() }",
+                with: "public static func ==(_ lhs: Types<B>, _ rhs: Types<B>) -> Bool { fatalError() }")
+            // Same fix for Schema.Unique<A> (its CodingKeys.constraints case constructor has the
+            // identical missing-constraint gap).
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class Unique<A>: Codable, CustomDebugStringConvertible, Hashable, SchemaProperty {",
+                with: "@_fixed_layout public class Unique<A>: Codable, CustomDebugStringConvertible, Hashable, SchemaProperty where A: PersistentModel {")
             c = c.replacingOccurrences(of: "public var predicate: Predicate<Any>?", with: "public var predicate: Predicate<A>?")
             c = c.replacingOccurrences(of: "public final var filterBy: Predicate<Any>?", with: "public final var filterBy: Predicate<A>?")
             c = c.replacingOccurrences(
