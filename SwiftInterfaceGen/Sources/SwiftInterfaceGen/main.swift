@@ -1029,6 +1029,22 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(of: "public enum Curve: Hashable, @unchecked Sendable {", with: "public enum Curve25519: Hashable, @unchecked Sendable {")
             c = c.replacingOccurrences(of: "    public enum Curve: Hashable, @unchecked Sendable {", with: "    public enum Curve25519: Hashable, @unchecked Sendable {")
             c = c.replacingOccurrences(of: "public static func ==(_ lhs: Curve, _ rhs: Curve) -> Bool { fatalError() }", with: "public static func ==(_ lhs: Curve25519, _ rhs: Curve25519) -> Bool { fatalError() }")
+            // Fix: AES.GCM.Nonce/ChaChaPoly.Nonce's init(copying:)/init(data:) render their
+            // RawSpan parameter with an erroneous `borrowing` keyword copied verbatim from the
+            // swiftinterface's printed ownership annotation -- same gap already fixed for
+            // MetalPerformanceShadersGraph's Executables.init and Vision's several borrowing
+            // params this session: the annotation reflects the implicit default calling
+            // convention, not an actual source-level keyword. Confirmed via a minimal repro.
+            c = c.replacingOccurrences(of: "init(copying: borrowing RawSpan) throws { fatalError() }", with: "init(copying: RawSpan) throws { fatalError() }")
+            c = c.replacingOccurrences(of: "init(data: borrowing RawSpan) throws { fatalError() }", with: "init(data: RawSpan) throws { fatalError() }")
+            // Same erroneous-borrowing gap for VRF.VRFPublicKey.init(publicKey:) and
+            // SymmetricKey.init(size:initializingWith:)'s closure parameter.
+            c = c.replacingOccurrences(
+                of: "public init(publicKey: borrowing RawSpan) throws(VRFError) { fatalError() }",
+                with: "public init(publicKey: RawSpan) throws(VRFError) { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public init<A>(size: SymmetricKeySize, initializingWith: borrowing (inout OutputRawSpan) throws (A) -> ()) throws(A) where A: Error { fatalError() }",
+                with: "public init<A>(size: SymmetricKeySize, initializingWith: (inout OutputRawSpan) throws (A) -> ()) throws(A) where A: Error { fatalError() }")
             c = c.replacingOccurrences(of: "Curve.KeyAgreement", with: "Curve25519.KeyAgreement")
             c = c.replacingOccurrences(of: "Curve.Signing", with: "Curve25519.Signing")
 
