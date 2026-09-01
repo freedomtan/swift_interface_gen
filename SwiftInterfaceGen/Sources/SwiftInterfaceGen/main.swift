@@ -1045,6 +1045,55 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(
                 of: "public init<A>(size: SymmetricKeySize, initializingWith: borrowing (inout OutputRawSpan) throws (A) -> ()) throws(A) where A: Error { fatalError() }",
                 with: "public init<A>(size: SymmetricKeySize, initializingWith: (inout OutputRawSpan) throws (A) -> ()) throws(A) where A: Error { fatalError() }")
+
+            // Fix: XWingMLKEM768X25519 (a post-quantum hybrid KEM) rendered as a completely
+            // empty placeholder -- `case _mock` plus three bodyless structs -- instead of the
+            // real ~20-member API surface (confirmed via swift-demangle against the full stub
+            // list). Filled in by hand, mirroring the sibling Kyber1024/MLKEM768/MLKEM1024 KEM
+            // types' established shape (KEMPrivateKey/KEMPublicKey/KEMOneTimePrivateKey, plus the
+            // HPKE-specific protocols since this type also needs HPKE interop) and the exact
+            // signatures from the demangled stub list.
+            c = c.replacingOccurrences(
+                of: """
+                public enum XWingMLKEM768X25519 {
+                    case _mock
+                    public struct OneTimePrivateKey {
+                    }
+                    public struct PrivateKey {
+                    }
+                    public struct PublicKey {
+                    }
+                }
+                """,
+                with: """
+                public enum XWingMLKEM768X25519 {
+                    case _mock
+                    public struct PublicKey: HPKEKEMPublicKey, HPKEPublicKeySerialization, KEMPublicKey {
+                        public init<A>(rawRepresentation: A) throws where A: ContiguousBytes { fatalError() }
+                        public init<A>(_ arg1: A, kem: HPKE.KEM) throws where A: ContiguousBytes { fatalError() }
+                        public func encapsulate() throws -> KEM.EncapsulationResult { fatalError() }
+                        public func hpkeRepresentation(kem: HPKE.KEM) throws -> Data { return Data() }
+                        public var rawRepresentation: Data { get { return Data() } }
+                    }
+                    public struct PrivateKey: HPKEKEMPrivateKey, HPKEKEMPrivateKeyGeneration, KEMPrivateKey {
+                        public typealias PublicKey = XWingMLKEM768X25519.PublicKey
+                        public init() throws { fatalError() }
+                        public init<A>(seedRepresentation: A, publicKey: XWingMLKEM768X25519.PublicKey?) throws where A: DataProtocol { fatalError() }
+                        public init<A>(integrityCheckedRepresentation: A) throws where A: DataProtocol { fatalError() }
+                        public func decapsulate(_ arg1: Data) throws -> SymmetricKey { fatalError() }
+                        public var integrityCheckedRepresentation: Data { get { return Data() } }
+                        public var publicKey: XWingMLKEM768X25519.PublicKey { get { fatalError() } }
+                        public var seedRepresentation: Data { get { return Data() } }
+                        public static func generate() throws -> PrivateKey { fatalError() }
+                    }
+                    public struct OneTimePrivateKey: KEMOneTimePrivateKey {
+                        public typealias PublicKey = XWingMLKEM768X25519.PublicKey
+                        public var publicKey: XWingMLKEM768X25519.PublicKey { get { fatalError() } }
+                        public func decapsulate(_ arg1: Data) throws -> SymmetricKey { fatalError() }
+                        public static func generate() throws -> OneTimePrivateKey { fatalError() }
+                    }
+                }
+                """)
             c = c.replacingOccurrences(of: "Curve.KeyAgreement", with: "Curve25519.KeyAgreement")
             c = c.replacingOccurrences(of: "Curve.Signing", with: "Curve25519.Signing")
 
