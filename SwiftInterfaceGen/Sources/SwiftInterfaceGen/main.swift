@@ -1012,14 +1012,34 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(
                 of: "public static func ==(_ lhs: HKDF, _ rhs: HKDF) -> Bool { fatalError() }",
                 with: "public static func ==(_ lhs: HKDF<A>, _ rhs: HKDF<A>) -> Bool { fatalError() }")
-            // `SecureEnclave.P256`/`.P384`/`.P521`/`.Curve` are distinct nested enums that shadow
-            // the top-level `P256`/`P384`/`P521`/`Curve` types of the same name. Bare references
-            // like `P256.KeyAgreement.PublicKey` written inside SecureEnclave's own nested types
-            // resolve to the *enclosing* SecureEnclave.P256 (which has no such nested member)
-            // instead of the top-level type the real module actually means. Fully qualify with
-            // the module name (unambiguous everywhere, including outside SecureEnclave) so name
-            // lookup can't shadow it.
-            for curve in ["P256", "P384", "P521", "Curve"] {
+            // Fix: the real module's Curve25519 type is misnamed "Curve" both at module scope
+            // and inside SecureEnclave (confirmed via swift-demangle: every required symbol says
+            // "CryptoKit.Curve25519..." / "CryptoKit.SecureEnclave.Curve25519...", never "Curve"),
+            // while a SEPARATE, entirely empty "public enum Curve25519 { ... }" placeholder
+            // (auto-generated stub for what the generator treated as an undeclared type) exists
+            // alongside it at both scopes -- the parser evidently split the single real
+            // "Curve25519" declaration into a correctly-named-but-empty stub and an incorrectly-
+            // named-but-populated real one. Remove the empty duplicates and rename the real ones.
+            c = c.replacingOccurrences(
+                of: "public enum Curve25519 {\n    case _mock\n    public enum KeyAgreement {\n        case _mock\n        public struct PrivateKey {\n        }\n        public struct PublicKey {\n        }\n    }\n    public enum Signing {\n        case _mock\n        public struct PrivateKey {\n        }\n        public struct PublicKey {\n        }\n    }\n}\n",
+                with: "")
+            c = c.replacingOccurrences(
+                of: "    public enum Curve25519 {\n        case _mock\n        public enum KeyAgreement {\n            case _mock\n            public struct PrivateKey {\n            }\n        }\n        public enum Signing {\n            case _mock\n            public struct PrivateKey {\n            }\n        }\n    }\n",
+                with: "")
+            c = c.replacingOccurrences(of: "public enum Curve: Hashable, @unchecked Sendable {", with: "public enum Curve25519: Hashable, @unchecked Sendable {")
+            c = c.replacingOccurrences(of: "    public enum Curve: Hashable, @unchecked Sendable {", with: "    public enum Curve25519: Hashable, @unchecked Sendable {")
+            c = c.replacingOccurrences(of: "public static func ==(_ lhs: Curve, _ rhs: Curve) -> Bool { fatalError() }", with: "public static func ==(_ lhs: Curve25519, _ rhs: Curve25519) -> Bool { fatalError() }")
+            c = c.replacingOccurrences(of: "Curve.KeyAgreement", with: "Curve25519.KeyAgreement")
+            c = c.replacingOccurrences(of: "Curve.Signing", with: "Curve25519.Signing")
+
+            // `SecureEnclave.P256`/`.P384`/`.P521`/`.Curve25519` are distinct nested enums that
+            // shadow the top-level `P256`/`P384`/`P521`/`Curve25519` types of the same name. Bare
+            // references like `P256.KeyAgreement.PublicKey` written inside SecureEnclave's own
+            // nested types resolve to the *enclosing* SecureEnclave.P256 (which has no such
+            // nested member) instead of the top-level type the real module actually means. Fully
+            // qualify with the module name (unambiguous everywhere, including outside
+            // SecureEnclave) so name lookup can't shadow it.
+            for curve in ["P256", "P384", "P521", "Curve25519"] {
                 c = c.replacingOccurrences(of: "\(curve).KeyAgreement.PublicKey", with: "CryptoKit.\(curve).KeyAgreement.PublicKey")
                 c = c.replacingOccurrences(of: "\(curve).Signing.ECDSASignature", with: "CryptoKit.\(curve).Signing.ECDSASignature")
                 c = c.replacingOccurrences(of: "\(curve).Signing.PublicKey", with: "CryptoKit.\(curve).Signing.PublicKey")
