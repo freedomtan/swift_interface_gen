@@ -3706,7 +3706,7 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "public struct MLDataColumn<A>: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomReflectable, CustomStringConvertible {",
                 with: """
-                public struct MLDataColumn<A>: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomReflectable, CustomStringConvertible {
+                public struct MLDataColumn<A>: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomReflectable, CustomStringConvertible where A: MLDataValueConvertible {
                     public static func >(_ arg1: MLDataColumn<A>, _ arg2: MLDataColumn<A>) -> MLDataColumn<Swift.Bool> { fatalError() }
                     public static func >(_ arg1: MLDataColumn<A>, _ arg2: A) -> MLDataColumn<Swift.Bool> { fatalError() }
                     public static func >(_ arg1: A, _ arg2: MLDataColumn<A>) -> MLDataColumn<Swift.Bool> { fatalError() }
@@ -3772,6 +3772,14 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "extension Dictionary where Key: MLDataValueConvertible,  Value: MLDataValueConvertible {",
                 with: "extension Dictionary: MLDataValueConvertible where Key: MLDataValueConvertible,  Value: MLDataValueConvertible {")
+
+            // Fix: MLDataColumn<A> is missing its own `A: MLDataValueConvertible` bound (confirmed
+            // via the real swiftinterface header -- restored above, alongside the >/</>=/<=
+            // operators). The generator already renders every "A =="-constrained member
+            // (arithmetic operators, aggregates, the cross-type `init(column:)`) correctly in
+            // their own constrained extensions -- restoring just the missing base-struct bound is
+            // enough for their mangled symbols to become correct too, confirmed via a minimal
+            // repro to produce exact byte-for-byte matches for all of them.
         }
 
         if parser.defaultModule == "AppleIntelligenceReporting" {
