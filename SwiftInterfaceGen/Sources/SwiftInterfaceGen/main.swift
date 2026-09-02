@@ -3178,6 +3178,20 @@ extension AttributeDynamicLookup {
                 of: "func setValue<GenericA>(forKey: KeyPath<Self.Model, GenericA>, to: GenericA) -> () where GenericA: RelationshipCollection",
                 with: "func setValue<GenericA, GenericB>(forKey: KeyPath<Self.Model, GenericA>, to: GenericA) -> () where GenericA: RelationshipCollection, GenericB == GenericA.PersistentElement")
 
+            // Fix: BackingData/PersistentModel's Decodable/Encodable-combined RelationshipCollection
+            // overloads have the same missing-second-generic-parameter gap as the plain
+            // RelationshipCollection overload above, just with an extra Decodable/Encodable bound --
+            // confirmed via a minimal repro that source order "GenericA: Decodable, GenericA:
+            // RelationshipCollection, GenericB == GenericA.PersistentElement" produces the exact
+            // required dispatch-thunk/method-descriptor symbols (a prior investigation this session
+            // wrongly concluded this was uncontrollable from source order).
+            c = c.replacingOccurrences(
+                of: "func getValue<GenericA>(forKey: KeyPath<Self.Model, GenericA>) -> GenericA where GenericA: Decodable,  GenericA: RelationshipCollection",
+                with: "func getValue<GenericA, GenericB>(forKey: KeyPath<Self.Model, GenericA>) -> GenericA where GenericA: Decodable, GenericA: RelationshipCollection, GenericB == GenericA.PersistentElement")
+            c = c.replacingOccurrences(
+                of: "func setValue<GenericA>(forKey: KeyPath<Self.Model, GenericA>, to: GenericA) -> () where GenericA: Encodable,  GenericA: RelationshipCollection",
+                with: "func setValue<GenericA, GenericB>(forKey: KeyPath<Self.Model, GenericA>, to: GenericA) -> () where GenericA: Encodable, GenericA: RelationshipCollection, GenericB == GenericA.PersistentElement")
+
             // Fix: [A]/A? (Array/Optional) conditionally conform to RelationshipCollection in
             // the real module (confirmed via swift-demangle: "protocol conformance descriptor
             // for <A where A: PersistentModel> [A] : RelationshipCollection" and "<A where A:
@@ -3422,17 +3436,23 @@ extension AttributeDynamicLookup {
             // A1.PersistentElement as its own substitution slot, requiring a second declared
             // generic parameter even though it's otherwise unused in the visible signature).
             // Confirmed via a minimal repro to produce the exact required symbol. The Decodable/
-            // Encodable-combined RelationshipCollection overloads need the same B1 parameter but
-            // demangle with "A1: Swift.Decodable, A1: RelationshipCollection" in a specific
-            // canonical requirement order that doesn't appear to be controllable from source
-            // order (tried both orderings in a minimal repro, both produced RelationshipCollection
-            // first regardless) -- left unfixed, not yet root-caused.
+            // Encodable-combined RelationshipCollection overloads need the same B1 parameter,
+            // with A1: Decodable/Encodable listed before A1: RelationshipCollection in source --
+            // confirmed via a minimal repro that this ordering produces the exact required symbol
+            // (a prior investigation this session wrongly concluded the canonical order wasn't
+            // controllable from source).
             c = c.replacingOccurrences(
                 of: "public func getValue<A1>(forKey: KeyPath<Self, A1>) -> A1 where A1: RelationshipCollection { fatalError() }",
                 with: "public func getValue<A1, B1>(forKey: KeyPath<Self, A1>) -> A1 where A1: RelationshipCollection, B1 == A1.PersistentElement { fatalError() }")
             c = c.replacingOccurrences(
                 of: "public func setValue<A1>(forKey: KeyPath<Self, A1>, to: A1) -> () where A1: RelationshipCollection {}",
                 with: "public func setValue<A1, B1>(forKey: KeyPath<Self, A1>, to: A1) -> () where A1: RelationshipCollection, B1 == A1.PersistentElement {}")
+            c = c.replacingOccurrences(
+                of: "public func getValue<A1>(forKey: KeyPath<Self, A1>) -> A1 where A1: Decodable,  A1: RelationshipCollection { fatalError() }",
+                with: "public func getValue<A1, B1>(forKey: KeyPath<Self, A1>) -> A1 where A1: Decodable, A1: RelationshipCollection, B1 == A1.PersistentElement { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public func setValue<A1>(forKey: KeyPath<Self, A1>, to: A1) -> () where A1: Encodable,  A1: RelationshipCollection {}",
+                with: "public func setValue<A1, B1>(forKey: KeyPath<Self, A1>, to: A1) -> () where A1: Encodable, A1: RelationshipCollection, B1 == A1.PersistentElement {}")
 
             // Fix: ResultsObserverDelegate has the same bogus-associatedtype pattern as
             // BackingData -- an unrelated `associatedtype A`/`associatedtype B` pair (no real
