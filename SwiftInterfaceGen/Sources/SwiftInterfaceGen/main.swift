@@ -3553,6 +3553,29 @@ extension AttributeDynamicLookup {
                 with: "static var historyType: Self.HistoryType.Type { get }")
         }
 
+        if parser.defaultModule == "TipKit" {
+            // Fix: TipView<A> is missing its own `A: Tip` bound (confirmed via swift-demangle:
+            // dropping this bound changes the generic-signature encoding of every "A == AnyTip"
+            // -constrained member declared in the body, silently corrupting their mangled
+            // symbols even though they otherwise compile fine). TipView<Content>'s 6
+            // "Content == AnyTip"-constrained convenience inits are also entirely missing (the
+            // generator only renders the unconstrained-Content overloads). Confirmed via a
+            // minimal repro that restoring the `A: Tip` bound plus a member-level trailing
+            // `where A == AnyTip` clause declared directly in the struct body (not a constrained
+            // extension) produces exact byte-for-byte matches for all 6 required init symbols.
+            c = c.replacingOccurrences(
+                of: "public struct TipView<A>: SwiftUI.View {",
+                with: """
+                public struct TipView<A>: SwiftUI.View where A: Tip {
+                    public init(_ arg1: (any Tip)?, isPresented: SwiftUI.Binding<Swift.Bool>? = nil, arrowEdge: SwiftUI.Edge? = nil, action: @escaping (Tips.Action) -> () = { _ in }) where A == AnyTip { fatalError() }
+                    public init<A1>(_ arg1: (any Tip)?, isPresented: SwiftUI.Binding<Swift.Bool>? = nil, arrowEdge: SwiftUI.Edge? = nil, anchorID: A1, action: @escaping (Tips.Action) -> () = { _ in }) where A == AnyTip, A1: Hashable, A1: Sendable { fatalError() }
+                    public init<A1>(_ arg1: (any Tip)?, isPresented: SwiftUI.Binding<Swift.Bool>? = nil, arrowEdge: SwiftUI.Edge? = nil, anchorID: A1) where A == AnyTip, A1: Hashable, A1: Sendable { fatalError() }
+                    public init<A1>(_ arg1: (any Tip)?, isPresented: SwiftUI.Binding<Swift.Bool>? = nil, arrowEdge: SwiftUI.Edge? = nil, anchorTo: A1.Type) where A == AnyTip, A1: TipAnchorKey { fatalError() }
+                    public init(_ arg1: (any Tip)?, isPresented: SwiftUI.Binding<Swift.Bool>? = nil, arrowEdge: SwiftUI.Edge? = nil) where A == AnyTip { fatalError() }
+                    public init(_ arg1: (any Tip)?, arrowEdge: SwiftUI.Edge? = nil, action: @escaping (Tips.Action) -> () = { _ in }) where A == AnyTip { fatalError() }
+                """)
+        }
+
         if parser.defaultModule == "AppleIntelligenceReporting" {
             // Restore the header constraint the real class declares (confirmed via its own
             // ABI: lazySource.source's mangled type is "any Source<Self.Stream == A>", which
