@@ -3698,6 +3698,82 @@ extension AttributeDynamicLookup {
                 with: "public struct Event<A>: Identifiable, Tips.RuleInput, Sendable where A: Decodable, A: Encodable, A: Sendable {")
         }
 
+        if parser.defaultModule == "CreateML" {
+            // Fix: MLDataColumn<A>/MLUntypedColumn declare ==/!= but are missing the ordering
+            // operators (>, <, >=, <=) entirely -- added directly, matching the existing ==/!=
+            // overload shape (3 overloads each: column-column, column-scalar, scalar-column).
+            // Confirmed via a minimal repro to produce exact byte-for-byte matches.
+            c = c.replacingOccurrences(
+                of: "public struct MLDataColumn<A>: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomReflectable, CustomStringConvertible {",
+                with: """
+                public struct MLDataColumn<A>: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomReflectable, CustomStringConvertible {
+                    public static func >(_ arg1: MLDataColumn<A>, _ arg2: MLDataColumn<A>) -> MLDataColumn<Swift.Bool> { fatalError() }
+                    public static func >(_ arg1: MLDataColumn<A>, _ arg2: A) -> MLDataColumn<Swift.Bool> { fatalError() }
+                    public static func >(_ arg1: A, _ arg2: MLDataColumn<A>) -> MLDataColumn<Swift.Bool> { fatalError() }
+                    public static func <(_ arg1: MLDataColumn<A>, _ arg2: MLDataColumn<A>) -> MLDataColumn<Swift.Bool> { fatalError() }
+                    public static func <(_ arg1: MLDataColumn<A>, _ arg2: A) -> MLDataColumn<Swift.Bool> { fatalError() }
+                    public static func <(_ arg1: A, _ arg2: MLDataColumn<A>) -> MLDataColumn<Swift.Bool> { fatalError() }
+                    public static func >=(_ arg1: MLDataColumn<A>, _ arg2: MLDataColumn<A>) -> MLDataColumn<Swift.Bool> { fatalError() }
+                    public static func >=(_ arg1: MLDataColumn<A>, _ arg2: A) -> MLDataColumn<Swift.Bool> { fatalError() }
+                    public static func >=(_ arg1: A, _ arg2: MLDataColumn<A>) -> MLDataColumn<Swift.Bool> { fatalError() }
+                    public static func <=(_ arg1: MLDataColumn<A>, _ arg2: MLDataColumn<A>) -> MLDataColumn<Swift.Bool> { fatalError() }
+                    public static func <=(_ arg1: MLDataColumn<A>, _ arg2: A) -> MLDataColumn<Swift.Bool> { fatalError() }
+                    public static func <=(_ arg1: A, _ arg2: MLDataColumn<A>) -> MLDataColumn<Swift.Bool> { fatalError() }
+                """)
+            c = c.replacingOccurrences(
+                of: "public struct MLUntypedColumn: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomReflectable, CustomStringConvertible {",
+                with: """
+                public struct MLUntypedColumn: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomReflectable, CustomStringConvertible {
+                    public static func >(_ arg1: MLUntypedColumn, _ arg2: MLUntypedColumn) -> MLUntypedColumn { fatalError() }
+                    public static func >(_ arg1: MLUntypedColumn, _ arg2: any MLDataValueConvertible) -> MLUntypedColumn { fatalError() }
+                    public static func >(_ arg1: any MLDataValueConvertible, _ arg2: MLUntypedColumn) -> MLUntypedColumn { fatalError() }
+                    public static func <(_ arg1: MLUntypedColumn, _ arg2: MLUntypedColumn) -> MLUntypedColumn { fatalError() }
+                    public static func <(_ arg1: MLUntypedColumn, _ arg2: any MLDataValueConvertible) -> MLUntypedColumn { fatalError() }
+                    public static func <(_ arg1: any MLDataValueConvertible, _ arg2: MLUntypedColumn) -> MLUntypedColumn { fatalError() }
+                    public static func >=(_ arg1: MLUntypedColumn, _ arg2: MLUntypedColumn) -> MLUntypedColumn { fatalError() }
+                    public static func >=(_ arg1: MLUntypedColumn, _ arg2: any MLDataValueConvertible) -> MLUntypedColumn { fatalError() }
+                    public static func >=(_ arg1: any MLDataValueConvertible, _ arg2: MLUntypedColumn) -> MLUntypedColumn { fatalError() }
+                    public static func <=(_ arg1: MLUntypedColumn, _ arg2: MLUntypedColumn) -> MLUntypedColumn { fatalError() }
+                    public static func <=(_ arg1: MLUntypedColumn, _ arg2: any MLDataValueConvertible) -> MLUntypedColumn { fatalError() }
+                    public static func <=(_ arg1: any MLDataValueConvertible, _ arg2: MLUntypedColumn) -> MLUntypedColumn { fatalError() }
+                """)
+
+            // Fix: MLRegressorMetrics/MLClassifierMetrics/MLObjectDetectorMetrics's static
+            // __evaluation(on:...) factory methods are entirely missing. Added directly,
+            // confirmed via a minimal repro to produce exact byte-for-byte matches.
+            c = c.replacingOccurrences(
+                of: "public struct MLRegressorMetrics: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomStringConvertible {",
+                with: """
+                public struct MLRegressorMetrics: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomStringConvertible {
+                    public static func __evaluation(on: MLDataTable, targetColumn: Swift.String, predictionColumn: Swift.String) throws -> MLRegressorMetrics { fatalError() }
+                """)
+            c = c.replacingOccurrences(
+                of: "public struct MLClassifierMetrics: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomStringConvertible {",
+                with: """
+                public struct MLClassifierMetrics: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomStringConvertible {
+                    public static func __evaluation(on: MLDataTable, labelColumn: Swift.String, predictionColumn: Swift.String, classes: [Swift.String]) throws -> MLClassifierMetrics { fatalError() }
+                """)
+            c = c.replacingOccurrences(
+                of: "public struct MLObjectDetectorMetrics: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomStringConvertible {",
+                with: """
+                public struct MLObjectDetectorMetrics: CustomDebugStringConvertible, CustomPlaygroundDisplayConvertible, CustomStringConvertible {
+                    public static func __evaluation(on: MLDataTable, imageColumn: Swift.String, annotationColumn: Swift.String, predictionColumn: Swift.String, classes: [Swift.String]) throws -> MLObjectDetectorMetrics { fatalError() }
+                """)
+
+            // Fix: `extension Array where Element: MLDataValueConvertible`/`extension Dictionary
+            // where Key: ..., Value: ...` add the protocol's members conditionally but never
+            // declare the conformance itself (`: MLDataValueConvertible` is missing from the
+            // extension header) -- same "retroactive conditional conformance never declared" gap
+            // fixed for SwiftData's Array/Optional:RelationshipCollection earlier this session.
+            // Their witness tables remain unfixable (established generic-conformance pattern).
+            c = c.replacingOccurrences(
+                of: "extension Array where Element: MLDataValueConvertible {",
+                with: "extension Array: MLDataValueConvertible where Element: MLDataValueConvertible {")
+            c = c.replacingOccurrences(
+                of: "extension Dictionary where Key: MLDataValueConvertible,  Value: MLDataValueConvertible {",
+                with: "extension Dictionary: MLDataValueConvertible where Key: MLDataValueConvertible,  Value: MLDataValueConvertible {")
+        }
+
         if parser.defaultModule == "AppleIntelligenceReporting" {
             // Restore the header constraint the real class declares (confirmed via its own
             // ABI: lazySource.source's mangled type is "any Source<Self.Stream == A>", which
