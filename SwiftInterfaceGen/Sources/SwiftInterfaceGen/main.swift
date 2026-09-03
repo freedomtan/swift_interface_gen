@@ -3821,6 +3821,71 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "extension MLShapedArraySlice where A: Equatable {",
                 with: "extension MLShapedArraySlice: Equatable where A: Equatable {")
+
+            // Fix: withMLTensorComputePolicy's closure params are declared @escaping, but the
+            // real ABI mangles them as non-escaping (`XE`, not `c`) -- confirmed via minimal
+            // repro that dropping @escaping alone produces exact byte-for-byte matches for both
+            // overloads and the async variant's async function pointer.
+            c = c.replacingOccurrences(
+                of: "public func withMLTensorComputePolicy<A>(_ arg1: MLComputePolicy, _ arg2: @escaping () throws -> A) throws -> A { fatalError() }",
+                with: "public func withMLTensorComputePolicy<A>(_ arg1: MLComputePolicy, _ arg2: () throws -> A) throws -> A { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public func withMLTensorComputePolicy<A>(_ arg1: MLComputePolicy, _ arg2: @escaping () async throws -> A) async throws -> A { fatalError() }",
+                with: "public func withMLTensorComputePolicy<A>(_ arg1: MLComputePolicy, _ arg2: () async throws -> A) async throws -> A { fatalError() }")
+
+            // Fix: MLTensor is missing the .>/.</.>=/.<= comparison operators entirely (both the
+            // MLTensor-MLTensor overload and the generic-scalar overload), while its sibling
+            // .==/.!= operators ARE present -- confirmed via minimal repro these are simply
+            // missing declarations, adding them alongside .== produces exact byte-for-byte matches.
+            c = c.replacingOccurrences(
+                of: "public static func .==(_ arg1: MLTensor, _ arg2: MLTensor) -> MLTensor { fatalError() }",
+                with: """
+                public static func .==(_ arg1: MLTensor, _ arg2: MLTensor) -> MLTensor { fatalError() }
+                    public static func .>(_ arg1: MLTensor, _ arg2: MLTensor) -> MLTensor { fatalError() }
+                    public static func .><GenericA>(_ arg1: MLTensor, _ arg2: GenericA) -> MLTensor where GenericA: MLTensorScalar,  GenericA: Numeric { fatalError() }
+                    public static func .<(_ arg1: MLTensor, _ arg2: MLTensor) -> MLTensor { fatalError() }
+                    public static func .<<GenericA>(_ arg1: MLTensor, _ arg2: GenericA) -> MLTensor where GenericA: MLTensorScalar,  GenericA: Numeric { fatalError() }
+                    public static func .>=(_ arg1: MLTensor, _ arg2: MLTensor) -> MLTensor { fatalError() }
+                    public static func .>=<GenericA>(_ arg1: MLTensor, _ arg2: GenericA) -> MLTensor where GenericA: MLTensorScalar,  GenericA: Numeric { fatalError() }
+                    public static func .<=(_ arg1: MLTensor, _ arg2: MLTensor) -> MLTensor { fatalError() }
+                    public static func .<=<GenericA>(_ arg1: MLTensor, _ arg2: GenericA) -> MLTensor where GenericA: MLTensorScalar,  GenericA: Numeric { fatalError() }
+                """)
+
+            // Fix: MLTensor.init(rangeFrom:to:by:scalarType:)'s `by` param is declared as `Any`
+            // instead of the real `A.Stride` (A: Strideable) -- confirmed via minimal repro that
+            // using the correct associated-type produces an exact byte-for-byte match.
+            c = c.replacingOccurrences(
+                of: "public init<A>(rangeFrom: A, to: A, by: Any, scalarType: A.Type) where A: MLTensorScalar,  A: Strideable { fatalError() }",
+                with: "public init<A>(rangeFrom: A, to: A, by: A.Stride, scalarType: A.Type) where A: MLTensorScalar,  A: Strideable { fatalError() }")
+
+            // Fix: MLTensor's 4 UnboundedRange-taking subscripts. 3 of the 4 leading-Range-count
+            // variants (1/2/3 leading `(any MLTensorRangeExpression)?` params before the closure)
+            // exist but declare the closure param `@escaping`, which mangles as a plain function
+            // type (`c`) instead of the real noescape shape (`XE`); the 4th variant (0 leading
+            // ranges, i.e. just the closure + trailing variadic) is missing outright. Confirmed
+            // via minimal repro that dropping @escaping on the 3 existing ones, and adding the
+            // missing 4th with the same non-escaping shape, produces exact byte-for-byte matches
+            // for all 4.
+            c = c.replacingOccurrences(
+                of: "public subscript(_ arg1: (any MLTensorRangeExpression)?, _ arg2: (any MLTensorRangeExpression)?, _ arg3: (any MLTensorRangeExpression)?, _ arg4: @escaping (UnboundedRange_) -> (), _ arg5: (any MLTensorRangeExpression)?...) -> MLTensor { get { fatalError() } }",
+                with: "public subscript(_ arg1: (any MLTensorRangeExpression)?, _ arg2: (any MLTensorRangeExpression)?, _ arg3: (any MLTensorRangeExpression)?, _ arg4: (UnboundedRange_) -> (), _ arg5: (any MLTensorRangeExpression)?...) -> MLTensor { get { fatalError() } }")
+            c = c.replacingOccurrences(
+                of: "public subscript(_ arg1: (any MLTensorRangeExpression)?, _ arg2: (any MLTensorRangeExpression)?, _ arg3: @escaping (UnboundedRange_) -> (), _ arg4: (any MLTensorRangeExpression)?...) -> MLTensor { get { fatalError() } }",
+                with: "public subscript(_ arg1: (any MLTensorRangeExpression)?, _ arg2: (any MLTensorRangeExpression)?, _ arg3: (UnboundedRange_) -> (), _ arg4: (any MLTensorRangeExpression)?...) -> MLTensor { get { fatalError() } }")
+            c = c.replacingOccurrences(
+                of: "public subscript(_ arg1: (any MLTensorRangeExpression)?, _ arg2: @escaping (UnboundedRange_) -> (), _ arg3: (any MLTensorRangeExpression)?...) -> MLTensor { get { fatalError() } }",
+                with: "public subscript(_ arg1: (any MLTensorRangeExpression)?, _ arg2: (UnboundedRange_) -> (), _ arg3: (any MLTensorRangeExpression)?...) -> MLTensor { get { fatalError() } }")
+            c = c.replacingOccurrences(
+                of: "public subscript(_ arg1: @escaping (UnboundedRange_) -> (), _ arg2: (any MLTensorRangeExpression)?...) -> MLTensor { get { fatalError() } }",
+                with: "public subscript(_ arg1: (UnboundedRange_) -> (), _ arg2: (any MLTensorRangeExpression)?...) -> MLTensor { get { fatalError() } }")
+
+            // Fix: MLIRRepresentation.sourceIR is declared as a synchronous getter, but the real
+            // ABI requires an async getter (hence the missing async function pointer symbol) --
+            // confirmed via minimal repro that `get async` alone produces an exact byte-for-byte
+            // match for both the getter and its async function pointer.
+            c = c.replacingOccurrences(
+                of: "public var sourceIR: Data { get { return Data() } }",
+                with: "public var sourceIR: Data { get async { return Data() } }")
         }
 
         if parser.defaultModule == "AppleIntelligenceReporting" {
