@@ -3886,6 +3886,15 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "public var sourceIR: Data { get { return Data() } }",
                 with: "public var sourceIR: Data { get async { return Data() } }")
+
+            // Fix: MLShapedArrayProtocol's UnboundedRange-taking subscript declares its closure
+            // param `@escaping` -- same bug as MLTensor's equivalent subscripts above, mangling
+            // as a plain function type (`c`) instead of the real noescape shape (`XE`). Confirmed
+            // via minimal repro that dropping @escaping produces exact byte-for-byte matches for
+            // the getter, setter, AND modify accessor.
+            c = c.replacingOccurrences(
+                of: "public subscript(_ arg1: @escaping (UnboundedRange_) -> ()) -> MLShapedArraySlice<Self.Scalar> { get { fatalError() } set {} }",
+                with: "public subscript(_ arg1: (UnboundedRange_) -> ()) -> MLShapedArraySlice<Self.Scalar> { get { fatalError() } set {} }")
         }
 
         if parser.defaultModule == "AppleIntelligenceReporting" {
