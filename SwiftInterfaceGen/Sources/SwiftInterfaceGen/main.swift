@@ -3895,6 +3895,27 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "public subscript(_ arg1: @escaping (UnboundedRange_) -> ()) -> MLShapedArraySlice<Self.Scalar> { get { fatalError() } set {} }",
                 with: "public subscript(_ arg1: (UnboundedRange_) -> ()) -> MLShapedArraySlice<Self.Scalar> { get { fatalError() } set {} }")
+
+            // Fix: the real ABI has `_OBJC_CLASS_$_MLModelStructure`/`_OBJC_METACLASS_$_MLModelStructure`
+            // and the same pair for MLOptimizationHints, but the real .swiftinterface shows both
+            // names as genuine Swift value types (enum/struct) with no ObjC class at all -- these
+            // ObjC symbols belong to a private, non-public-API ObjC-bridging implementation class
+            // that happens to share the same runtime name. Confirmed via minimal repro that a
+            // hidden `@objc(Name) open class` with a DIFFERENT Swift-visible identifier can coexist
+            // with the public enum/struct of the same runtime name and produces the exact required
+            // linker symbols without conflicting with the public declaration.
+            c = c.replacingOccurrences(
+                of: "public enum MLModelStructure: Codable, Hashable, @unchecked Sendable {",
+                with: """
+                @objc(MLModelStructure) open class _MLModelStructureObjCShadow: NSObject {}
+                public enum MLModelStructure: Codable, Hashable, @unchecked Sendable {
+                """)
+            c = c.replacingOccurrences(
+                of: "public struct MLOptimizationHints: Equatable {",
+                with: """
+                @objc(MLOptimizationHints) open class _MLOptimizationHintsObjCShadow: NSObject {}
+                public struct MLOptimizationHints: Equatable {
+                """)
         }
 
         if parser.defaultModule == "AppleIntelligenceReporting" {
