@@ -1846,12 +1846,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             }
         }
 
-        // Fix: StoreKit `StoreProductManager` is declared as an actor but Swift 6 strict
-        // concurrency emits a [#ConformanceIsolation] error for explicit Actor conformance.
-        // Convert it to a final class with @unchecked Sendable for compilation purposes.
         if parser.defaultModule == "StoreKit" {
-            c = c.replacingOccurrences(of: "public actor StoreProductManager",
-                                        with: "public final class StoreProductManager: @unchecked Sendable")
 
             // Fix: Storefront._locale's real ABI additionally needs a "read" coroutine accessor
             // (confirmed via swift-demangle: "Storefront._locale.read"), alongside the getter the
