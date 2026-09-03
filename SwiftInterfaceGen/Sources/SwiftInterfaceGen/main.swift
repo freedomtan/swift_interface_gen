@@ -3782,6 +3782,47 @@ extension AttributeDynamicLookup {
             // repro to produce exact byte-for-byte matches for all of them.
         }
 
+        if parser.defaultModule == "CoreML" {
+            // Fix: `extension ClosedRange/Range where Bound == Swift.Int` add
+            // _mlTensorRange/relative(toShapedArrayAxis:) members satisfying
+            // MLTensorRangeExpression/MLShapedArrayRangeExpression but never declare either
+            // conformance -- same "retroactive conditional conformance never declared" gap fixed
+            // repeatedly elsewhere this session. Since Bound == Int makes this a concrete (not
+            // generic) conformance, both the conformance descriptor AND witness table are
+            // expected and confirmed via a minimal repro to produce exact byte-for-byte matches.
+            c = c.replacingOccurrences(
+                of: "extension ClosedRange where Bound == Swift.Int {",
+                with: "extension ClosedRange: MLTensorRangeExpression, MLShapedArrayRangeExpression where Bound == Swift.Int {")
+            c = c.replacingOccurrences(
+                of: "extension Range where Bound == Swift.Int {",
+                with: "extension Range: MLTensorRangeExpression, MLShapedArrayRangeExpression where Bound == Swift.Int {")
+
+            // Fix: `extension MLShapedArray/MLShapedArraySlice where A: Decodable/Encodable/
+            // Equatable` add the matching init(from:)/encode(to:)/== members but never declare
+            // the conformances themselves -- same "retroactive conditional conformance never
+            // declared" gap fixed repeatedly elsewhere this session. Confirmed via a minimal
+            // repro that only the conformance descriptors are needed (no witness tables, unlike
+            // protocols with real requirement witnessing machinery).
+            c = c.replacingOccurrences(
+                of: "extension MLShapedArray where A: Decodable {",
+                with: "extension MLShapedArray: Decodable where A: Decodable {")
+            c = c.replacingOccurrences(
+                of: "extension MLShapedArray where A: Encodable {",
+                with: "extension MLShapedArray: Encodable where A: Encodable {")
+            c = c.replacingOccurrences(
+                of: "extension MLShapedArray where A: Equatable {",
+                with: "extension MLShapedArray: Equatable where A: Equatable {")
+            c = c.replacingOccurrences(
+                of: "extension MLShapedArraySlice where A: Decodable {",
+                with: "extension MLShapedArraySlice: Decodable where A: Decodable {")
+            c = c.replacingOccurrences(
+                of: "extension MLShapedArraySlice where A: Encodable {",
+                with: "extension MLShapedArraySlice: Encodable where A: Encodable {")
+            c = c.replacingOccurrences(
+                of: "extension MLShapedArraySlice where A: Equatable {",
+                with: "extension MLShapedArraySlice: Equatable where A: Equatable {")
+        }
+
         if parser.defaultModule == "AppleIntelligenceReporting" {
             // Restore the header constraint the real class declares (confirmed via its own
             // ABI: lazySource.source's mangled type is "any Source<Self.Stream == A>", which
