@@ -265,6 +265,32 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
 
 """
                 }
+                // MLMultiArray/SHSignature are only ever referenced as property types
+                // (SNKShotSegmentationResult.exemplarEmbedding, SNShazamSignatureResult.signature,
+                // etc.), never extended, so isObjcBridged discovery never finds them -- but their
+                // real ABI mangles every reference via ClangImporter ("__C.MLMultiArray"/
+                // "__C.SHSignature", confirmed via swift-demangle), meaning they're genuine ObjC
+                // classes. Forward-declare them the same way as MPSGraphNDXRuntime/
+                // _LTTextSessionDelegate above.
+                if currentModule == "SoundAnalysis" {
+                    bridgeHeader += """
+@interface MLMultiArray : NSObject
+@end
+@interface SHSignature : NSObject
+@end
+
+"""
+                    // Unlike MPSGraphNDXRuntime/_LTTextSessionDelegate above (referenced only as
+                    // opaque property types, never stored as a genuinely typed property), these
+                    // are used as real get/set computed-property types -- the final link step
+                    // (no `-undefined dynamic_lookup` there, unlike the first pass) needs an
+                    // actual `_OBJC_CLASS_$_` symbol to resolve against, so a header-only forward
+                    // declaration isn't enough; provide a matching stub @implementation too.
+                    implLines.append("@implementation MLMultiArray")
+                    implLines.append("@end")
+                    implLines.append("@implementation SHSignature")
+                    implLines.append("@end")
+                }
                 let bridgeImpl   = implLines.joined(separator: "\n")   + "\n"
                 try? bridgeHeader.write(toFile: "\(currentModule)Interface_bridge.h", atomically: true, encoding: .utf8)
                 try? bridgeImpl.write(toFile:   "\(currentModule)Interface_bridge.m", atomically: true, encoding: .utf8)
@@ -1512,6 +1538,27 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replaceWord("SNResult", with: "Any")
             c = c.replaceWord("MLMultiArray", with: "Any")
             c = c.replaceWord("SHSignature", with: "Any")
+            // Fix: MLMultiArray/SHSignature are blanket-replaced with `Any` above (needed
+            // elsewhere in this file where the real type genuinely can't be resolved), but the
+            // real ABI mangles these specific properties as `__C.MLMultiArray`/`__C.SHSignature`
+            // (confirmed via swift-demangle) -- reinstate the real (now bridge-header-forward-
+            // declared, see generateExports) type for exactly these known property sites.
+            for (old, new) in [
+                ("public var exemplar: Any { get { fatalError() } set {} }",
+                 "public var exemplar: MLMultiArray { get { fatalError() } set {} }"),
+                ("public var trainingDataEmbeddings: [Any] { get { return [] } set {} }",
+                 "public var trainingDataEmbeddings: [MLMultiArray] { get { return [] } set {} }"),
+                ("public var validationDataEmbeddings: [Any] { get { return [] } set {} }",
+                 "public var validationDataEmbeddings: [MLMultiArray] { get { return [] } set {} }"),
+                ("public var data: Any { get { fatalError() } set {} }",
+                 "public var data: MLMultiArray { get { fatalError() } set {} }"),
+                ("public var exemplarEmbedding: Any { get { fatalError() } set {} }",
+                 "public var exemplarEmbedding: MLMultiArray { get { fatalError() } set {} }"),
+                ("public final var signature: Any { get { fatalError() } set {} }",
+                 "public final var signature: SHSignature { get { fatalError() } set {} }"),
+            ] {
+                c = c.replacingOccurrences(of: old, with: new)
+            }
             c = c.replacingOccurrences(of: "GenericA.Result", with: "Any")
             c = c.replacingOccurrences(of: "GenericA.Arg", with: "Any")
             c = c.replacingOccurrences(of: "public static func automaticallyNotifiesObservers(forKey:", with: "public override static func automaticallyNotifiesObservers(forKey:")
