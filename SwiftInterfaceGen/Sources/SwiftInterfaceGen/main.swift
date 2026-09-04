@@ -278,9 +278,9 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
 @end
 @interface SHSignature : NSObject
 @end
-@interface SNRequest : NSObject
+@protocol SNRequest
 @end
-@interface SNResult : NSObject
+@protocol SNResult
 @end
 
 """
@@ -290,13 +290,13 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                     // (no `-undefined dynamic_lookup` there, unlike the first pass) needs an
                     // actual `_OBJC_CLASS_$_` symbol to resolve against, so a header-only forward
                     // declaration isn't enough; provide a matching stub @implementation too.
+                    // SNRequest/SNResult are real ObjC *protocols* (confirmed via `swift-demangle
+                    // -expand`: the real ABI mangles params as a `ProtocolList`/existential, not
+                    // a class), so they need no @implementation -- only their `@protocol` forward
+                    // declaration above, referenced in Swift as `any SNRequest`/`any SNResult`.
                     implLines.append("@implementation MLMultiArray")
                     implLines.append("@end")
                     implLines.append("@implementation SHSignature")
-                    implLines.append("@end")
-                    implLines.append("@implementation SNRequest")
-                    implLines.append("@end")
-                    implLines.append("@implementation SNResult")
                     implLines.append("@end")
                 }
                 let bridgeImpl   = implLines.joined(separator: "\n")   + "\n"
@@ -1571,18 +1571,21 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             }
             // Fix: SNRequest/SNResult are blanket-replaced with `Any` above (needed elsewhere
             // where the real type genuinely can't be resolved), but SNResultsCollector's 3
-            // delegate-style methods mangle their params as real `__C.SNRequest`/`__C.SNResult`
-            // (confirmed via swift-demangle) -- same "reinstate the real bridge-header type at
-            // known sites" pattern as the MLMultiArray/SHSignature fix above.
+            // delegate-style methods mangle their params as real ObjC-*protocol* existentials
+            // `any __C.SNRequest`/`any __C.SNResult` (confirmed via `swift-demangle -expand`:
+            // the params are a `ProtocolList`, not a class reference) -- same "reinstate the
+            // real bridge-header type at known sites" pattern as the MLMultiArray/SHSignature
+            // fix above, but as an existential since SNRequest/SNResult are protocols, not
+            // classes (unlike MLMultiArray/SHSignature).
             c = c.replacingOccurrences(
                 of: "public final func request(_ arg1: Any, didProduce: Any) -> () {}",
-                with: "public final func request(_ arg1: SNRequest, didProduce: SNResult) -> () {}")
+                with: "public final func request(_ arg1: any SNRequest, didProduce: any SNResult) -> () {}")
             c = c.replacingOccurrences(
                 of: "public final func requestDidComplete(_ arg1: Any) -> () {}",
-                with: "public final func requestDidComplete(_ arg1: SNRequest) -> () {}")
+                with: "public final func requestDidComplete(_ arg1: any SNRequest) -> () {}")
             c = c.replacingOccurrences(
                 of: "public final func request(_ arg1: Any, didFailWithError: any Error) -> () {}",
-                with: "public final func request(_ arg1: SNRequest, didFailWithError: any Error) -> () {}")
+                with: "public final func request(_ arg1: any SNRequest, didFailWithError: any Error) -> () {}")
             c = c.replacingOccurrences(of: "GenericA.Result", with: "Any")
             c = c.replacingOccurrences(of: "GenericA.Arg", with: "Any")
             c = c.replacingOccurrences(of: "public static func automaticallyNotifiesObservers(forKey:", with: "public override static func automaticallyNotifiesObservers(forKey:")
