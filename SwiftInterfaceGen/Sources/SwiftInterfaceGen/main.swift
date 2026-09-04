@@ -1779,6 +1779,40 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 public struct CategoryOptions: OptionSet, Sendable { public var rawValue: Swift.UInt; public init(rawValue: Swift.UInt) { self.rawValue = rawValue } }
             }
             """
+
+            // Fix: the real ABI's generic `run<A>` overloads constrain `A`'s associated types
+            // (`A.Element ==`, `A.Failure ==`) and the `runLocally` overloads' `any Publisher`
+            // existential param constrains its associated types too (`Failure ==`, `Output ==`)
+            // -- omitting these equality constraints changes the mangled generic signature, so
+            // the generator's unconstrained defaults never match the real symbols.
+            for (old, new) in [
+                ("public func run<A>(_ arg1: CLAP.AudioRequest, audioFormat: AVAudioFormat, audioBuffers: A) throws -> CLAP.AudioSession where A: AsyncSequence { fatalError() }",
+                 "public func run<A>(_ arg1: CLAP.AudioRequest, audioFormat: AVAudioFormat, audioBuffers: A) throws -> CLAP.AudioSession where A: AsyncSequence, A.Element == (AVAudioPCMBuffer, Int64), A.Failure == Error { fatalError() }"),
+                ("public func run<A>(_ arg1: CLAP.DetectorHeadRequest, audioFormat: AVAudioFormat, audioBuffers: A) throws -> CLAP.DetectorHeadSession where A: AsyncSequence { fatalError() }",
+                 "public func run<A>(_ arg1: CLAP.DetectorHeadRequest, audioFormat: AVAudioFormat, audioBuffers: A) throws -> CLAP.DetectorHeadSession where A: AsyncSequence, A.Element == (AVAudioPCMBuffer, Int64), A.Failure == Error { fatalError() }"),
+                ("public func run<A>(_ arg1: CLAP.TextRequest, audioFormat: AVAudioFormat, audioBuffers: A) throws -> CLAP.TextSession where A: AsyncSequence { fatalError() }",
+                 "public func run<A>(_ arg1: CLAP.TextRequest, audioFormat: AVAudioFormat, audioBuffers: A) throws -> CLAP.TextSession where A: AsyncSequence, A.Element == (AVAudioPCMBuffer, Int64), A.Failure == Error { fatalError() }"),
+                ("public func run<A>(_ arg1: ClosedCaptioningRequest, audioFormat: AVAudioFormat, audioBuffers: A) throws -> ClosedCaptioningSession where A: AsyncSequence { fatalError() }",
+                 "public func run<A>(_ arg1: ClosedCaptioningRequest, audioFormat: AVAudioFormat, audioBuffers: A) throws -> ClosedCaptioningSession where A: AsyncSequence, A.Element == (AVAudioPCMBuffer, CMTime), A.Failure == Error { fatalError() }"),
+            ] {
+                c = c.replacingOccurrences(of: old, with: new)
+            }
+            // Fix: the `runLocally` overloads' `any Publisher` existential param is already
+            // generated with the correct same-type constraints (confirmed via debug tracing:
+            // `any Publisher<Self.Failure == Error, Self.Output == AVAudioPCMBuffer>`), but the
+            // later generic `stripConstrainedExistentialGenerics` pass (which runs on ALL
+            // frameworks to strip invalid `any Protocol<X == Y>` syntax) blindly erases the whole
+            // `<...>` clause since it contains `==` -- it doesn't know Publisher supports Swift's
+            // primary-associated-type sugar (`any Publisher<Output, Failure>`), unlike the
+            // Sequence/Collection/AsyncSequence family already special-cased via
+            // `knownPrimaryAssociatedTypes`. Convert to the sugared positional form here, before
+            // that pass runs, instead of extending the general-purpose table for one protocol.
+            for (old, new) in [
+                ("any Publisher<Self.Failure == Error, Self.Output == AVAudioPCMBuffer>",
+                 "any Publisher<AVAudioPCMBuffer, Error>"),
+            ] {
+                c = c.replacingOccurrences(of: old, with: new)
+            }
         }
 
         if parser.defaultModule == "TabularData" {
