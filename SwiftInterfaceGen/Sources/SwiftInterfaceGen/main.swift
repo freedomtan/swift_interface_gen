@@ -278,6 +278,10 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
 @end
 @interface SHSignature : NSObject
 @end
+@interface SNRequest : NSObject
+@end
+@interface SNResult : NSObject
+@end
 
 """
                     // Unlike MPSGraphNDXRuntime/_LTTextSessionDelegate above (referenced only as
@@ -289,6 +293,10 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                     implLines.append("@implementation MLMultiArray")
                     implLines.append("@end")
                     implLines.append("@implementation SHSignature")
+                    implLines.append("@end")
+                    implLines.append("@implementation SNRequest")
+                    implLines.append("@end")
+                    implLines.append("@implementation SNResult")
                     implLines.append("@end")
                 }
                 let bridgeImpl   = implLines.joined(separator: "\n")   + "\n"
@@ -1556,9 +1564,25 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                  "public var exemplarEmbedding: MLMultiArray { get { fatalError() } set {} }"),
                 ("public final var signature: Any { get { fatalError() } set {} }",
                  "public final var signature: SHSignature { get { fatalError() } set {} }"),
+                ("public final var featureVector: Any { get { fatalError() } set {} }",
+                 "public final var featureVector: MLMultiArray { get { fatalError() } set {} }"),
             ] {
                 c = c.replacingOccurrences(of: old, with: new)
             }
+            // Fix: SNRequest/SNResult are blanket-replaced with `Any` above (needed elsewhere
+            // where the real type genuinely can't be resolved), but SNResultsCollector's 3
+            // delegate-style methods mangle their params as real `__C.SNRequest`/`__C.SNResult`
+            // (confirmed via swift-demangle) -- same "reinstate the real bridge-header type at
+            // known sites" pattern as the MLMultiArray/SHSignature fix above.
+            c = c.replacingOccurrences(
+                of: "public final func request(_ arg1: Any, didProduce: Any) -> () {}",
+                with: "public final func request(_ arg1: SNRequest, didProduce: SNResult) -> () {}")
+            c = c.replacingOccurrences(
+                of: "public final func requestDidComplete(_ arg1: Any) -> () {}",
+                with: "public final func requestDidComplete(_ arg1: SNRequest) -> () {}")
+            c = c.replacingOccurrences(
+                of: "public final func request(_ arg1: Any, didFailWithError: any Error) -> () {}",
+                with: "public final func request(_ arg1: SNRequest, didFailWithError: any Error) -> () {}")
             c = c.replacingOccurrences(of: "GenericA.Result", with: "Any")
             c = c.replacingOccurrences(of: "GenericA.Arg", with: "Any")
             c = c.replacingOccurrences(of: "public static func automaticallyNotifiesObservers(forKey:", with: "public override static func automaticallyNotifiesObservers(forKey:")
