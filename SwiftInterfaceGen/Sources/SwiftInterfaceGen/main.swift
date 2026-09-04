@@ -1696,6 +1696,44 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 of: "public struct _SNClassifySoundRequest: Hashable, Sendable {}",
                 with: "")
 
+            // Fix: SNFileServer/SNFileItem/SNFileSystem/SNCopyFilesRequest/etc. (~20 classes) are
+            // real native NSObject subclasses whose real ABI requires the full class-metadata
+            // symbol suite (type metadata accessor, nominal type descriptor, class metadata base
+            // offset, method lookup function, type metadata, __deallocating_deinit), but the
+            // generator renders them with either no members at all beyond `override init()`, or
+            // (SNMovieRemixFinalResult only) only `final` members -- and `final` members don't
+            // need a vtable slot, so Swift elides the whole metadata suite including the method
+            // lookup function. Confirmed via minimal repro (-enable-library-evolution
+            // -language-mode 6, matching verify_public.py's flags): adding any single *non-final*
+            // member forces Swift to materialize the metadata suite; a `private var` reproduces
+            // exactly the required symbol set with no side effects, since it exports no public
+            // symbol of its own. This was the "method lookup function for X" mystery documented
+            // as an unresolved gap in the SNDetectSoundActionsRequest/SNDetectSoundRequest/
+            // _SNClassifySoundRequest fix earlier this session.
+            for name in ["SNFileServer", "SNFileItem", "SNFileSystem", "SNCopyFilesRequest",
+                         "SNCorrelateAudioRequest", "SNDeleteFilesRequest",
+                         "SNDiscoverFileServerRequest", "SNFileCopyingResult",
+                         "SNFileDeletionResult", "SNFileListingResult",
+                         "SNFileServerDiscoveryResult", "SNFileServerInfo",
+                         "SNLanguageAlignedAVFuser", "SNListFilesRequest",
+                         "SNMovieRemixDSPParameter", "SNMovieRemixRequest",
+                         "SNMovieRemixSession", "SNSystemAudioAnalyzer", "_SNAudioFileAnalyzer"] {
+                let withInit = "@objc(\(name)) @_fixed_layout open class \(name): NSObject {\n    public override init() { super.init() }\n"
+                let withoutInit = "@objc(\(name)) @_fixed_layout open class \(name): NSObject {\n"
+                if c.contains(withInit) {
+                    c = c.replacingOccurrences(
+                        of: withInit,
+                        with: withInit + "    private var _typeMetadataAnchor: Int = 0\n")
+                } else {
+                    c = c.replacingOccurrences(
+                        of: withoutInit,
+                        with: withoutInit + "    private var _typeMetadataAnchor: Int = 0\n")
+                }
+            }
+            c = c.replacingOccurrences(
+                of: "@objc(SNMovieRemixFinalResult) @_fixed_layout open class SNMovieRemixFinalResult: NSObject {\n    public override init() { super.init() }\n",
+                with: "@objc(SNMovieRemixFinalResult) @_fixed_layout open class SNMovieRemixFinalResult: NSObject {\n    public override init() { super.init() }\n    private var _typeMetadataAnchor: Int = 0\n")
+
             // Fix: the real ABI has `_OBJC_CLASS_$_SNKShotLabel`/`_OBJC_METACLASS_$_SNKShotLabel`
             // and the same pair for SNTimeDurationConstraint, but both names are already declared
             // as native Swift enums here (with separate, differently-named ObjC-bridging
