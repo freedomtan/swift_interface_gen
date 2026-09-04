@@ -1576,6 +1576,88 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 """)
             c = c.removeAnyConstraintsFromWhereClause()
 
+            // Fix: SNDetectSoundActionsRequest/SNDetectSoundRequest/_SNClassifySoundRequest are
+            // real native Swift classes (their required ABI symbols mangle with the SoundAnalysis
+            // module prefix, not "__C."/"(extension in ...)"), but the parser never emits their
+            // base class declaration at all -- only an "ObjC Extension (bridge-header required)"
+            // extension on a type that doesn't exist, which the generator's isObjcBridged
+            // detection wrongly classified as ObjC-imported. Confirmed via minimal repro that
+            // declaring them as plain native classes (not ObjC-bridge extensions) reproduces the
+            // required symbols almost exactly. Two remaining wrinkles, also confirmed via repro:
+            // (1) a `coder:`-taking init produces an unwanted resilience dispatch thunk + method
+            // descriptor UNLESS marked `@objc dynamic`, which suppresses both; (2) any additional
+            // designated initializer causes NSObject's inherited bare `init()` to also become
+            // exported (not part of the real ABI) UNLESS it's given a `private override init()`
+            // to explicitly claim/hide it. One symbol per type ("method lookup function for...")
+            // remains un-reproduced despite exhausting every declaration-shape combination tried
+            // (dynamic/open/final, formal NSSecureCoding conformance, required vs convenience
+            // init) -- left as an unresolved residual gap.
+            c = c.replacingOccurrences(
+                of: """
+                // --- ObjC Extension (bridge-header required) ---
+                extension SNDetectSoundActionsRequest {
+                    @nonobjc public override convenience init() { fatalError() }
+                    public struct __deallocating_deinit: Codable, Hashable, @unchecked Sendable {
+                        public init(from decoder: any Swift.Decoder) throws { fatalError() }
+                        public func encode(to encoder: Swift.Encoder) throws { fatalError() }
+                        public func hash(into hasher: inout Hasher) { fatalError() }
+                        public static func ==(_ lhs: __deallocating_deinit, _ rhs: __deallocating_deinit) -> Bool { fatalError() }
+                    }
+                }
+                // --- End ObjC Extension ---
+                """,
+                with: """
+                open class SNDetectSoundActionsRequest: NSObject {
+                    public override init() { super.init() }
+                }
+                """)
+            // Member order within these two extension bodies is nondeterministic across
+            // generator runs (same class of issue as elsewhere this session), so extract each
+            // whole extension body via a structural span match rather than assuming a fixed
+            // member sequence, then rebuild the class unconditionally with the fixed member set
+            // (both extensions always contain exactly the same members every run -- only their
+            // relative order varies).
+            for typeName in ["SNDetectSoundRequest", "_SNClassifySoundRequest"] {
+                if let re = try? NSRegularExpression(pattern: "(// --- ObjC Extension \\(bridge-header required\\) ---\\n)?extension \(typeName) \\{[\\s\\S]*?\\n\\}\\n(// --- End ObjC Extension ---\\n)?"),
+                   let m = re.firstMatch(in: c, range: NSRange(c.startIndex..., in: c)),
+                   let fullRange = Range(m.range, in: c) {
+                    let descriptionMember = typeName == "SNDetectSoundRequest"
+                        ? "    public override var description: Swift.String { get { fatalError() } }\n"
+                        : ""
+                    let replacement = """
+                    public class \(typeName): NSObject {
+                        public static var supportsSecureCoding: Swift.Bool { get { fatalError() } }
+                        private override init() { super.init() }
+                    \(descriptionMember)    public func copy(with: NSZone?) -> Any { fatalError() }
+                        public override var hash: Swift.Int { get { fatalError() } }
+                        public override func isEqual(_ arg1: Any?) -> Swift.Bool { fatalError() }
+                        public func encode(with: NSCoder) -> () {}
+                        @objc dynamic public convenience init?(coder: NSCoder) { fatalError() }
+                    }
+
+                    """
+                    c.replaceSubrange(fullRange, with: replacement)
+                }
+            }
+            // The bogus placeholder for the now-genuinely-declared _SNClassifySoundRequest above
+            // -- same "phantom auto-generated duplicate" pattern as CryptoKit's XWingMLKEM768X and
+            // CoreML's __C_MLComputeDeviceProtocol this session; confirmed unreferenced elsewhere.
+            c = c.replacingOccurrences(
+                of: "public struct __C_SNClassifySoundRequest: Hashable, Codable, Sendable {}",
+                with: "")
+            c = c.replacingOccurrences(
+                of: "public struct _SNClassifySoundRequest: Hashable, Sendable {}",
+                with: "")
+
+            // Fix: the real ABI has `_OBJC_CLASS_$_SNKShotLabel`/`_OBJC_METACLASS_$_SNKShotLabel`
+            // and the same pair for SNTimeDurationConstraint, but both names are already declared
+            // as native Swift enums here (with separate, differently-named ObjC-bridging
+            // companion classes) -- same "hidden private ObjC-bridging shadow class sharing a
+            // public value type's runtime name" pattern as CoreML's MLModelStructure/
+            // MLOptimizationHints fix this session.
+            c += "\n@objc(SNKShotLabel) open class _SNKShotLabelObjCShadow: NSObject {}\n"
+            c += "@objc(SNTimeDurationConstraint) open class _SNTimeDurationConstraintObjCShadow: NSObject {}\n"
+
             c += """
 
 
