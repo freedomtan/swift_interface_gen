@@ -1842,6 +1842,47 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             c = c.replacingOccurrences(
                 of: "any Subject<Self.Failure == B, ___SAME_TYPE_A___>",
                 with: "any Subject<A, B>")
+
+            // Fix: GenericThrowingClosureAudioDataAnalysisReceiver is generated as a completely
+            // empty protocol -- its one requirement (a generic `run` method) never made it into
+            // the interface at all. Confirmed via `swift-demangle -expand`: the requirement is
+            // `associatedtype Arg`/`associatedtype Result` plus `func run<A1>(_ arg1: Arg, _
+            // arg2: A1.Type) throws -> Result where A1: DependencyADAMAudioDataReceiver`.
+            c = c.replacingOccurrences(
+                of: "public protocol GenericThrowingClosureAudioDataAnalysisReceiver {\n}",
+                with: """
+                public protocol GenericThrowingClosureAudioDataAnalysisReceiver {
+                    associatedtype Arg
+                    associatedtype Result
+                    func run<A1>(_ arg1: Arg, _ arg2: A1.Type) throws -> Result where A1: DependencyADAMAudioDataReceiver
+                }
+                """)
+            // Fix: AudioDataAnalysisProviderProtocol.withAudioDataAnalysis (and its
+            // AudioDataAnalysisProvider concrete implementation) is missing a same-type
+            // constraint tying its second generic param to the first's `Arg` associated type,
+            // and its return type is erased to `Any` instead of the first param's `Result`
+            // (confirmed via swift-demangle -expand: `<A, B where A: ...Receiver, B ==
+            // A.Arg>(B, A) throws -> A.Result`).
+            c = c.replacingOccurrences(
+                of: "func withAudioDataAnalysis<GenericA, GenericB>(_ arg1: GenericB, _ arg2: GenericA) throws -> Any where GenericA: GenericThrowingClosureAudioDataAnalysisReceiver",
+                with: "func withAudioDataAnalysis<GenericA, GenericB>(_ arg1: GenericB, _ arg2: GenericA) throws -> GenericA.Result where GenericA: GenericThrowingClosureAudioDataAnalysisReceiver, GenericB == GenericA.Arg")
+            c = c.replacingOccurrences(
+                of: "public func withAudioDataAnalysis<GenericA, GenericB>(_ arg1: GenericB, _ arg2: GenericA) throws -> Any where GenericA: GenericThrowingClosureAudioDataAnalysisReceiver { fatalError() }",
+                with: "public func withAudioDataAnalysis<GenericA, GenericB>(_ arg1: GenericB, _ arg2: GenericA) throws -> GenericA.Result where GenericA: GenericThrowingClosureAudioDataAnalysisReceiver, GenericB == GenericA.Arg { fatalError() }")
+            // Fix: toAnyAsyncIterator()/toAnyAsyncSequence() are real extensions this module adds
+            // to the stdlib's AsyncIteratorProtocol/AsyncSequence (confirmed via swift-demangle:
+            // "(extension in SoundAnalysis):Swift.AsyncIteratorProtocol.toAnyAsyncIterator() ->
+            // SoundAnalysis.AnyAsyncIterator<A.Element>"), but the generator never emits them at
+            // all.
+            c += """
+
+            extension AsyncIteratorProtocol {
+                public func toAnyAsyncIterator() -> AnyAsyncIterator<Element> { fatalError() }
+            }
+            extension AsyncSequence {
+                public func toAnyAsyncSequence() -> AnyAsyncSequence<Element> { fatalError() }
+            }
+            """
         }
 
         if parser.defaultModule == "TabularData" {
