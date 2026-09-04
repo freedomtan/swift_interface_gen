@@ -1635,10 +1635,12 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             // descriptor UNLESS marked `@objc dynamic`, which suppresses both; (2) any additional
             // designated initializer causes NSObject's inherited bare `init()` to also become
             // exported (not part of the real ABI) UNLESS it's given a `private override init()`
-            // to explicitly claim/hide it. One symbol per type ("method lookup function for...")
-            // remains un-reproduced despite exhausting every declaration-shape combination tried
-            // (dynamic/open/final, formal NSSecureCoding conformance, required vs convenience
-            // init) -- left as an unresolved residual gap.
+            // to explicitly claim/hide it. A third gap, "method lookup function for X", was left
+            // unresolved at the time of this fix (see the later _typeMetadataAnchor fix in this
+            // block for the root cause and resolution: `final`-only members don't need a vtable
+            // slot, so Swift elides the whole class-metadata suite unless a non-final member
+            // exists -- SNDetectSoundRequest/_SNClassifySoundRequest already have one (`copy`),
+            // but SNDetectSoundActionsRequest's bare `override init()` doesn't).
             c = c.replacingOccurrences(
                 of: """
                 // --- ObjC Extension (bridge-header required) ---
@@ -1656,6 +1658,7 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                 with: """
                 open class SNDetectSoundActionsRequest: NSObject {
                     public override init() { super.init() }
+                    private var _typeMetadataAnchor: Int = 0
                 }
                 """)
             // Member order within these two extension bodies is nondeterministic across
