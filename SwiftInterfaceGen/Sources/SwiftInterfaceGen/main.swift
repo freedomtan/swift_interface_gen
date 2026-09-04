@@ -1816,6 +1816,17 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
             ] {
                 c = c.replacingOccurrences(of: old, with: new)
             }
+            // Fix: PubSub.AnySubject.fromCombine/toCombine's `any Subject<...>` existential
+            // param/return has the same shape as the runLocally/Publisher fix above -- generated
+            // with the correct constraints (`Self.Failure == B, ` + the `___SAME_TYPE_A___`
+            // marker for the primary-associated-type placeholder, confirmed via debug tracing),
+            // but stripConstrainedExistentialGenerics erases the whole clause since Subject
+            // (like Publisher) isn't in the `knownPrimaryAssociatedTypes` table even though it
+            // does support `any Subject<Output, Failure>` sugar. Convert directly, before both
+            // the marker-resolution pass and the strip pass run.
+            c = c.replacingOccurrences(
+                of: "any Subject<Self.Failure == B, ___SAME_TYPE_A___>",
+                with: "any Subject<A, B>")
         }
 
         if parser.defaultModule == "TabularData" {
