@@ -299,6 +299,37 @@ typedef NSString * HKVerifiableClinicalRecordSourceType;
                     implLines.append("@implementation SHSignature")
                     implLines.append("@end")
                 }
+                // Every OS_nw_*/OS_sec_* "C/system type" (Apple's os_object-style
+                // `OS_OBJECT_DECL` types, e.g. `nw_parameters_t` == `NSObject<OS_nw_parameters>
+                // *`) is a real ObjC *protocol*, confirmed via swift-demangle: every reference
+                // mangles as `__C.OS_nw_parameters` etc. (a `ProtocolList`/existential), never a
+                // class. A native Swift `public protocol OS_nw_parameters {}` mangles under the
+                // Network module instead of `__C`, so it never matches.
+                //
+                // Importing the real headers (`<Network/Network.h>`) doesn't surface these types
+                // either -- Network.framework's Swift overlay deliberately hides its underlying
+                // os_object protocols from Swift, so ClangImporter never sees them regardless of
+                // which header pulls them in. Forward-declaring our own `@protocol` stub works
+                // for the OS_nw_* ones (Network's own C headers are non-modular here, so Clang
+                // just emits a harmless "duplicate ... is ignored" warning and keeps whichever
+                // definition it saw first) -- but the OS_sec_* ones are declared inside the
+                // proper Clang module "Security", which enforces strict definition-identity
+                // checking and turns the same redeclaration into a hard "different definitions in
+                // different modules" error. For those 4, import Security's real headers instead
+                // of redeclaring them ourselves.
+                if currentModule == "Network" {
+                    for name in ["OS_nw_application_id", "OS_nw_array", "OS_nw_browse_descriptor",
+                                 "OS_nw_connection", "OS_nw_connection_group",
+                                 "OS_nw_connection_progress_report", "OS_nw_content_context",
+                                 "OS_nw_context", "OS_nw_endpoint", "OS_nw_error", "OS_nw_frame",
+                                 "OS_nw_group_descriptor", "OS_nw_interface", "OS_nw_listener",
+                                 "OS_nw_parameters", "OS_nw_path", "OS_nw_path_monitor",
+                                 "OS_nw_protocol_definition", "OS_nw_protocol_metadata",
+                                 "OS_nw_protocol_options", "OS_nw_proxy_config", "OS_nw_txt_record"] {
+                        bridgeHeader += "@protocol \(name)\n@end\n"
+                    }
+                    bridgeHeader += "#import <Security/Security.h>\n"
+                }
                 let bridgeImpl   = implLines.joined(separator: "\n")   + "\n"
                 try? bridgeHeader.write(toFile: "\(currentModule)Interface_bridge.h", atomically: true, encoding: .utf8)
                 try? bridgeImpl.write(toFile:   "\(currentModule)Interface_bridge.m", atomically: true, encoding: .utf8)
@@ -5134,35 +5165,31 @@ extension Array {
             c = c.replacingOccurrences(
                 of: "@escaping @Sendable ([Any]) async throws ->",
                 with: "@Sendable ([Any]) async throws ->")
+            // Fix: every OS_nw_*/OS_sec_* "C/system type" is a real ObjC *protocol* in the real
+            // ABI (Apple's os_object-style `OS_OBJECT_DECL` types, e.g. `nw_parameters_t` ==
+            // `NSObject<OS_nw_parameters> *`), not a class -- confirmed via swift-demangle on
+            // every stub referencing one: each mangles as a `ProtocolList`/existential ("_p"
+            // suffix), never a class reference ("C" suffix). Same root cause as SoundAnalysis's
+            // SNRequest/SNResult fix. Rename every bare reference to the existential form; the
+            // types themselves are forward-declared as real `@protocol`s in the bridge header
+            // (see the Network-specific block in `writeGeneratedFiles`/generateExports above),
+            // not declared here as native Swift protocols -- a native declaration would mangle
+            // under the Network module instead of `__C` and never match.
+            for name in ["OS_nw_application_id", "OS_nw_array", "OS_nw_browse_descriptor",
+                         "OS_nw_connection", "OS_nw_connection_group",
+                         "OS_nw_connection_progress_report", "OS_nw_content_context",
+                         "OS_nw_context", "OS_nw_endpoint", "OS_nw_error", "OS_nw_frame",
+                         "OS_nw_group_descriptor", "OS_nw_interface", "OS_nw_listener",
+                         "OS_nw_parameters", "OS_nw_path", "OS_nw_path_monitor",
+                         "OS_nw_protocol_definition", "OS_nw_protocol_metadata",
+                         "OS_nw_protocol_options", "OS_nw_proxy_config", "OS_nw_txt_record",
+                         "OS_sec_identity", "OS_sec_protocol_metadata", "OS_sec_protocol_options",
+                         "OS_sec_trust"] {
+                c = c.replaceWord(name, with: "any \(name)")
+            }
             c += """
-            
+
             // --- Auto-generated stubs for C/system types ---
-            public class OS_nw_application_id {}
-            public class OS_nw_array {}
-            public class OS_nw_browse_descriptor {}
-            public class OS_nw_connection {}
-            public class OS_nw_connection_group {}
-            public class OS_nw_connection_progress_report {}
-            public class OS_nw_content_context {}
-            public class OS_nw_context {}
-            public class OS_nw_endpoint {}
-            public class OS_nw_error {}
-            public class OS_nw_frame {}
-            public class OS_nw_group_descriptor {}
-            public class OS_nw_interface {}
-            public class OS_nw_listener {}
-            public class OS_nw_parameters {}
-            public class OS_nw_path {}
-            public class OS_nw_path_monitor {}
-            public class OS_nw_protocol_definition {}
-            public class OS_nw_protocol_metadata {}
-            public class OS_nw_protocol_options {}
-            public class OS_nw_proxy_config {}
-            public class OS_nw_txt_record {}
-            public class OS_sec_identity {}
-            public class OS_sec_protocol_metadata {}
-            public class OS_sec_protocol_options {}
-            public class OS_sec_trust {}
             public struct ether_addr {}
             public struct tls_ciphersuite_group_t {}
             public struct tls_ciphersuite_t {}
@@ -5263,9 +5290,9 @@ extension Array {
                 public typealias ProtocolStorage = DefaultProtocolStorage
                 public typealias Metadata = _NoApplicationProtocolMetadata
                 public var belowProtocol: Never { fatalError() }
-                public func configure(parameters: OS_nw_parameters) -> () {}
-                public func configureNestedStack(parameters: OS_nw_parameters) -> () {}
-                public func reconfigureNestedStack(connection: OS_nw_connection) -> () {}
+                public func configure(parameters: any OS_nw_parameters) -> () {}
+                public func configureNestedStack(parameters: any OS_nw_parameters) -> () {}
+                public func reconfigureNestedStack(connection: any OS_nw_connection) -> () {}
             }
             public struct _NoApplicationProtocolMetadata: NetworkMetadataProtocol {
                 public static func fromContentContext(context: NWConnection.ContentContext?, isComplete: Swift.Bool) -> Self? { return nil }
