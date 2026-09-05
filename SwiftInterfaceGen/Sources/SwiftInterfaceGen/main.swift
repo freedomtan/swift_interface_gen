@@ -2518,6 +2518,22 @@ extension Locale.Language {
                 of: "NSObject & HKDataCacheProviding.Type",
                 with: "(NSObject & HKDataCacheProviding).Type")
 
+            // Fix: HKCategoryType/HKQuantityType are real ObjC classes (confirmed present and
+            // API_AVAILABLE(macos) in HKObjectType.h), but -- like MLMultiArray/SHSignature in
+            // SoundAnalysis earlier this session -- they're only ever referenced as real
+            // get/param types, never extended, so isObjcBridged discovery never finds them.
+            // Parser.swift's fallback for an undiscovered "__C" type then generates a local
+            // native-struct shadow (`public struct __C_HKCategoryType {}` + `public typealias
+            // HKCategoryType = __C_HKCategoryType`), which mangles under the HealthKit module
+            // instead of `__C`, so every accessor/init referencing it permanently mismatches.
+            // Forward-declare the real classes instead and drop the shadow struct/typealias
+            // pair (same "reinstate the real bridge-header type" pattern as that earlier fix).
+            for name in ["HKCategoryType", "HKQuantityType"] {
+                c = c.replacingOccurrences(
+                    of: "public struct __C_\(name): Hashable, Codable, Sendable {}\npublic typealias \(name) = __C_\(name)\n",
+                    with: "")
+            }
+
             // CodableBox<A>/CodableBoxArray<A>/CodableBoxDictionary<A, B> each conditionally
             // conform to Equatable/Hashable (confirmed via their real conformance descriptors),
             // but the generator only emits the bare default-implementation extension without
