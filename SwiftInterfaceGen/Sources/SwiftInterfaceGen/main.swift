@@ -226,8 +226,27 @@ typedef NS_ENUM(NSInteger, SFSpeechErrorCode) {
 @end
 @protocol HKDataCacheProviding <NSObject>
 @end
-typedef NSString * HKVerifiableClinicalRecordCredentialType;
-typedef NSString * HKVerifiableClinicalRecordSourceType;
+typedef NSString *HKVerifiableClinicalRecordCredentialType NS_STRING_ENUM;
+typedef NSString *HKVerifiableClinicalRecordSourceType NS_STRING_ENUM;
+typedef NS_ENUM(NSInteger, HKCategoryValueSleepAnalysis) {
+    HKCategoryValueSleepAnalysisInBed = 0
+};
+typedef NS_OPTIONS(NSUInteger, HKStatisticsOptions) {
+    HKStatisticsOptionNone = 0
+};
+typedef NS_ENUM(NSInteger, HKWorkoutEffortRelationshipQueryOptions) {
+    HKWorkoutEffortRelationshipQueryOptionsNone = 0
+};
+typedef NS_ENUM(NSInteger, HKDatabaseAssertionContextType) {
+    HKDatabaseAssertionContextTypeUnspecified = 0
+};
+typedef NS_ENUM(NSInteger, HKSleepDaySummaryQueryOptions) {
+    HKSleepDaySummaryQueryOptionsNone = 0
+};
+typedef struct {
+    NSInteger start;
+    NSInteger end;
+} HKDayIndexRange;
 
 """
                 }
@@ -2562,7 +2581,9 @@ extension Locale.Language {
                          "HKWorkoutZoneConfigurationWrapper", "HKWorkoutZoneDurationWrapper",
                          "HKWorkoutZoneGroupWrapper",
                          "HKWorkoutZoneHeartRateConfigurationSettingsWrapper",
-                         "HKWorkoutZoneWrapper"] {
+                         "HKWorkoutZoneWrapper", "HKDatabaseAssertionContextType", "HKDayIndexRange",
+                         "HKSleepDaySummaryQueryOptions", "HKStatisticsOptions",
+                         "HKWorkoutEffortRelationshipQueryOptions", "HKCategoryValueSleepAnalysis"] {
                 c = c.replacingOccurrences(
                     of: "public struct __C_\(name): Hashable, Codable, Sendable {}\npublic typealias \(name) = __C_\(name)\n",
                     with: "")
