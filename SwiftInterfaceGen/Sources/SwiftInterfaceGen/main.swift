@@ -2518,17 +2518,51 @@ extension Locale.Language {
                 of: "NSObject & HKDataCacheProviding.Type",
                 with: "(NSObject & HKDataCacheProviding).Type")
 
-            // Fix: HKCategoryType/HKQuantityType are real ObjC classes (confirmed present and
-            // API_AVAILABLE(macos) in HKObjectType.h), but -- like MLMultiArray/SHSignature in
-            // SoundAnalysis earlier this session -- they're only ever referenced as real
-            // get/param types, never extended, so isObjcBridged discovery never finds them.
-            // Parser.swift's fallback for an undiscovered "__C" type then generates a local
-            // native-struct shadow (`public struct __C_HKCategoryType {}` + `public typealias
-            // HKCategoryType = __C_HKCategoryType`), which mangles under the HealthKit module
-            // instead of `__C`, so every accessor/init referencing it permanently mismatches.
-            // Forward-declare the real classes instead and drop the shadow struct/typealias
-            // pair (same "reinstate the real bridge-header type" pattern as that earlier fix).
-            for name in ["HKCategoryType", "HKQuantityType"] {
+            // Fix: dozens of HK* types are real ObjC classes, but -- like MLMultiArray/
+            // SHSignature in SoundAnalysis earlier this session -- they're only ever referenced
+            // as real get/param types, never extended, so isObjcBridged discovery never finds
+            // them. Parser.swift's fallback for an undiscovered "__C" type then generates a
+            // local native-struct shadow (`public struct __C_HKCategoryType {}` + `public
+            // typealias HKCategoryType = __C_HKCategoryType`), which mangles under the HealthKit
+            // module instead of `__C`, so every accessor/init referencing it permanently
+            // mismatches. Every name below is ALREADY forward-declared as a real `@interface` in
+            // the bridge header (found via the standard bridgedTypes discovery path through some
+            // other, related symbol) -- so removing just the Swift-side shadow struct/typealias
+            // pair is enough for the real bridged declaration to take over (confirmed first for
+            // HKCategoryType/HKQuantityType; this generalizes that fix to every other HK* name
+            // with the identical shadow-vs-already-bridged shape).
+            for name in ["HKCategoryType", "HKQuantityType", "HKActivitySummary", "HKAttachment",
+                         "HKAttachmentStore", "HKAudiogramSample",
+                         "HKBloodPressureClassificationCategoryData",
+                         "HKBloodPressureClassificationEvaluator",
+                         "HKBloodPressureClassificationManager", "HKCalendarCache",
+                         "HKCategorySample", "HKCharacteristicType", "HKClinicalRecord",
+                         "HKClinicalType", "HKCloudSyncManagerRecordTaskRecord", "HKCorrelation",
+                         "HKCorrelationType",
+                         "HKCyclingPowerZonesConfigurationWrapper",
+                         "HKDatabaseAccessibilityAssertion", "HKDocumentType",
+                         "HKElectrocardiogram", "HKElectrocardiogramQuery",
+                         "HKElectrocardiogramVoltageMeasurement", "HKGAD7Assessment",
+                         "HKHealthRecordsStore", "HKHealthStore", "HKHeartbeatSeriesSample",
+                         "HKHeartRateSummaryStatistics", "HKHeartRateSummaryStatisticsBucket",
+                         "HKKeyValueDomain", "HKLiveWorkoutBuilder", "HKLiveWorkoutZoneUpdate",
+                         "HKMCPregnancyDatesFactory", "HKMCPregnancyModel", "HKMedicationDoseEvent",
+                         "HKObject", "HKObjectType", "HKPauseRingsSchedule", "HKPHQ9Assessment",
+                         "HKQuantity", "HKQuantityDatum", "HKQuantityRange", "HKQuantitySample",
+                         "HKQuery", "HKQueryAnchor", "HKQueryDescriptor",
+                         "HKQueryServerConfiguration", "HKRollingBaselineConfiguration", "HKSample",
+                         "HKSampleType", "HKSampleTypeChange", "HKScoredAssessmentType",
+                         "HKSleepDaySummary", "HKSleepDaySummaryCollection",
+                         "HKSleepDaySummaryCollectionQuery", "HKSleepDaySummaryQuery",
+                         "HKSleepSchedule", "HKSource", "HKStateOfMind", "HKStatistics",
+                         "HKStatisticsCollection", "HKUnit", "HKUserAnnotatedMedication",
+                         "HKVerifiableClinicalRecord", "HKVisionPrescription", "HKWorkout",
+                         "HKWorkoutActivity", "HKWorkoutActivityNodeWrapper", "HKWorkoutBuilder",
+                         "HKWorkoutConfiguration", "HKWorkoutRoute",
+                         "HKWorkoutZoneConfigurationWrapper", "HKWorkoutZoneDurationWrapper",
+                         "HKWorkoutZoneGroupWrapper",
+                         "HKWorkoutZoneHeartRateConfigurationSettingsWrapper",
+                         "HKWorkoutZoneWrapper"] {
                 c = c.replacingOccurrences(
                     of: "public struct __C_\(name): Hashable, Codable, Sendable {}\npublic typealias \(name) = __C_\(name)\n",
                     with: "")
