@@ -2590,6 +2590,18 @@ extension Locale.Language {
                     with: "")
             }
 
+            // HKWorkoutMetric.init(coder:) is NOT failable in the real ABI (confirmed via
+            // swift-demangle -expand: return type is the plain HKWorkoutMetric class, not
+            // Optional<HKWorkoutMetric>) -- unlike the generic NSCoding boilerplate's
+            // `init?(coder:)` that every other NSObject/NSCoding class in this file correctly
+            // uses. Fix just this one class.
+            if let regex = try? NSRegularExpression(
+                pattern: "public required init\\?\\(coder: NSCoder\\) \\{\\}\\n\\}\\n+@_fixed_layout public class HKWorkoutMetricsDataSource", options: []) {
+                c = regex.stringByReplacingMatches(
+                    in: c, range: NSRange(c.startIndex..<c.endIndex, in: c),
+                    withTemplate: "public required init(coder: NSCoder) { fatalError() }\n}\n@_fixed_layout public class HKWorkoutMetricsDataSource")
+            }
+
             // CodableBox<A>/CodableBoxArray<A>/CodableBoxDictionary<A, B> each conditionally
             // conform to Equatable/Hashable (confirmed via their real conformance descriptors),
             // but the generator only emits the bare default-implementation extension without
