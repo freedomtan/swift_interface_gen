@@ -2583,7 +2583,8 @@ extension Locale.Language {
                          "HKWorkoutZoneHeartRateConfigurationSettingsWrapper",
                          "HKWorkoutZoneWrapper", "HKDatabaseAssertionContextType", "HKDayIndexRange",
                          "HKSleepDaySummaryQueryOptions", "HKStatisticsOptions",
-                         "HKWorkoutEffortRelationshipQueryOptions", "HKCategoryValueSleepAnalysis"] {
+                         "HKWorkoutEffortRelationshipQueryOptions", "HKCategoryValueSleepAnalysis",
+                         "NSLocale"] {
                 c = c.replacingOccurrences(
                     of: "public struct __C_\(name): Hashable, Codable, Sendable {}\npublic typealias \(name) = __C_\(name)\n",
                     with: "")
