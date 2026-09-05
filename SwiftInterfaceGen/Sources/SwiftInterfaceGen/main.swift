@@ -5187,13 +5187,17 @@ extension Array {
                          "OS_sec_trust"] {
                 c = c.replaceWord(name, with: "any \(name)")
             }
+            // Fix: tls_ciphersuite_t/tls_ciphersuite_group_t/tls_protocol_version_t mangle as
+            // `Security.tls_ciphersuite_t` etc. in the real ABI (confirmed via swift-demangle:
+            // `kind=Structure, Module="__C"` -- a real ClangImporter-bridged struct from
+            // Security's headers, per Network's own .swiftinterface: "Security::tls_ciphersuite_t"),
+            // not a native Swift struct. Removed the native shadow declarations (previously
+            // `public struct tls_ciphersuite_t {}` etc. below) now that `<Security/Security.h>`
+            // is imported above -- the real bridged types resolve on their own.
             c += """
 
             // --- Auto-generated stubs for C/system types ---
             public struct ether_addr {}
-            public struct tls_ciphersuite_group_t {}
-            public struct tls_ciphersuite_t {}
-            public struct tls_protocol_version_t {}
 
             """
             // DatagramUpperHarness/StreamUpperHarness/UpperHarness<A> conform to the
@@ -5254,6 +5258,42 @@ extension Array {
                     public func handleOutboundAbortedEvent(_ arg1: ProtocolInstanceReference, error: NetworkError?) -> () {}
                     public func attachLowerProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
                     public func attachLowerStreamProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> () {}
+                """)
+            // Fix: TLS/DTLS/QUIC.TLS's cipher-suite/version-negotiation configuration methods
+            // (minVersion/maxVersion/version(min:max:)/cipherSuites/appendCipherSuite/
+            // cipherSuiteGroups) are entirely missing from the generated interface -- the parser
+            // couldn't resolve their `Security.tls_ciphersuite_t`/`tls_protocol_version_t`/
+            // `tls_ciphersuite_group_t` parameter types (real ClangImporter-bridged structs from
+            // Security's headers, confirmed via swift-demangle and Network's own .swiftinterface:
+            // "Security::tls_ciphersuite_t") and silently dropped the methods rather than
+            // rendering a stub. Add them directly, qualified with the Security module name so
+            // they resolve now that `<Security/Security.h>` is imported above.
+            c = c.replacingOccurrences(
+                of: "public func version() -> TLS { fatalError() }",
+                with: """
+                public func version() -> TLS { fatalError() }
+                    public func minVersion(_ arg1: Security.tls_protocol_version_t) -> TLS { fatalError() }
+                    public func maxVersion(_ arg1: Security.tls_protocol_version_t) -> TLS { fatalError() }
+                    public func version(min: Security.tls_protocol_version_t?, max: Security.tls_protocol_version_t?) -> TLS { fatalError() }
+                    public func cipherSuites(_ arg1: [Security.tls_ciphersuite_t]) -> TLS { fatalError() }
+                    public func appendCipherSuite(_ arg1: Security.tls_ciphersuite_t) -> TLS { fatalError() }
+                    public func cipherSuiteGroups(_ arg1: [Security.tls_ciphersuite_group_t]) -> TLS { fatalError() }
+                """)
+            c = c.replacingOccurrences(
+                of: "public func version() -> DTLS { fatalError() }",
+                with: """
+                public func version() -> DTLS { fatalError() }
+                    public func version(min: Security.tls_protocol_version_t?, max: Security.tls_protocol_version_t?) -> DTLS { fatalError() }
+                    public func cipherSuites(_ arg1: [Security.tls_ciphersuite_t]) -> DTLS { fatalError() }
+                    public func cipherSuiteGroups(_ arg1: [Security.tls_ciphersuite_group_t]) -> DTLS { fatalError() }
+                """)
+            c = c.replacingOccurrences(
+                of: "public func earlyDataEnabled(_ arg1: Swift.Bool) -> QUIC { fatalError() }",
+                with: """
+                public func earlyDataEnabled(_ arg1: Swift.Bool) -> QUIC { fatalError() }
+                        public func cipherSuites(_ arg1: [Security.tls_ciphersuite_t]) -> QUIC { fatalError() }
+                        public func appendCipherSuite(_ arg1: Security.tls_ciphersuite_t) -> QUIC { fatalError() }
+                        public func ciphersuiteGroups(_ arg1: [Security.tls_ciphersuite_group_t]) -> QUIC { fatalError() }
                 """)
             // UpperHarness<A>'s lowerProtocol init parameter and `lower` property are both
             // typed `A.PairedLinkage` in the real ABI (`swift-demangle -expand` on the init
