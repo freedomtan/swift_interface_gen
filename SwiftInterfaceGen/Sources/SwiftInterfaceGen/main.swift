@@ -4599,6 +4599,37 @@ extension AttributeDynamicLookup {
             // dead, unreferenced placeholder struct `os_Logger` (never used anywhere) as a
             // byproduct of failing to resolve the qualified `os.Logger` extension target. Drop
             // the dead placeholder and add the real extension members directly.
+            // __BridgedLocale.performAsCurrent was silently dropped entirely (no stub, no
+            // declaration at all) -- same class of gap as the os.Logger properties above.
+            c = c.replacingOccurrences(
+                of: "public static var currentNSLocale: NSLocale? { get { return nil } }",
+                with: "public static var currentNSLocale: NSLocale? { get { return nil } }\n    public static func performAsCurrent(nsLocale: NSLocale, _ arg1: () -> ()) -> () { arg1() }")
+            // Foundation.Locale.hk_performAsCurrent/Foundation.Calendar.localGregorianCalendar/
+            // CoreGraphics.CGFloat.chartPointGapThreshold were likewise silently dropped entirely
+            // -- each is an extension on a real, already-resolvable Foundation/CoreGraphics type,
+            // so (unlike Coherence.CRContext below) the parser's unresolved-qualified-extension
+            // fallback never even left behind a placeholder struct as a clue.
+            c += """
+
+            extension Locale {
+                public func hk_performAsCurrent(_ arg1: () throws -> ()) throws -> () { try arg1() }
+                public func hk_performAsCurrent(_ arg1: () async throws -> ()) async throws -> () { try await arg1() }
+            }
+            extension Calendar {
+                public static var localGregorianCalendar: Calendar { get { fatalError() } }
+            }
+            extension CGFloat {
+                public static func chartPointGapThreshold(for: CGFloat, chartHeight: CGFloat, cornerRadius: CGFloat) -> CGFloat { fatalError() }
+            }
+
+            """
+            // Coherence.CRContext.sharedCoherenceContext was also dropped (leaving behind a dead
+            // placeholder struct, `Coherence_CRContext`, as a byproduct -- same shape as os_Logger
+            // above), but unlike the others this one is NOT fixable here: `CRContext` doesn't
+            // exist in the `Coherence` module on this SDK at all (confirmed: "no type named
+            // 'CRContext' in module 'Coherence'" even with plain `import Coherence` already
+            // present) -- it's presumably a private/internal type not exposed in this SDK's
+            // Coherence.swiftinterface. Leave the dead placeholder struct as harmless dead code.
             c = c.replacingOccurrences(
                 of: "public struct os_Logger: Hashable, Codable, Sendable {}\n",
                 with: """
