@@ -2840,6 +2840,28 @@ extension Locale.Language {
             c = c.replacingOccurrences(
                 of: "public struct SampleBaseConfiguration<A>: Codable, Configuration.Constructible, Configuration.SampleBase, Configuration.WithLimit, Configuration.WithPredicate, Configuration.WithSortDescriptor {",
                 with: "public struct SampleBaseConfiguration<A>: Codable, Configuration.Constructible, Configuration.SampleBase, Configuration.WithLimit, Configuration.WithPredicate, Configuration.WithSortDescriptor {\n    public typealias PredicatedModelKind = A\n    public typealias SortedModelKind = A\n    public typealias SampleKind = A")
+
+            // QueryDescriptorEvaluator's evaluate_list/evaluate_batched/evaluate_iterate/observe
+            // requirements all carry a phantom third (resp. second) generic parameter
+            // `GenericB == GenericA.ConfigurationKind` in the real ABI (confirmed via
+            // swift-demangle -expand: every one of these method/dispatch-thunk/method-descriptor
+            // symbols mangles as `evaluate_list<A, B, C where ..., B1 == A1.ConfigurationKind,
+            // ...>`/`observe<A, B where ..., B1 == A1.ConfigurationKind>`) that's never referenced
+            // in the function's own parameter/return types, so the generator has no way to infer
+            // it from the TBD signature alone -- it just affects the generic-parameter depth/count
+            // used in mangling. Add it to every requirement in this protocol.
+            c = c.replacingOccurrences(
+                of: "<GenericA, GenericC>(queryDescriptor: GenericA",
+                with: "<GenericA, GenericB, GenericC>(queryDescriptor: GenericA")
+            c = c.replacingOccurrences(
+                of: "<GenericA>(observationDescriptor: GenericA",
+                with: "<GenericA, GenericB>(observationDescriptor: GenericA")
+            c = c.replacingOccurrences(
+                of: "where GenericA: ListQueryDescriptorProtocol,  GenericC:",
+                with: "where GenericA: ListQueryDescriptorProtocol,  GenericB == GenericA.ConfigurationKind,  GenericC:")
+            c = c.replacingOccurrences(
+                of: "where GenericA: ObservationQueryDescriptorProtocol",
+                with: "where GenericA: ObservationQueryDescriptorProtocol,  GenericB == GenericA.ConfigurationKind")
         }
 
         // Fix: AttributeScopes.ConfidenceAttribute/TimeRangeAttribute conform to
