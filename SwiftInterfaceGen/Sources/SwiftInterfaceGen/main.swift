@@ -4592,6 +4592,27 @@ extension AttributeDynamicLookup {
                     of: "public struct \(name): Hashable, Sendable {}",
                     with: "")
             }
+            // A handful of static `os.Logger`/`os.OSSignposter`-typed properties (workouts,
+            // types, infrastructure, dataCollection, database, cloudSync, cloudSyncSignposter)
+            // were silently dropped entirely (no stub, no declaration at all) instead of being
+            // rendered as an extension on the real `Logger` type -- the parser instead emitted a
+            // dead, unreferenced placeholder struct `os_Logger` (never used anywhere) as a
+            // byproduct of failing to resolve the qualified `os.Logger` extension target. Drop
+            // the dead placeholder and add the real extension members directly.
+            c = c.replacingOccurrences(
+                of: "public struct os_Logger: Hashable, Codable, Sendable {}\n",
+                with: """
+                extension Logger {
+                    public static var workouts: Logger { get { fatalError() } }
+                    public static var types: Logger { get { fatalError() } }
+                    public static var infrastructure: Logger { get { fatalError() } }
+                    public static var dataCollection: Logger { get { fatalError() } }
+                    public static var database: Logger { get { fatalError() } }
+                    public static var cloudSync: Logger { get { fatalError() } }
+                    public static var cloudSyncSignposter: OSSignposter { get { fatalError() } }
+                }
+
+                """)
             // _HKQuantityDistributionQueryDescriptor is missing its contextStyle/options
             // properties entirely (only its init takes them as parameters) -- confirmed via
             // swift-demangle: the real ABI has getter/setter/modify/property-descriptor symbols
