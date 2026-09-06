@@ -2622,6 +2622,35 @@ extension Locale.Language {
                 of: "extension SleepSessionQuery.Descriptor {\n    public func result(for: HKHealthStore) async throws -> [A] { return [] }\n}",
                 with: "extension SleepSessionQuery.Descriptor where A == B {\n    public func result(for: HKHealthStore) async throws -> [A] { return [] }\n}")
 
+            // Configuration.SampleBase/SampleSubtype's sortDescriptors/sampleConfiguration and
+            // SampleSubtype's default-implementation extension all render generic parameters as
+            // bare `Any` where the real ABI ties them to WithPredicate's PredicatedModelKind
+            // associated type (confirmed via swift-demangle: e.g.
+            // `Configuration.SampleBase.sortDescriptors.getter :
+            // [Foundation.SortDescriptor<A.PredicatedModelKind>]`,
+            // `Configuration.SampleSubtype.sampleConfiguration.getter :
+            // HealthKit.SampleBaseConfiguration<A.PredicatedModelKind>`) -- unusual in that
+            // sortDescriptors (a WithSortDescriptor-shaped member) is keyed by
+            // PredicatedModelKind rather than SortedModelKind, but that's what the real ABI has.
+            c = c.replacingOccurrences(
+                of: "var sortDescriptors: [SortDescriptor<Self.SortedModelKind>] { get }",
+                with: "var sortDescriptors: [SortDescriptor<Self.PredicatedModelKind>] { get }")
+            c = c.replacingOccurrences(
+                of: "var sampleConfiguration: SampleBaseConfiguration<Any> { get set }",
+                with: "var sampleConfiguration: SampleBaseConfiguration<Self.PredicatedModelKind> { get set }")
+            if let declRange = c.range(of: "extension Configuration.SampleSubtype {") {
+                var depth = 1
+                var idx = declRange.upperBound
+                while depth > 0 && idx < c.endIndex {
+                    if c[idx] == "{" { depth += 1 } else if c[idx] == "}" { depth -= 1 }
+                    idx = c.index(after: idx)
+                }
+                let bodyRange = declRange.lowerBound..<idx
+                var body = String(c[bodyRange])
+                body = body.replacingOccurrences(of: "<Any>", with: "<Self.PredicatedModelKind>")
+                c.replaceSubrange(bodyRange, with: body)
+            }
+
             // NSQualityOfService is another instance of the same "__C" shadow-type fallback
             // (HKQueryAttributes.qualityOfService), but unlike the others, Swift's API notes
             // rename the ObjC enum to bare `QualityOfService` for Swift source -- referencing it
