@@ -4599,6 +4599,38 @@ extension AttributeDynamicLookup {
             // dead, unreferenced placeholder struct `os_Logger` (never used anywhere) as a
             // byproduct of failing to resolve the qualified `os.Logger` extension target. Drop
             // the dead placeholder and add the real extension members directly.
+            // DateInterval/DateComponents/Date's whole set of sleep-day-related extension
+            // members were silently dropped entirely -- same class of gap as the os.Logger
+            // properties and __BridgedLocale.performAsCurrent below, just a much larger cohesive
+            // batch (confirmed via swift-demangle: e.g.
+            // `Foundation.DateInterval.overlappingSleepDays(in:) -> [HealthKit.SleepDay]`).
+            c += """
+
+            extension DateInterval {
+                public func overlappingSleepDays(in calendar: Calendar) -> [SleepDay] { return [] }
+                public var latestPossibleSleepDay: SleepDay { get { fatalError() } }
+                public var earliestPossibleSleepDay: SleepDay { get { fatalError() } }
+                public func overlappingDayIndexRange(in calendar: Calendar) -> ClosedRange<DayIndex> { fatalError() }
+                public func overlappingSleepDayRange(in calendar: Calendar) -> ClosedRange<SleepDay> { fatalError() }
+                public func overlappingMorningIndexRange(in calendar: Calendar) -> ClosedRange<DayIndex> { fatalError() }
+                public var cascadeAffectingSleepDayRange: ClosedRange<SleepDay> { get { fatalError() } }
+                public func split(_ arg1: Swift.Int) -> [DateInterval] { return [] }
+                public func hk_union(with arg1: DateInterval) -> DateInterval { fatalError() }
+            }
+            extension DateComponents {
+                public var clockTimeSafeComponents: DateComponents { get { fatalError() } }
+                public var sleepClockTime: SleepClockTime { get { fatalError() } }
+                public func applying(_ arg1: SleepClockTime) -> DateComponents { fatalError() }
+            }
+            extension Date {
+                public var latestPossibleSleepDay: SleepDay { get { fatalError() } }
+                public var earliestPossibleSleepDay: SleepDay { get { fatalError() } }
+                public var latestPossibleDayIndexInAnyTimeZone: DayIndex { get { fatalError() } }
+                public var earliestPossibleDayIndexInAnyTimeZone: DayIndex { get { fatalError() } }
+                public func sleepDay(in calendar: Calendar) -> SleepDay { fatalError() }
+            }
+
+            """
             // __BridgedLocale.performAsCurrent was silently dropped entirely (no stub, no
             // declaration at all) -- same class of gap as the os.Logger properties above.
             c = c.replacingOccurrences(
