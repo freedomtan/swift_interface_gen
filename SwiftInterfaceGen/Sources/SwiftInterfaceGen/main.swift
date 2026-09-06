@@ -212,16 +212,16 @@ typedef NS_ENUM(NSInteger, SFSpeechErrorCode) {
 
 """
                 }
-                // HKWorkoutMetricsDelegate is a real @objc protocol (has @required/@optional
-                // sections per the ObjC runtime metadata) referenced only as an optional
-                // property type (`var delegate: HKWorkoutMetricsDelegate?`) — its own
-                // declaration never emits a demangleable ABI symbol into the TBD at all, so
-                // the parser has nothing to build a node from. Stub it as an @objc protocol so
-                // the reference resolves.
+                // HKDataCacheContext/HKDataCacheProviding are referenced only as optional
+                // property types -- their own declarations never emit a demangleable ABI symbol
+                // into the TBD at all, so the parser has nothing to build a node from. Stub them
+                // as @objc protocols so the reference resolves. (HKWorkoutMetricsDelegate looks
+                // like the same shape but ISN'T ObjC -- confirmed via swift-demangle -expand,
+                // HKWorkoutMetricsDataSource.delegate's getter/setter/modify mangle it under the
+                // HealthKit module, not __C -- so it's declared natively in postProcess instead,
+                // below.)
                 if currentModule == "HealthKit" {
                     bridgeHeader += """
-@protocol HKWorkoutMetricsDelegate <NSObject>
-@end
 @protocol HKDataCacheContext <NSObject>
 @end
 @protocol HKDataCacheProviding <NSObject>
@@ -4548,6 +4548,24 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "public init(quantityType: HKQuantityType, startDate: Date, endDate: Date, contextStyle: _HKQuantityDistributionStyle, predicate: NSPredicate?, anchorDate: Date, intervalComponents: DateComponents, histogramAnchor: HKQuantity?, histogramBucketSize: HKQuantity, options: _HKQuantityDistributionOptions) { fatalError() }",
                 with: "public init(quantityType: HKQuantityType, startDate: Date, endDate: Date, contextStyle: _HKQuantityDistributionStyle, predicate: NSPredicate?, anchorDate: Date, intervalComponents: DateComponents, histogramAnchor: HKQuantity?, histogramBucketSize: HKQuantity, options: _HKQuantityDistributionOptions) { fatalError() }\n    public var contextStyle: _HKQuantityDistributionStyle { get { fatalError() } set {} }\n    public var options: _HKQuantityDistributionOptions { get { fatalError() } set {} }")
+
+            // HKWorkoutMetricsDelegate is a native Swift protocol, not an ObjC one (confirmed via
+            // swift-demangle -expand: HKWorkoutMetricsDataSource.delegate's getter/setter/modify
+            // mangle it under the HealthKit module, not __C) -- but it never emits a demangleable
+            // ABI symbol of its own into the TBD, so the parser has nothing to build a node from.
+            // Declare it directly (right after HKWorkoutMetricsDataSource's own closing brace,
+            // found via brace-matching since member order isn't deterministic) rather than via
+            // the bridge header (which would mangle it under __C instead, same mismatch class as
+            // the OS_nw_*/SNRequest protocol-not-class fixes).
+            if let declRange = c.range(of: "@_fixed_layout public class HKWorkoutMetricsDataSource {") {
+                var depth = 1
+                var idx = declRange.upperBound
+                while depth > 0 && idx < c.endIndex {
+                    if c[idx] == "{" { depth += 1 } else if c[idx] == "}" { depth -= 1 }
+                    idx = c.index(after: idx)
+                }
+                c.insert(contentsOf: "\npublic protocol HKWorkoutMetricsDelegate: AnyObject {\n}", at: idx)
+            }
         }
 
         var sentinelProtocols = [String]()
