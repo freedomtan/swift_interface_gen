@@ -2599,6 +2599,29 @@ extension Locale.Language {
                     with: "")
             }
 
+            // HKCurrentActivityCacheQueryResult was left as a native shadow struct in an earlier
+            // commit this session because removing it broke
+            // HKCurrentActivityCacheQueryDescriptor.results(for:)'s
+            // `AsyncStream<HKCurrentActivityCacheQueryResult>` (the shadow struct's incidental
+            // Sendable conformance was the only thing making that compile, since the real bridged
+            // ObjC class isn't Sendable) -- but keeping the shadow meant `result(for:)` and its
+            // async function pointer permanently mismatch the real ABI (confirmed via
+            // swift-demangle: `HKCurrentActivityCacheQueryDescriptor.result(for:)` mangles its
+            // return type as `__C.HKCurrentActivityCacheQueryResult?`, not the HealthKit-module
+            // shadow). Remove the shadow and explicitly mark the real bridged class
+            // `@unchecked Sendable` instead, which is what results(for:) actually needs.
+            c = c.replacingOccurrences(
+                of: "public struct __C_HKCurrentActivityCacheQueryResult: Hashable, Codable, Sendable {}\npublic typealias HKCurrentActivityCacheQueryResult = __C_HKCurrentActivityCacheQueryResult\n",
+                with: "extension HKCurrentActivityCacheQueryResult: @unchecked Sendable {}\n")
+
+            // SleepSessionQuery.Descriptor's result(for:) extension is missing a conditional
+            // constraint (confirmed via swift-demangle: the real ABI mangles the extension as
+            // `SleepSessionQuery.Descriptor< where A == A1>`, i.e. conditioned on the enclosing
+            // SleepSessionQuery<A>'s own model type equaling Descriptor<B>'s -- `where A == B`).
+            c = c.replacingOccurrences(
+                of: "extension SleepSessionQuery.Descriptor {\n    public func result(for: HKHealthStore) async throws -> [A] { return [] }\n}",
+                with: "extension SleepSessionQuery.Descriptor where A == B {\n    public func result(for: HKHealthStore) async throws -> [A] { return [] }\n}")
+
             // NSQualityOfService is another instance of the same "__C" shadow-type fallback
             // (HKQueryAttributes.qualityOfService), but unlike the others, Swift's API notes
             // rename the ObjC enum to bare `QualityOfService` for Swift source -- referencing it
