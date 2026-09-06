@@ -253,6 +253,7 @@ typedef NS_ENUM(NSInteger, _HKQuantityDistributionStyle) {
 typedef NS_OPTIONS(NSUInteger, _HKQuantityDistributionOptions) {
     _HKQuantityDistributionOptionsNone = 0
 };
+#import <CoreLocation/CoreLocation.h>
 
 """
                 }
@@ -2591,7 +2592,8 @@ extension Locale.Language {
                          "HKSleepDaySummaryQueryOptions", "HKStatisticsOptions",
                          "HKWorkoutEffortRelationshipQueryOptions", "HKCategoryValueSleepAnalysis",
                          "NSLocale", "_HKQuantityDistributionStyle",
-                         "_HKQuantityDistributionOptions", "_HKQuantityDistributionData"] {
+                         "_HKQuantityDistributionOptions", "_HKQuantityDistributionData",
+                         "CLLocation"] {
                 c = c.replacingOccurrences(
                     of: "public struct __C_\(name): Hashable, Codable, Sendable {}\npublic typealias \(name) = __C_\(name)\n",
                     with: "")
