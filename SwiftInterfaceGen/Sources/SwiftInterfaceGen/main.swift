@@ -4525,6 +4525,30 @@ extension AttributeDynamicLookup {
                 of: "public struct _LTTextSessionDelegate: Hashable, Sendable {}",
                 with: "")
         }
+        if parser.defaultModule == "HealthKit" {
+            // _HKQuantityDistributionStyle/_HKQuantityDistributionOptions have real NS_ENUM/
+            // NS_OPTIONS bridge-header forward-declarations (added in generateExports), but the
+            // generic "undeclared SPI type" fallback just above still renders a colliding native
+            // Swift struct for them too, since it only checks for a Swift-source declaration
+            // line, not a bridge-header one. Confirmed via a minimal repro that Swift doesn't
+            // even raise a redeclaration error for this collision -- the native struct just
+            // silently shadows the real ClangImported type at every use site, so it compiles fine
+            // but keeps mangling under HealthKit instead of __C. Same fix as Translation's
+            // _LTTextSessionDelegate above: strip the redundant native stub after the fallback
+            // runs, letting the real bridged declaration resolve instead.
+            for name in ["_HKQuantityDistributionStyle", "_HKQuantityDistributionOptions"] {
+                c = c.replacingOccurrences(
+                    of: "public struct \(name): Hashable, Sendable {}",
+                    with: "")
+            }
+            // _HKQuantityDistributionQueryDescriptor is missing its contextStyle/options
+            // properties entirely (only its init takes them as parameters) -- confirmed via
+            // swift-demangle: the real ABI has getter/setter/modify/property-descriptor symbols
+            // for both.
+            c = c.replacingOccurrences(
+                of: "public init(quantityType: HKQuantityType, startDate: Date, endDate: Date, contextStyle: _HKQuantityDistributionStyle, predicate: NSPredicate?, anchorDate: Date, intervalComponents: DateComponents, histogramAnchor: HKQuantity?, histogramBucketSize: HKQuantity, options: _HKQuantityDistributionOptions) { fatalError() }",
+                with: "public init(quantityType: HKQuantityType, startDate: Date, endDate: Date, contextStyle: _HKQuantityDistributionStyle, predicate: NSPredicate?, anchorDate: Date, intervalComponents: DateComponents, histogramAnchor: HKQuantity?, histogramBucketSize: HKQuantity, options: _HKQuantityDistributionOptions) { fatalError() }\n    public var contextStyle: _HKQuantityDistributionStyle { get { fatalError() } set {} }\n    public var options: _HKQuantityDistributionOptions { get { fatalError() } set {} }")
+        }
 
         var sentinelProtocols = [String]()
         var searchRange = c.startIndex..<c.endIndex
