@@ -2622,19 +2622,14 @@ extension Locale.Language {
                 of: "extension SleepSessionQuery.Descriptor {\n    public func result(for: HKHealthStore) async throws -> [A] { return [] }\n}",
                 with: "extension SleepSessionQuery.Descriptor where A == B {\n    public func result(for: HKHealthStore) async throws -> [A] { return [] }\n}")
 
-            // Configuration.SampleBase/SampleSubtype's sortDescriptors/sampleConfiguration and
-            // SampleSubtype's default-implementation extension all render generic parameters as
-            // bare `Any` where the real ABI ties them to WithPredicate's PredicatedModelKind
-            // associated type (confirmed via swift-demangle: e.g.
-            // `Configuration.SampleBase.sortDescriptors.getter :
-            // [Foundation.SortDescriptor<A.PredicatedModelKind>]`,
+            // Configuration.SampleSubtype's sampleConfiguration and its default-implementation
+            // extension render generic parameters as bare `Any` where the real ABI ties them to
+            // WithPredicate's PredicatedModelKind associated type (confirmed via swift-demangle:
             // `Configuration.SampleSubtype.sampleConfiguration.getter :
-            // HealthKit.SampleBaseConfiguration<A.PredicatedModelKind>`) -- unusual in that
-            // sortDescriptors (a WithSortDescriptor-shaped member) is keyed by
-            // PredicatedModelKind rather than SortedModelKind, but that's what the real ABI has.
-            c = c.replacingOccurrences(
-                of: "var sortDescriptors: [SortDescriptor<Self.SortedModelKind>] { get }",
-                with: "var sortDescriptors: [SortDescriptor<Self.PredicatedModelKind>] { get }")
+            // HealthKit.SampleBaseConfiguration<A.PredicatedModelKind>`). (SampleBase's own
+            // sortDescriptors requirement has the same bug, fixed in place below where it's
+            // otherwise handled, to avoid two conflicting fixes racing on the same line -- see
+            // the note there.)
             c = c.replacingOccurrences(
                 of: "var sampleConfiguration: SampleBaseConfiguration<Any> { get set }",
                 with: "var sampleConfiguration: SampleBaseConfiguration<Self.PredicatedModelKind> { get set }")
@@ -2763,7 +2758,11 @@ extension Locale.Language {
                 let bodyRange = declRange.upperBound..<braceEnd.lowerBound
                 var body = String(c[bodyRange])
                 body = body.replacingOccurrences(of: "var predicate: Predicate<Any>? { get }", with: "var predicate: Predicate<Self.PredicatedModelKind>? { get }")
-                body = body.replacingOccurrences(of: "var sortDescriptors: [SortDescriptor<Any>] { get }", with: "var sortDescriptors: [SortDescriptor<Self.SortedModelKind>] { get }")
+                // NOTE: sortDescriptors is keyed by PredicatedModelKind, not SortedModelKind,
+                // despite the name -- confirmed via swift-demangle:
+                // `Configuration.SampleBase.sortDescriptors.getter :
+                // [Foundation.SortDescriptor<A.PredicatedModelKind>]`.
+                body = body.replacingOccurrences(of: "var sortDescriptors: [SortDescriptor<Any>] { get }", with: "var sortDescriptors: [SortDescriptor<Self.PredicatedModelKind>] { get }")
                 c.replaceSubrange(bodyRange, with: body)
             }
             // Fix: ListQueryDescriptor<A, B>/ObservationDescriptor<A> conform to QueryDescriptor,
