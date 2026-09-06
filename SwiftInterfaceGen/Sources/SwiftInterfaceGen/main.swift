@@ -247,6 +247,12 @@ typedef struct {
     NSInteger start;
     NSInteger end;
 } HKDayIndexRange;
+typedef NS_ENUM(NSInteger, _HKQuantityDistributionStyle) {
+    _HKQuantityDistributionStyleUnspecified = 0
+};
+typedef NS_OPTIONS(NSUInteger, _HKQuantityDistributionOptions) {
+    _HKQuantityDistributionOptionsNone = 0
+};
 
 """
                 }
@@ -2584,11 +2590,24 @@ extension Locale.Language {
                          "HKWorkoutZoneWrapper", "HKDatabaseAssertionContextType", "HKDayIndexRange",
                          "HKSleepDaySummaryQueryOptions", "HKStatisticsOptions",
                          "HKWorkoutEffortRelationshipQueryOptions", "HKCategoryValueSleepAnalysis",
-                         "NSLocale"] {
+                         "NSLocale", "_HKQuantityDistributionStyle",
+                         "_HKQuantityDistributionOptions", "_HKQuantityDistributionData"] {
                 c = c.replacingOccurrences(
                     of: "public struct __C_\(name): Hashable, Codable, Sendable {}\npublic typealias \(name) = __C_\(name)\n",
                     with: "")
             }
+
+            // NSQualityOfService is another instance of the same "__C" shadow-type fallback
+            // (HKQueryAttributes.qualityOfService), but unlike the others, Swift's API notes
+            // rename the ObjC enum to bare `QualityOfService` for Swift source -- referencing it
+            // as `NSQualityOfService` in Swift source is a hard error ("has been renamed to
+            // 'QualityOfService'"), even though the ABI still mangles it as `__C.NSQualityOfService`
+            // (confirmed via swift-demangle) since that's the real ObjC symbol name. Rename all
+            // uses to the Swift-facing name, then drop the (now similarly-renamed) shadow.
+            c = c.replacingOccurrences(of: "NSQualityOfService", with: "QualityOfService")
+            c = c.replacingOccurrences(
+                of: "public struct __C_QualityOfService: Hashable, Codable, Sendable {}\npublic typealias QualityOfService = __C_QualityOfService\n",
+                with: "")
 
             // HKWorkoutMetric.init(coder:) is NOT failable in the real ABI (confirmed via
             // swift-demangle -expand: return type is the plain HKWorkoutMetric class, not
