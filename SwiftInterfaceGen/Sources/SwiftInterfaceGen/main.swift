@@ -2883,6 +2883,67 @@ extension Locale.Language {
             c = c.replacingOccurrences(
                 of: "where GenericA: ObservationQueryDescriptorProtocol",
                 with: "where GenericA: ObservationQueryDescriptorProtocol,  GenericB == GenericA.ConfigurationKind")
+
+            // SleepSessionQuery<A: SleepSessionResultProviding>'s configuration/range members
+            // (and its nested Descriptor<B>/ServerConfiguration<B>'s equivalents) all render as
+            // bare `Any`/`Any?`, but the real ABI ties them to SleepSessionResultProviding's
+            // ConfigurationType/RangeType associated types (confirmed via swift-demangle: e.g.
+            // `SleepSessionQuery.configuration.getter : A.ConfigurationType`,
+            // `SleepSessionQuery.Descriptor.configuration.getter : A1.ConfigurationType`) --
+            // the associated types themselves are already declared correctly on
+            // SleepSessionResultProviding, just never threaded through to these members.
+            // Descriptor<B>/ServerConfiguration<B> also need B constrained to
+            // SleepSessionResultProviding for the associated-type-qualified members to compile.
+            // Member order within a class/struct body isn't deterministic across generator runs
+            // (confirmed elsewhere this session), so fix the two nested types via brace-matched
+            // substring extraction first -- scoping the "Any"/"Any?" -> B.*Type replacements to
+            // just that substring, before they'd otherwise collide with the identical-looking
+            // outer SleepSessionQuery<A> members fixed via plain global replace below.
+            for (header, genericParam) in [("public struct Descriptor<B>: Codable, Hashable, @unchecked Sendable {", "B"),
+                                            ("@_fixed_layout open class ServerConfiguration<B>: NSObject, NSCoding {", "B")] {
+                if let declRange = c.range(of: header) {
+                    var depth = 1
+                    var idx = declRange.upperBound
+                    while depth > 0 && idx < c.endIndex {
+                        if c[idx] == "{" { depth += 1 } else if c[idx] == "}" { depth -= 1 }
+                        idx = c.index(after: idx)
+                    }
+                    let bodyRange = declRange.lowerBound..<idx
+                    var body = String(c[bodyRange])
+                    body = body.replacingOccurrences(of: "<B>", with: "<\(genericParam): SleepSessionResultProviding>")
+                    body = body.replacingOccurrences(of: "range: Any", with: "range: \(genericParam).RangeType")
+                    body = body.replacingOccurrences(of: "configuration: Any", with: "configuration: \(genericParam).ConfigurationType")
+                    body = body.replacingOccurrences(of: "Descriptor<Any>", with: "Descriptor<\(genericParam)>")
+                    c.replaceSubrange(bodyRange, with: body)
+                }
+            }
+            // SleepSessionQuery<A: SleepSessionResultProviding>'s own top-level configuration/
+            // range members are likewise bare `Any`/`Any?`, but the real ABI ties them to
+            // SleepSessionResultProviding's ConfigurationType/RangeType associated types
+            // (confirmed via swift-demangle: e.g. `SleepSessionQuery.configuration.getter :
+            // A.ConfigurationType`). The associated types themselves are already declared
+            // correctly on SleepSessionResultProviding, just never threaded through to these
+            // members. Safe to do as a plain global replace now that the nested-type copies
+            // above no longer read as bare "Any?"/"Any".
+            c = c.replacingOccurrences(
+                of: "public final var configuration: Any { get { fatalError() } }",
+                with: "public final var configuration: A.ConfigurationType { get { fatalError() } }")
+            c = c.replacingOccurrences(
+                of: "required public init(range: Any?, configuration: Any, resultsHandler: @escaping @Sendable (SleepSessionQuery<A>, Result<[A], any Error>) -> ()) { fatalError() }",
+                with: "required public init(range: A.RangeType?, configuration: A.ConfigurationType, resultsHandler: @escaping @Sendable (SleepSessionQuery<A>, Result<[A], any Error>) -> ()) { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public final var range: Any? { get { return nil } }",
+                with: "public final var range: A.RangeType? { get { return nil } }")
+            // SleepSessionQueryProviding's own range/configuration requirements are similarly
+            // bare `Any?`/`Any` but the real ABI ties them to
+            // ResultType.RangeType?/ResultType.ConfigurationType (confirmed via swift-demangle:
+            // `SleepSessionQueryProviding.range.getter : A.ResultType.RangeType?`).
+            c = c.replacingOccurrences(
+                of: "var range: Any? { get }",
+                with: "var range: Self.ResultType.RangeType? { get }")
+            c = c.replacingOccurrences(
+                of: "var configuration: Any { get }",
+                with: "var configuration: Self.ResultType.ConfigurationType { get }")
         }
 
         // Fix: AttributeScopes.ConfidenceAttribute/TimeRangeAttribute conform to
