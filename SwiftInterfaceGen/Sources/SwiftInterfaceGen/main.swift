@@ -4717,6 +4717,37 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "public var data: Data { get { return Data() } }",
                 with: "public var data: Data { get async { return Data() } }")
+            // QueryDescriptor's constrained-extension withOptions/filter both use a bare `Any`
+            // instead of the real associated-type-derived parameter type -- same Any-vs-
+            // associated-type gap as the SleepSessionQuery fix earlier this session (confirmed
+            // via swift-demangle: `withOptions(A.ConfigurationKind.Configuration.WithOptions.
+            // OptionsKind) -> A` and `filter(Foundation.Predicate<Pack{A.ModelKind}>) -> A`).
+            c = c.replacingOccurrences(
+                of: "public func withOptions(_ arg1: Any) -> Self { fatalError() }",
+                with: "public func withOptions(_ arg1: Self.ConfigurationKind.OptionsKind) -> Self { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public func filter(_ arg1: Predicate<Any>) -> Self { fatalError() }",
+                with: "public func filter(_ arg1: Predicate<Self.ModelKind>) -> Self { fatalError() }")
+            // SleepSessionQuery<A>.Descriptor<B>'s conformance to HKAsyncQuery (conditional on
+            // A == B) was never restated, even though an extension already provides the exact
+            // matching result(for:) -> [A] implementation the conformance needs -- confirmed via
+            // swift-demangle -expand: DependentGenericSameTypeRequirement ties the outer type's
+            // generic param 0 (A) to the nested type's own generic param 0 (B), and the existing
+            // extension's inferred Output ([A]) is the only shape that doesn't conflict.
+            c = c.replacingOccurrences(
+                of: "extension SleepSessionQuery.Descriptor where A == B {",
+                with: "extension SleepSessionQuery.Descriptor: HKAsyncQuery where A == B {")
+            // SleepCountProvidingSequence/SleepDurationProvidingSequence both refine
+            // Sequence, but the real ABI restates Sequence.Element with a stronger bound
+            // (confirmed via swift-demangle: `associated conformance descriptor for
+            // HealthKit.SleepCountProvidingSequence.Swift.Sequence.Element:
+            // HealthKit.SleepDurationProviding`), which the generator never emitted.
+            c = c.replacingOccurrences(
+                of: "public protocol SleepCountProvidingSequence: Sequence, SleepCountProviding {\n}",
+                with: "public protocol SleepCountProvidingSequence: Sequence, SleepCountProviding where Element: SleepDurationProviding {\n}")
+            c = c.replacingOccurrences(
+                of: "public protocol SleepDurationProvidingSequence: Sequence, SleepDurationProviding {\n}",
+                with: "public protocol SleepDurationProvidingSequence: Sequence, SleepDurationProviding where Element: SleepDurationProviding {\n}")
             // CodableBox<A>/OptionalCodableBox<A> are both conditionally Comparable when A:
             // Comparable, but the `<` operator (and the conformance itself) were silently
             // dropped entirely -- confirmed via swift-demangle: e.g.
