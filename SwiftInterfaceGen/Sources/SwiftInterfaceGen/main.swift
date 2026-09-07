@@ -4621,6 +4621,15 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "public struct __C_OSLog: Hashable, Codable, Sendable {}\npublic typealias OSLog = __C_OSLog\n",
                 with: "")
+            // Array<Element: SleepDurationProviding>'s extension provides SleepCountProviding/
+            // SleepAverageProviding/SleepDurationProviding(Sequence)'s member implementations,
+            // but never restates the conformances themselves -- same "conformance restatement
+            // gap" class of bug already fixed for CodableBox/Charts result-builder types earlier
+            // this session (confirmed via swift-demangle: real protocol conformance descriptors
+            // and witness tables exist for all 6 protocols on `[A] where A: SleepDurationProviding`).
+            c = c.replacingOccurrences(
+                of: "extension Array where Element: SleepDurationProviding {",
+                with: "extension Array: SleepAverageProviding, SleepAverageProvidingSequence, SleepCountProviding, SleepCountProvidingSequence, SleepDurationProviding, SleepDurationProvidingSequence where Element: SleepDurationProviding {")
             // DateInterval/DateComponents/Date's whole set of sleep-day-related extension
             // members were silently dropped entirely -- same class of gap as the os.Logger
             // properties and __BridgedLocale.performAsCurrent below, just a much larger cohesive
