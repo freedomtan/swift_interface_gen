@@ -4630,6 +4630,20 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "extension Array where Element: SleepDurationProviding {",
                 with: "extension Array: SleepAverageProviding, SleepAverageProvidingSequence, SleepCountProviding, SleepCountProvidingSequence, SleepDurationProviding, SleepDurationProvidingSequence where Element: SleepDurationProviding {")
+            // CodableBox<A>/OptionalCodableBox<A> are both conditionally Comparable when A:
+            // Comparable, but the `<` operator (and the conformance itself) were silently
+            // dropped entirely -- confirmed via swift-demangle: e.g.
+            // `HealthKit.CodableBox< where A: Swift.Comparable>.< infix(...)`.
+            c += """
+
+            extension CodableBox: Comparable where A: Comparable {
+                public static func <(lhs: CodableBox<A>, rhs: CodableBox<A>) -> Bool { fatalError() }
+            }
+            extension OptionalCodableBox: Comparable where A: Comparable {
+                public static func <(lhs: OptionalCodableBox<A>, rhs: OptionalCodableBox<A>) -> Bool { fatalError() }
+            }
+
+            """
             // ClosedRange<Bound == SleepDay>'s extension provides SecureCodable/
             // SleepSessionRangeProviding's member implementations (split(_:) satisfies
             // SleepSessionRangeProviding; SecureCodable's Codable/Hashable requirements are
