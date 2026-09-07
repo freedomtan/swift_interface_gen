@@ -254,6 +254,7 @@ typedef NS_OPTIONS(NSUInteger, _HKQuantityDistributionOptions) {
     _HKQuantityDistributionOptionsNone = 0
 };
 #import <CoreLocation/CoreLocation.h>
+#import <os/log.h>
 
 """
                 }
@@ -4599,6 +4600,27 @@ extension AttributeDynamicLookup {
             // dead, unreferenced placeholder struct `os_Logger` (never used anywhere) as a
             // byproduct of failing to resolve the qualified `os.Logger` extension target. Drop
             // the dead placeholder and add the real extension members directly.
+            // ListQueryDescriptor<A, B>.init<A1>/ObservationDescriptor<A>.init<A1> are both
+            // missing equality constraints binding their own generic parameters to A1's
+            // associated types (confirmed via swift-demangle: e.g.
+            // `ListQueryDescriptor.init<A where A == A1.ListConfigurationKind, B ==
+            // A1.ModelKind, A1: HealthKit.ListHealthType>`), same phantom-generic-constraint
+            // shape as the QueryDescriptorEvaluator fix earlier this session.
+            c = c.replacingOccurrences(
+                of: "public init<A1>(type: A1, configuration: A) where  A1: ListHealthType { fatalError() }",
+                with: "public init<A1>(type: A1, configuration: A) where A1: ListHealthType, A == A1.ListConfigurationKind, B == A1.ModelKind { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public init<A1>(type: A1, configuration: A) where  A1: ObservableHealthType { fatalError() }",
+                with: "public init<A1>(type: A1, configuration: A) where A1: ObservableHealthType, A == A1.ObservationConfigurationKind { fatalError() }")
+            // ObserverSet<A>/MainActorObserverSet<A>'s loggingCategory init parameter resolved to
+            // the usual "__C" shadow-type fallback for `OSLog` (confirmed via swift-demangle:
+            // mangles as `__C.OS_os_log`, the real ObjC symbol name -- `OS_os_log` is renamed to
+            // bare `OSLog` for Swift source, same rename-vs-ABI-name split as NSQualityOfService
+            // above). `<os/log.h>` (imported above) makes the real type visible; just drop the
+            // shadow.
+            c = c.replacingOccurrences(
+                of: "public struct __C_OSLog: Hashable, Codable, Sendable {}\npublic typealias OSLog = __C_OSLog\n",
+                with: "")
             // DateInterval/DateComponents/Date's whole set of sleep-day-related extension
             // members were silently dropped entirely -- same class of gap as the os.Logger
             // properties and __BridgedLocale.performAsCurrent below, just a much larger cohesive
