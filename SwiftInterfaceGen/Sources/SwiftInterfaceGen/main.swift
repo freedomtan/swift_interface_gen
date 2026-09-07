@@ -2655,6 +2655,15 @@ extension Locale.Language {
             // (confirmed via swift-demangle) since that's the real ObjC symbol name. Rename all
             // uses to the Swift-facing name, then drop the (now similarly-renamed) shadow.
             c = c.replacingOccurrences(of: "NSQualityOfService", with: "QualityOfService")
+            // NSPredicateOperatorType is renamed to NSComparisonPredicate.Operator in Swift
+            // (obsoleted in Swift 3), same rename-vs-ABI-name split as NSQualityOfService/OSLog
+            // earlier this session -- the ABI still mangles under the original ObjC name. Remove
+            // the shadow BEFORE renaming remaining uses, since the shadow's own typealias line
+            // would otherwise be corrupted into invalid dotted-name syntax by the blanket rename.
+            c = c.replacingOccurrences(
+                of: "public struct __C_NSPredicateOperatorType: Hashable, Codable, Sendable {}\npublic typealias NSPredicateOperatorType = __C_NSPredicateOperatorType\n",
+                with: "")
+            c = c.replacingOccurrences(of: "NSPredicateOperatorType", with: "NSComparisonPredicate.Operator")
             c = c.replacingOccurrences(
                 of: "public struct __C_QualityOfService: Hashable, Codable, Sendable {}\npublic typealias QualityOfService = __C_QualityOfService\n",
                 with: "")
@@ -4663,6 +4672,51 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "public struct ObservationDescriptor<A: Decodable>: ObservationQueryDescriptorProtocol, QueryDescriptor {",
                 with: "public struct ObservationDescriptor<A: Codable>: ObservationQueryDescriptorProtocol, QueryDescriptor {")
+            // NOTE: several protocol-witness-table-only stubs remain for generic types'
+            // conformances to protocols with associated types (ScoredAssessmentType,
+            // CodableBox/CodableBoxArray/CodableBoxDictionary, ListQueryDescriptor,
+            // ObservationDescriptor, SampleBaseConfiguration, HKAnchoredObjectQueryDescriptor,
+            // HKSampleQueryDescriptor, SleepSessionQuery, Array<SleepDurationProviding>,
+            // ClosedRange<SleepDay>) even though their conformance descriptors are correct.
+            // Confirmed via a minimal standalone repro (unrelated to this codebase) that plain
+            // swiftc NEVER emits an externally-linked witness table symbol for a generic type's
+            // conformance to a protocol with an associated type, regardless of -O,
+            // -enable-library-evolution, -cross-module-optimization, or forcing an existential
+            // usage site -- yet Apple's real compiled dylib exports these symbols (confirmed via
+            // HealthKit.tbd). This is a gap between Apple's internal SDK build and local swiftc,
+            // not something fixable by changing the generated source. Treat as structurally
+            // unfixable, same bucket as opaque-return-type stubs.
+            // mergeRanges is missing the constraint tying A.Element to Range<Int> (confirmed via
+            // swift-demangle: `mergeRanges<A where A: Swift.Sequence, A.Element ==
+            // Swift.Range<Swift.Int>>`), same phantom-constraint-drop pattern as
+            // QueryDescriptorEvaluator earlier this session.
+            c = c.replacingOccurrences(
+                of: "public func mergeRanges<A>(_ arg1: A, gapThreshold: CGFloat) -> [Range<Swift.Int>] where A: Swift.Sequence { return [] }",
+                with: "public func mergeRanges<A>(_ arg1: A, gapThreshold: CGFloat) -> [Range<Swift.Int>] where A: Swift.Sequence, A.Element == Range<Swift.Int> { return [] }")
+            // QuantityThresholds<A> itself needs A bounded to Decodable & Encodable & Hashable &
+            // Sendable directly on the outer struct's own generic parameter -- confirmed via
+            // swift-demangle: every nested type's (Edge/Threshold/Bucket) conformance descriptor
+            // is unconditional (no "Rzl" conditional-conformance flag), which only typechecks if
+            // the bound lives on the outer declaration itself rather than as a per-nested-type
+            // "where" clause (each enum case constructor's generic signature restates the bound
+            // because it's inherited from the outer environment, not because Edge adds its own).
+            c = c.replacingOccurrences(
+                of: "public struct QuantityThresholds<A>: Codable, Hashable {",
+                with: "public struct QuantityThresholds<A: Decodable & Encodable & Hashable & Sendable>: Codable, Hashable {")
+            // HKDatabase.Pruning.Show.PruningRestrictionPredicate.Classification.match's payload
+            // has no argument label in the real ABI (confirmed via swift-demangle -expand:
+            // LabelList is empty), but the generator emitted a redundant label matching the case
+            // name itself (`match(match: ...)` instead of `match(_: ...)`).
+            c = c.replacingOccurrences(
+                of: "case match(match: HKDatabase.Pruning.Show.PruningRestrictionPredicate)",
+                with: "case match(_: HKDatabase.Pruning.Show.PruningRestrictionPredicate)")
+            // HKAttachmentDataReader.data's real getter is async (confirmed via swift-demangle:
+            // `async function pointer to dispatch thunk of
+            // HealthKit.HKAttachmentDataReader.data.getter`), but the generator emitted a
+            // synchronous getter.
+            c = c.replacingOccurrences(
+                of: "public var data: Data { get { return Data() } }",
+                with: "public var data: Data { get async { return Data() } }")
             // CodableBox<A>/OptionalCodableBox<A> are both conditionally Comparable when A:
             // Comparable, but the `<` operator (and the conformance itself) were silently
             // dropped entirely -- confirmed via swift-demangle: e.g.
