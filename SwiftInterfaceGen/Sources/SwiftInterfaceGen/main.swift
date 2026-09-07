@@ -4630,6 +4630,39 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "extension Array where Element: SleepDurationProviding {",
                 with: "extension Array: SleepAverageProviding, SleepAverageProvidingSequence, SleepCountProviding, SleepCountProvidingSequence, SleepDurationProviding, SleepDurationProvidingSequence where Element: SleepDurationProviding {")
+            // SampleType redeclares ListHealthType's ListConfigurationKind associated type with
+            // a stronger bound (confirmed via swift-demangle: `associated conformance descriptor
+            // for HealthKit.SampleType.HealthKit.ListHealthType.ListConfigurationKind:
+            // HealthKit.Configuration.SampleBase`), but the generator never emitted the
+            // restatement.
+            c = c.replacingOccurrences(
+                of: "public protocol SampleType: BasicObservableHealthType, ListHealthType {\n    associatedtype UnderlyingTypeKind",
+                with: "public protocol SampleType: BasicObservableHealthType, ListHealthType {\n    associatedtype ListConfigurationKind: Configuration.SampleBase\n    associatedtype UnderlyingTypeKind")
+            // ListHealthType.ListConfigurationKind, ObservableHealthType.
+            // ObservationConfigurationKind, and QueryDescriptor.ConfigurationKind are all declared
+            // as bound only to `Decodable`, but the real ABI also has an associated conformance
+            // descriptor tying each to `Encodable` (confirmed via swift-demangle: e.g.
+            // `associated conformance descriptor for
+            // HealthKit.ListHealthType.HealthKit.ListHealthType.ListConfigurationKind:
+            // Swift.Encodable`) -- i.e. each should be bound to `Codable`, not just `Decodable`.
+            c = c.replacingOccurrences(
+                of: "associatedtype ListConfigurationKind: Decodable",
+                with: "associatedtype ListConfigurationKind: Codable")
+            c = c.replacingOccurrences(
+                of: "associatedtype ObservationConfigurationKind: Decodable",
+                with: "associatedtype ObservationConfigurationKind: Codable")
+            c = c.replacingOccurrences(
+                of: "associatedtype ConfigurationKind: Decodable",
+                with: "associatedtype ConfigurationKind: Codable")
+            // ListQueryDescriptor<A: Decodable, B>/ObservationDescriptor<A: Decodable> bind their
+            // own generic parameter A to QueryDescriptor.ConfigurationKind, which now (correctly)
+            // requires Codable, not just Decodable.
+            c = c.replacingOccurrences(
+                of: "public struct ListQueryDescriptor<A: Decodable, B>: ListQueryDescriptorProtocol, QueryDescriptor {",
+                with: "public struct ListQueryDescriptor<A: Codable, B>: ListQueryDescriptorProtocol, QueryDescriptor {")
+            c = c.replacingOccurrences(
+                of: "public struct ObservationDescriptor<A: Decodable>: ObservationQueryDescriptorProtocol, QueryDescriptor {",
+                with: "public struct ObservationDescriptor<A: Codable>: ObservationQueryDescriptorProtocol, QueryDescriptor {")
             // CodableBox<A>/OptionalCodableBox<A> are both conditionally Comparable when A:
             // Comparable, but the `<` operator (and the conformance itself) were silently
             // dropped entirely -- confirmed via swift-demangle: e.g.
