@@ -4630,6 +4630,16 @@ extension AttributeDynamicLookup {
             c = c.replacingOccurrences(
                 of: "extension Array where Element: SleepDurationProviding {",
                 with: "extension Array: SleepAverageProviding, SleepAverageProvidingSequence, SleepCountProviding, SleepCountProvidingSequence, SleepDurationProviding, SleepDurationProvidingSequence where Element: SleepDurationProviding {")
+            // ClosedRange<Bound == SleepDay>'s extension provides SecureCodable/
+            // SleepSessionRangeProviding's member implementations (split(_:) satisfies
+            // SleepSessionRangeProviding; SecureCodable's Codable/Hashable requirements are
+            // already satisfied natively by ClosedRange's own conditional conformances when
+            // Bound: SleepDay is Codable & Hashable), but never restates the conformances
+            // themselves -- same conformance-restatement gap as the Array<SleepDurationProviding>
+            // fix above.
+            c = c.replacingOccurrences(
+                of: "extension ClosedRange where Bound == SleepDay {",
+                with: "extension ClosedRange: SecureCodable, SleepSessionRangeProviding where Bound == SleepDay {")
             // DateInterval/DateComponents/Date's whole set of sleep-day-related extension
             // members were silently dropped entirely -- same class of gap as the os.Logger
             // properties and __BridgedLocale.performAsCurrent below, just a much larger cohesive
