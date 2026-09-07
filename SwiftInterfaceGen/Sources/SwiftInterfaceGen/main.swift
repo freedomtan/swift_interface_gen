@@ -2534,6 +2534,47 @@ extension Locale.Language {
                     c.replaceSubrange(range, with: replacement)
                 }
             }
+            // Optional<Wrapped>.Publisher lost its generic parameter entirely -- every member
+            // uses a bare `Any` instead of threading `Wrapped` (the name automatically available
+            // inside `extension Optional { ... }`), confirmed via swift-demangle: e.g.
+            // `Swift.Optional.Publisher.map<A>((A) -> A1) -> A1?.Publisher` uses the outer
+            // Optional's own generic param (A/Wrapped), not Any. Result<Success,Failure>.Publisher
+            // has the identical bug, but that type isn't part of the real ABI surface in this SDK
+            // (absent from the exports list entirely), so it's left alone.
+            // Subscribers.Demand's Comparable conformance only synthesizes `<(Demand, Demand)`,
+            // but the real ABI has 10 more explicit comparison overloads mixing Demand and Int
+            // operands, plus the Demand/Demand >,>=,<= that Comparable's synthesized defaults
+            // don't produce standalone exported symbols for (confirmed via swift-demangle: e.g.
+            // `static Combine.Subscribers.Demand.> infix(Combine.Subscribers.Demand, Swift.Int)
+            // -> Swift.Bool`).
+            c = c.replacingOccurrences(
+                of: "public static func <(_ lhs: Demand, _ rhs: Demand) -> Bool { fatalError() }",
+                with: """
+                public static func <(_ lhs: Demand, _ rhs: Demand) -> Bool { fatalError() }
+                        public static func <(_ lhs: Demand, _ rhs: Swift.Int) -> Bool { fatalError() }
+                        public static func <(_ lhs: Swift.Int, _ rhs: Demand) -> Bool { fatalError() }
+                        public static func >(_ lhs: Demand, _ rhs: Demand) -> Bool { fatalError() }
+                        public static func >(_ lhs: Demand, _ rhs: Swift.Int) -> Bool { fatalError() }
+                        public static func >(_ lhs: Swift.Int, _ rhs: Demand) -> Bool { fatalError() }
+                        public static func >=(_ lhs: Demand, _ rhs: Demand) -> Bool { fatalError() }
+                        public static func >=(_ lhs: Demand, _ rhs: Swift.Int) -> Bool { fatalError() }
+                        public static func >=(_ lhs: Swift.Int, _ rhs: Demand) -> Bool { fatalError() }
+                        public static func <=(_ lhs: Demand, _ rhs: Demand) -> Bool { fatalError() }
+                        public static func <=(_ lhs: Demand, _ rhs: Swift.Int) -> Bool { fatalError() }
+                        public static func <=(_ lhs: Swift.Int, _ rhs: Demand) -> Bool { fatalError() }
+                """)
+            if let declRange = c.range(of: "extension Optional {\n    public struct Publisher: Combine.Publisher {") {
+                var depth = 1
+                var idx = declRange.upperBound
+                while depth > 0 && idx < c.endIndex {
+                    if c[idx] == "{" { depth += 1 } else if c[idx] == "}" { depth -= 1 }
+                    idx = c.index(after: idx)
+                }
+                let bodyRange = declRange.lowerBound..<idx
+                var body = String(c[bodyRange])
+                body = body.replaceWord("Any", with: "Wrapped")
+                c.replaceSubrange(bodyRange, with: body)
+            }
         }
 
         if parser.defaultModule == "HealthKit" {
