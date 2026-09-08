@@ -6204,6 +6204,27 @@ extension Array {
                 @_fixed_layout final public class BridgeInstance: BottomDatagramProtocol, BottomProtocolHandler, LowerProtocolHandler, OutboundDataHandler, OutboundDatagramHandler, ProtocolInstance, ProtocolInstanceContainer, TimerSchedulable {
                     public typealias UpperProtocol = InboundDatagramLinkage
                 """)
+            // Same conformance-restatement pattern, 3 more concrete (non-generic-witness-table-
+            // blocked) sites found by surveying Network's remaining stubs for other
+            // LowerProtocolHandler/BottomProtocolHandler/OutboundDatagramHandler gaps: each already
+            // implements every required member via existing conformances' defaults, just never
+            // restates the conformance -- confirmed compiling clean (0 errors) via the same
+            // minimal-repro-against-the-real-generated-interface technique.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout final public class ChannelProtocol: LoggableProtocol, OutboundDataHandler, ProtocolInstance, ProtocolInstanceContainer {",
+                with: """
+                @_fixed_layout final public class ChannelProtocol: LoggableProtocol, LowerProtocolHandler, OutboundDataHandler, OutboundDatagramHandler, ProtocolInstance, ProtocolInstanceContainer {
+                    public typealias UpperProtocol = InboundDatagramLinkage
+                """)
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class LowerHarness<A: LowerProtocolLinkage>: LoggableProtocol, OutboundDataHandler, ProtocolInstance {",
+                with: """
+                @_fixed_layout public class LowerHarness<A: LowerProtocolLinkage>: BottomProtocolHandler, LoggableProtocol, LowerProtocolHandler, OutboundDataHandler, ProtocolInstance {
+                    public typealias UpperProtocol = A.PairedLinkage
+                """)
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class QUICConnection: HeterogeneousListenerHandler, HeterogeneousManyToManyProtocolHandler, ListenerHandler, LoggableProtocol, ManyToManyApplicationDatagramProtocol, ManyToManyApplicationStreamProtocol, ManyToManyDatapathProtocol, ManyToManyOutboundDatagramProtocol, ManyToManyProtocolHandler, ProtocolInstance, ProtocolInstanceContainer, StreamListenerHandler, TimerSchedulable {",
+                with: "@_fixed_layout public class QUICConnection: HeterogeneousListenerHandler, HeterogeneousManyToManyProtocolHandler, ListenerHandler, LoggableProtocol, LowerProtocolHandler, ManyToManyApplicationDatagramProtocol, ManyToManyApplicationStreamProtocol, ManyToManyDatapathProtocol, ManyToManyOutboundDatagramProtocol, ManyToManyProtocolHandler, ProtocolInstance, ProtocolInstanceContainer, StreamListenerHandler, TimerSchedulable {")
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
