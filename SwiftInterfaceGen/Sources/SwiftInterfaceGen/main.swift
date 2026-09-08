@@ -6180,6 +6180,20 @@ extension Array {
                 @_fixed_layout public class MultiplexedDatagramFlow<A: ManyToManyProtocolHandler>: AutomaticUpperDatagramProcessing, LoggableProtocol, LowerProtocolHandler, MultiplexedDatapathFlow, MultiplexedFlow, OutboundDataHandler, OutboundDatagramHandler, ProtocolInstance, ProtocolInstanceContainer {
                     public typealias UpperProtocol = InboundDatagramLinkage
                 """)
+            // Same conformance-restatement + associated-type-collision fix as
+            // MultiplexedStreamFlow/MultiplexedDatagramFlow above, for
+            // BridgeStreamProtocol.BridgeInstance: it already implements every member
+            // LowerProtocolHandler/BottomProtocolHandler/OutboundStreamHandler require, but never
+            // restates the conformances, and LowerProtocolHandler/BottomProtocolHandler both
+            // declare the same unwitnessable `associatedtype UpperProtocol: UpperProtocolLinkage`
+            // -- confirmed via the same minimal-repro-against-the-real-generated-interface
+            // technique used for the fix above.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout final public class BridgeInstance: BottomStreamProtocol, OutboundDataHandler, ProtocolInstance, ProtocolInstanceContainer {",
+                with: """
+                @_fixed_layout final public class BridgeInstance: BottomProtocolHandler, BottomStreamProtocol, LowerProtocolHandler, OutboundDataHandler, OutboundStreamHandler, ProtocolInstance, ProtocolInstanceContainer {
+                    public typealias UpperProtocol = InboundStreamLinkage
+                """)
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
