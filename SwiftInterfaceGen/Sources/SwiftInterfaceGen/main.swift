@@ -5524,6 +5524,40 @@ extension Array {
             c = c.replacingOccurrences(
                 of: "public func invokeAttachUpperProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> Any { fatalError() }",
                 with: "public func invokeAttachUpperProtocol(_: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> Self { fatalError() }")
+            // ListenerLinkage's own two requirements have the identical `Any`-erasure bug:
+            // their dispatch thunks demangle to "-> A.PairedLinkage.DataLinkage" (A is the
+            // protocol's own Self), i.e. the real return type projects through the associated
+            // type chain (PairedLinkage: InboundFlowLinkage, which declares `associatedtype
+            // DataLinkage: OutboundDataLinkage`), not a bare erased `Any`.
+            c = c.replacingOccurrences(
+                of: "func invokeAttachUpperProtocolToExistingFlow(_ arg1: ProtocolInstanceReference, flowReference: ProtocolInstanceReference) throws(NetworkError) -> Any",
+                with: "func invokeAttachUpperProtocolToExistingFlow(_ arg1: ProtocolInstanceReference, flowReference: ProtocolInstanceReference) throws(NetworkError) -> Self.PairedLinkage.DataLinkage")
+            c = c.replacingOccurrences(
+                of: "func invokeAttachUpperProtocolToNewFlow(_ arg1: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> Any",
+                with: "func invokeAttachUpperProtocolToNewFlow(_ arg1: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> Self.PairedLinkage.DataLinkage")
+            // Same `Any`-erasure bug on the default-implementation extension and on both
+            // concrete conformers (DatagramListenerLinkage/StreamListenerLinkage), which have
+            // no associated types so the placeholder resolves to a concrete type on each.
+            c = c.replacingOccurrences(
+                of: "extension ListenerLinkage {\n    public func invokeAttachUpperProtocolToExistingFlow(_ arg1: ProtocolInstanceReference, flowReference: ProtocolInstanceReference) throws(NetworkError) -> Any { fatalError() }\n    public func invokeAttachUpperProtocolToNewFlow(_ arg1: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> Any { fatalError() }\n}",
+                with: "extension ListenerLinkage {\n    public func invokeAttachUpperProtocolToExistingFlow(_ arg1: ProtocolInstanceReference, flowReference: ProtocolInstanceReference) throws(NetworkError) -> Self.PairedLinkage.DataLinkage { fatalError() }\n    public func invokeAttachUpperProtocolToNewFlow(_ arg1: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> Self.PairedLinkage.DataLinkage { fatalError() }\n}")
+            for (structName, dataLinkage) in [
+                ("DatagramListenerLinkage", "OutboundDatagramLinkage"),
+                ("StreamListenerLinkage", "OutboundStreamLinkage"),
+            ] {
+                if let bodyStart = c.range(of: "public struct \(structName): ListenerLinkage, LowerProtocolLinkage, ProtocolLinkage {\n"),
+                   let bodyEnd = c.range(of: "\n}", range: bodyStart.upperBound..<c.endIndex) {
+                    let body = String(c[bodyStart.upperBound..<bodyEnd.lowerBound])
+                    let fixedBody = body
+                        .replacingOccurrences(
+                            of: "func invokeAttachUpperProtocolToExistingFlow(_ arg1: ProtocolInstanceReference, flowReference: ProtocolInstanceReference) throws(NetworkError) -> Any",
+                            with: "func invokeAttachUpperProtocolToExistingFlow(_ arg1: ProtocolInstanceReference, flowReference: ProtocolInstanceReference) throws(NetworkError) -> \(dataLinkage)")
+                        .replacingOccurrences(
+                            of: "func invokeAttachUpperProtocolToNewFlow(_ arg1: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> Any",
+                            with: "func invokeAttachUpperProtocolToNewFlow(_ arg1: ProtocolInstanceReference, remote: Endpoint?, local: Endpoint?, parameters: Parameters?, path: PathProperties?) throws(NetworkError) -> \(dataLinkage)")
+                    c.replaceSubrange(bodyStart.upperBound..<bodyEnd.lowerBound, with: fixedBody)
+                }
+            }
             // None of the 8 concrete *Linkage structs declare their own PairedLinkage
             // typealias, and nothing in their member signatures pins it down uniquely (the
             // members that DO reference the paired type, e.g. InboundDatagramLinkage's own
