@@ -6194,6 +6194,16 @@ extension Array {
                 @_fixed_layout final public class BridgeInstance: BottomProtocolHandler, BottomStreamProtocol, LowerProtocolHandler, OutboundDataHandler, OutboundStreamHandler, ProtocolInstance, ProtocolInstanceContainer {
                     public typealias UpperProtocol = InboundStreamLinkage
                 """)
+            // Same fix again for BridgeDatagramProtocol.BridgeInstance (the datagram sibling of
+            // BridgeStreamProtocol.BridgeInstance above) -- identical missing
+            // LowerProtocolHandler/BottomProtocolHandler/OutboundDatagramHandler conformances and
+            // the same UpperProtocol associated-type collision.
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout final public class BridgeInstance: BottomDatagramProtocol, OutboundDataHandler, ProtocolInstance, ProtocolInstanceContainer, TimerSchedulable {",
+                with: """
+                @_fixed_layout final public class BridgeInstance: BottomDatagramProtocol, BottomProtocolHandler, LowerProtocolHandler, OutboundDataHandler, OutboundDatagramHandler, ProtocolInstance, ProtocolInstanceContainer, TimerSchedulable {
+                    public typealias UpperProtocol = InboundDatagramLinkage
+                """)
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
