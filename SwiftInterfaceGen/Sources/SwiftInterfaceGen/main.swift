@@ -176,7 +176,7 @@ struct SwiftInterfaceGen {
                     bridgeHeader += """
 @interface MLBatchProvider : NSObject
 @end
-@interface MLComputeDeviceProtocol : NSObject
+@protocol MLComputeDeviceProtocol <NSObject>
 @end
 @interface MLFeatureProvider : NSObject
 @end
@@ -4530,6 +4530,26 @@ extension AttributeDynamicLookup {
                 @objc(MLOptimizationHints) open class _MLOptimizationHintsObjCShadow: NSObject {}
                 public struct MLOptimizationHints: Equatable {
                 """)
+            // NOTE: MLComputePlan is missing its metaclass/deinit symbols (has no declared
+            // initializer and is only ever constructed via static factory methods). Tried adding
+            // an explicit `override init()` (both `private` and `public`), matching the
+            // SoundAnalysis "final-only members don't need a vtable" pattern from earlier this
+            // session, but neither reproduced the missing symbols -- root cause not yet found;
+            // left as a documented open item rather than force an ineffective change.
+            // MLComputeDeviceProtocol is a real Objective-C *protocol*, not a class -- but the
+            // bridge header forward-declared it as `@interface MLComputeDeviceProtocol : NSObject`
+            // (fixed above to `@protocol ... <NSObject>`), and every Swift-source use of the bare
+            // name needs `any` now that it's an existential (confirmed via swift-demangle: the
+            // real ABI mangles it as `__C.MLComputeDeviceProtocol_p`, the "_p" suffix marking an
+            // existential, not a plain class reference). The dead, unused
+            // `__C_MLComputeDeviceProtocol` native shadow struct is also removed.
+            c = c.replacingOccurrences(of: "public struct __C_MLComputeDeviceProtocol: Hashable, Codable, Sendable {}", with: "")
+            c = c.replacingOccurrences(
+                of: "public init(device: MLComputeDeviceProtocol) { fatalError() }",
+                with: "public init(device: any MLComputeDeviceProtocol) { fatalError() }")
+            c = c.replacingOccurrences(
+                of: "public var underlyingDevice: MLComputeDeviceProtocol { get { fatalError() } }",
+                with: "public var underlyingDevice: any MLComputeDeviceProtocol { get { fatalError() } }")
         }
 
         if parser.defaultModule == "AppleIntelligenceReporting" {
