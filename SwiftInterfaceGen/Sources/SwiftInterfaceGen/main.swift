@@ -6150,6 +6150,36 @@ extension Array {
                     public func abortOutbound(_: ProtocolInstanceReference, error: NetworkError?) -> () {}
                     public func abortInbound(_: ProtocolInstanceReference, error: NetworkError?) -> () {}
                 """)
+            // MultiplexedStreamFlow<A>/MultiplexedDatagramFlow<A> both already implement every
+            // member OutboundStreamHandler/OutboundDatagramHandler and LowerProtocolHandler
+            // require (via their existing OutboundDataHandler/MultiplexedFlow/ProtocolInstance
+            // conformances' default implementations), but the conformances themselves were never
+            // restated -- same conformance-restatement gap as many earlier fixes this session
+            // (confirmed via swift-demangle: e.g. `protocol conformance descriptor for
+            // Network.MultiplexedStreamFlow<A> : Network.OutboundStreamHandler`). Adding
+            // LowerProtocolHandler alone (bare, without an explicit `typealias UpperProtocol`)
+            // broke MultiplexedFlow's ALREADY-working conformance -- both protocols declare an
+            // identically-named `associatedtype UpperProtocol: UpperProtocolLinkage`, and neither
+            // protocol's own requirements ever use `Self.UpperProtocol` anywhere, so there's no
+            // signature Swift can infer a witness from; when two simultaneously-added protocols
+            // share a nameable-but-unwitnessable associated type like this, Swift's inference
+            // fails for the class as a whole rather than just leaving it ambiguous. Fixed by
+            // adding the explicit `public typealias UpperProtocol = ...` other sibling
+            // Multiplexed*Flow classes already declare (confirmed via minimal repro against the
+            // real generated interface, standalone-compiled with the same flags verify_public.py
+            // uses, before porting this fix here).
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class MultiplexedStreamFlow<A: ManyToManyProtocolHandler>: AutomaticUpperStreamProcessing, LoggableProtocol, MultiplexedDatapathFlow, MultiplexedFlow, OutboundDataHandler, ProtocolInstance, ProtocolInstanceContainer {",
+                with: """
+                @_fixed_layout public class MultiplexedStreamFlow<A: ManyToManyProtocolHandler>: AutomaticUpperStreamProcessing, LoggableProtocol, LowerProtocolHandler, MultiplexedDatapathFlow, MultiplexedFlow, OutboundDataHandler, OutboundStreamHandler, ProtocolInstance, ProtocolInstanceContainer {
+                    public typealias UpperProtocol = InboundStreamLinkage
+                """)
+            c = c.replacingOccurrences(
+                of: "@_fixed_layout public class MultiplexedDatagramFlow<A: ManyToManyProtocolHandler>: AutomaticUpperDatagramProcessing, LoggableProtocol, MultiplexedDatapathFlow, MultiplexedFlow, OutboundDataHandler, ProtocolInstance, ProtocolInstanceContainer {",
+                with: """
+                @_fixed_layout public class MultiplexedDatagramFlow<A: ManyToManyProtocolHandler>: AutomaticUpperDatagramProcessing, LoggableProtocol, LowerProtocolHandler, MultiplexedDatapathFlow, MultiplexedFlow, OutboundDataHandler, OutboundDatagramHandler, ProtocolInstance, ProtocolInstanceContainer {
+                    public typealias UpperProtocol = InboundDatagramLinkage
+                """)
         }
         // Sentinel structs go AFTER all generic helpers so Phase A (stripped at the marker)
         // still sees GenericA/B/etc. but not the protocol-conforming sentinels.
