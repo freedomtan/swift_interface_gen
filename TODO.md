@@ -33,18 +33,16 @@
 
 The following hardcoded code blocks should be removed and replaced with dynamic, generic solutions:
 
-1. **Target-Specific Fixups in `applyTypeFixups()` ([Parser.swift:L2542-2813](SwiftInterfaceGen/Sources/SwiftInterfaceGen/Parser.swift#L2542-L2813)):**
+1. **Target-Specific Fixups in `applyTypeFixups()` ([Parser.swift:L2547-2818](SwiftInterfaceGen/Sources/SwiftInterfaceGen/Parser.swift#L2547-L2818)):**
    - *Issue:* Hardcodes AST layout fixups (like required properties `id`, `cost`, `inferenceProviders`, etc.) specifically for `ModelCatalog` classes like `VisionModelBase`, `VoicesOverridesBase`, and `XPCServiceClientConnection`.
    - *Fix:* Replace this with a generic **Associated Type & Protocol Requirement Reconstructor** that dynamically resolves conformances, looks up the protocol's signature requirements, and synthesizes missing members.
 
-2. **Hardcoded postProcess Extension Append ([main.swift:L5026-5032](SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift#L5026-L5032)):**
+2. **Hardcoded postProcess Extension Append ([main.swift:L4981-4986](SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift#L4981-L4986)):**
    - *Issue:* Statically appends a concrete protocol extension `extension GenericA: AssetMetadata, AssetContents` when `defaultModule == "ModelCatalog"`.
    - *Fix:* Dynamically detect conformances on generic placeholders and automatically output their implementations based on the protocol requirements.
 
-3. **Condition-Based Import Resolution ([main.swift:L382-395](SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift#L382-L395)):**
+3. **Condition-Based Import Resolution ([main.swift:L336-349](SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift#L336-L349)):**
    - *Issue:* Hardcodes module name additions based on simple substring occurrences in the generated source (e.g. `if code.contains("MTL") { imports.insert("Metal") }`).
    - *Fix:* Resolve namespace mappings by inspecting the type namespaces from symbols or matching types against known API catalogs.
 
-4. **Per-Framework `@_silgen_name` Stub Lists (end of `postProcess()` in [main.swift](SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift), search `Symbol-forging fallback`):**
-   - *Issue:* ~1569 exact mangled symbol names, one hardcoded `@_silgen_name`-tagged dummy `public func` per remaining stub, added by hand per framework (CoreML, TabularData, CryptoKit, Vision, SoundAnalysis, SwiftData, Speech, TipKit, HealthKit, Combine, Charts, Network) to force presence in the compiled dylib for symbols confirmed unreproducible from any real declaration shape. Silent and permanent: if the generator's real behavior ever changes and legitimately starts emitting one of these symbols, the forged stub becomes dead weight (harmless, since duplicate-symbol linking would just fail loudly and reveal it) but won't be automatically cleaned up.
-   - *Fix:* There's already a `selfAlignInterface()` function in `main.swift` sketching a fully automatic version of this (compile the generated interface, diff against the TBD, forge whatever's still missing) — it's unwired dead code (hardcoded `/tmp` paths, no `-import-objc-header`, no bridge-object linking, never called). Fixing it up to match `verify_public.py`'s actual compile flags per-framework and wiring it into the generation pipeline would let all ~1569 hand-written stub lines be deleted and regenerated on demand instead.
+4. ~~**Per-Framework `@_silgen_name` Stub Lists**~~ — **Fixed.** `selfAlignInterface()` (`main.swift`, search `Symbol-forging fallback`) is now wired in behind a `--self-align` flag (`verify_public.py` passes it on generation; `orchestrate.py`/private-target generation doesn't need it): it compiles the generated interface, diffs the result against the same filtered expected-export set `<Module>_exports.txt` uses, and forges one `@_silgen_name` stub per symbol still missing. This replaced the ~1569 hand-written per-framework stub lines that used to sit at the end of `postProcess()`, shrinking `main.swift` by ~3,300 lines with curated-19 still 19/19 PASS, 0 missing, 0 first-pass stubs (stable across repeated runs). See `SwiftInterfaceGen/Sources/SwiftInterfaceGen/README.md`'s "Symbol-forging fallback" section for how it self-heals when a generated interface imports a private SDK dependency not yet under `LocalFrameworks/` (Speech's `AudioAnalytics`/`SpeechDetector`, HealthKit's `Coherence`) by synthesizing an empty-stub framework and retrying, rather than requiring it pre-populated.
