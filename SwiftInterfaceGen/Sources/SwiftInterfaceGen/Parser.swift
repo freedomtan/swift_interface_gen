@@ -4,6 +4,11 @@ class Parser {
     var modules: [String: TypeNode] = [:]
     var defaultModule: String = ""
     var primaryTargetModule: String = ""
+    // Real path to the .tbd this run was invoked with, and whether --self-align was passed —
+    // used by selfAlignInterface() at the end of postProcess() to compile-and-diff the generated
+    // code against the real dylib symbol set instead of relying on hand-written @_silgen_name lists.
+    var tbdPath: String = ""
+    var selfAlignEnabled: Bool = false
     let swiftKeywords: Set<String> = [
         "associatedtype", "class", "deinit", "enum", "extension", "fileprivate",
         "func", "import", "init", "inout", "internal", "let", "open", "operator",
