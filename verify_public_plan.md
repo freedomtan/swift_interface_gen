@@ -4,14 +4,19 @@
 
 `verify_public.py` tests `swift-interface-gen` against public SDK Swift frameworks
 (those with both a `.tbd` and a real `.swiftinterface`) as ground truth. The default run
-uses a curated 18-framework baseline (`--frameworks` to pick specific ones, `--all` for
+uses a curated 19-framework baseline (`--frameworks` to pick specific ones, `--all` for
 all ~193 discovered).
 
-**Status as of branch `using_public_framework_as_groundtruth`**: **18/18 PASS**.
+**Status as of `main` (post `eliminate-public-first-pass-stubs` merge)**: **19/19 PASS,
+0 missing symbols, 0 first-pass stubs.** (This doc's per-framework fix detail below predates
+that final push and is kept as historical record of how each framework's initial PASS was
+reached; see `SwiftInterfaceGen/Sources/SwiftInterfaceGen/README.md`'s "Confirmed-unfixable
+stub categories" and "Symbol-forging fallback" sections for how the remaining first-pass
+stub count was later driven from ~1569 to 0 across every framework below plus MetalPerformanceShadersGraph.)
 
 ---
 
-## ✅ PASSING (18/18 — COMPLETE)
+## ✅ PASSING (19/19 — COMPLETE)
 
 Sorted by TBD symbol count (smallest/easiest first):
 
