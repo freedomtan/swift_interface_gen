@@ -256,7 +256,7 @@ def test_framework(name, tbd, swiftinterface_path, work_dir):
 
     try:
         # 1. Generate interface from TBD
-        r = run([str(SCRIPT_DIR / "swift-interface-gen"), tbd])
+        r = run([str(SCRIPT_DIR / "swift-interface-gen"), tbd, "--self-align"])
         if r.returncode != 0:
             result["error"] = f"generate failed: {r.stderr[:300]}"
             return result
