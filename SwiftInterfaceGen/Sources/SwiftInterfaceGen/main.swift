@@ -4387,6 +4387,18 @@ extension AttributeDynamicLookup {
                 of: "extension Dictionary where Key: MLDataValueConvertible,  Value: MLDataValueConvertible {",
                 with: "extension Dictionary: MLDataValueConvertible where Key: MLDataValueConvertible,  Value: MLDataValueConvertible {")
 
+            // The generic conditional conformance witness tables are not emitted by swiftc,
+            // but are present in CreateML.tbd. Emit @_silgen_name stubs so first-pass dylib exports them.
+            c += """
+
+@_silgen_name("$sSayxG8CreateML22MLDataValueConvertibleA2bCRzlWP")
+func _stub_array_MLDataValueConvertible_WP() { fatalError() }
+
+@_silgen_name("$sSDyxq_G8CreateML22MLDataValueConvertibleA2bCRzAbCR_rlWP")
+func _stub_dictionary_MLDataValueConvertible_WP() { fatalError() }
+
+"""
+
             // Fix: MLDataColumn<A> is missing its own `A: MLDataValueConvertible` bound (confirmed
             // via the real swiftinterface header -- restored above, alongside the >/</>=/<=
             // operators). The generator already renders every "A =="-constrained member
