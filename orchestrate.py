@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import glob
 import os
 import sys
 import subprocess
@@ -170,6 +171,11 @@ keep_stubs = False
 skip_built_deps = True
 generator_built_this_process = False
 
+# PostProcess/*.swift holds postProcess()'s per-module fixup functions, one file per module
+# (see main.swift's postProcess() for the call sites) -- globbed rather than listed by name so
+# adding a new module's file here doesn't also require editing this list.
+POSTPROCESS_SOURCES = sorted(glob.glob("SwiftInterfaceGen/Sources/SwiftInterfaceGen/PostProcess/*.swift"))
+
 GENERATOR_SOURCES = [
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/main.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Parser.swift",
@@ -178,7 +184,7 @@ GENERATOR_SOURCES = [
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/String+RegexFree.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/TreeNode.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.cpp",
-]
+] + POSTPROCESS_SOURCES
 
 def ensure_generator_built():
     """build_framework() is called once per resolved real-framework dependency -- for a
@@ -214,6 +220,7 @@ def ensure_generator_built():
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Config.swift",
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/String+RegexFree.swift",
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/TreeNode.swift",
+        ] + POSTPROCESS_SOURCES + [
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o",
             "-lc++",
             "-o", generator_bin

@@ -39,6 +39,7 @@ Generated libraries target **Swift language-mode 6** with experimental features 
 | **`Model.swift`** | AST node (`TypeNode`) and code-generation engine. Traverses the type tree and emits compilable Swift declarations with correct conformances, access modifiers, default return values, and subscript overloads. |
 | **`Config.swift`** | SDK root resolution and global configuration. |
 | **`String+RegexFree.swift`** | Regex-free string utilities: keyword escaping, generic-application stripping, module-prefix manipulation, operator fixups. |
+| **`PostProcess/<Module>.swift`** | One file per module with hardcoded `postProcess()` fixups (e.g. `PostProcess/Network.swift`, `PostProcess/HealthKit.swift`). Each defines one or more `extension SwiftInterfaceGen { static func postProcess<Module>(...) }` functions, called from the matching `if parser.defaultModule == "X"` guard back in `main.swift`'s `postProcess()`. Purely an organizational split of what used to be one 5,400-line function — no behavior change. Include this directory (`PostProcess/*.swift`) in any manual/script build command alongside the other source files. |
 
 ---
 
