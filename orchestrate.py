@@ -183,6 +183,7 @@ GENERATOR_SOURCES = [
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Config.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/String+RegexFree.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/TreeNode.swift",
+    "SwiftInterfaceGen/Sources/SwiftInterfaceGen/GenerateStubs.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.cpp",
 ] + POSTPROCESS_SOURCES
 
@@ -220,6 +221,7 @@ def ensure_generator_built():
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/Config.swift",
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/String+RegexFree.swift",
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/TreeNode.swift",
+            "SwiftInterfaceGen/Sources/SwiftInterfaceGen/GenerateStubs.swift",
         ] + POSTPROCESS_SOURCES + [
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o",
             "-lc++",
