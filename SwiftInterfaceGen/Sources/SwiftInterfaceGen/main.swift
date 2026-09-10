@@ -319,6 +319,25 @@ typedef NS_OPTIONS(NSUInteger, _HKQuantityDistributionOptions) {
         }
     }
 
+    // Splits generated Swift source into its identifier-shaped tokens (letters/digits/underscore
+    // runs), used by resolveImports' known-API-fragment table so a fragment match requires an
+    // actual identifier to contain it, not just a substring anywhere in the raw text (comments,
+    // string literals, etc.).
+    static func tokenizeIdentifiers(_ code: String) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        for ch in code {
+            if ch.isLetter || ch.isNumber || ch == "_" {
+                current.append(ch)
+            } else if !current.isEmpty {
+                tokens.append(current)
+                current = ""
+            }
+        }
+        if !current.isEmpty { tokens.append(current) }
+        return tokens
+    }
+
     static func resolveImports(from code: String, currentModule: String, parser: Parser) -> [String] {
         var imports = Set<String>()
         // Foundation-level modules must not import Foundation (circular dependency)
@@ -333,27 +352,53 @@ typedef NS_OPTIONS(NSUInteger, _HKQuantityDistributionOptions) {
             }
         }
         
-        if code.contains("MTL") || code.contains("MPS") { imports.insert("Metal"); imports.insert("MetalPerformanceShaders") }
-        if code.contains("IOSurface") { imports.insert("IOSurface") }
-        if code.contains("simd_") { imports.insert("simd") }
-        if code.contains("CGImage") || code.contains("CGRect") || code.contains("CGSize") || code.contains("CGFloat") { imports.insert("CoreGraphics") }
-        if code.contains("CVPixelBuffer") || code.contains("CVBuffer") { imports.insert("CoreVideo") }
-        if code.contains("CMTime") { imports.insert("CoreMedia") }
-        if code.contains("CIImage") { imports.insert("CoreImage") }
-        if code.contains("MLModel") { imports.insert("CoreML") }
-        if code.contains("DispatchQueue") { imports.insert("Dispatch") }
-        if code.contains("OS_xpc_object") { imports.insert("XPC") }
-        if code.contains("NSWindow") || code.contains("NSView") || code.contains("NSViewController") || code.contains("NSResponder") { imports.insert("AppKit") }
-        if code.contains("Combine.") && currentModule != "Combine" { imports.insert("Combine") }
-        if code.contains("SwiftUI.") && currentModule != "SwiftUI" { imports.insert("SwiftUI") }
-        if code.contains("AVFoundation.") || code.contains("AVAudio") || code.contains("AVVideo") || code.contains("AVDepthData") { imports.insert("AVFoundation") }
-        if code.contains("CoreLocation.") || code.contains("CLLocation") { imports.insert("CoreLocation") }
-        if code.contains("UAF") && currentModule != "UnifiedAssetFramework" { imports.insert("UnifiedAssetFramework") }
-        if code.contains("LAContext") { imports.insert("LocalAuthentication") }
-        if code.contains("NLLanguage") || code.contains("NLDistanceType") { imports.insert("NaturalLanguage") }
-        if code.contains("VNImageCropAndScaleOption") || code.contains("VNRequest") || code.contains("VNBarcodeSymbology") { imports.insert("Vision") }
-        if code.contains("ACAccount") { imports.insert("Accounts") }
-        if code.contains("RBSAssertion") || code.contains("RBS") { imports.insert("RunningBoardServices") }
+        // Known-API catalog: bare C/ObjC-bridged type-name fragments that aren't tracked as a
+        // real module reference anywhere else (they show up in generated code without any
+        // dotted module prefix -- e.g. a bridged `CGRect` param, not `CoreGraphics.CGRect` --
+        // so parser.referencedModules/discoveredNamespaces has nothing to key off). Matched
+        // against actual identifiers tokenized out of the code (not the raw text), so a fragment
+        // appearing only inside a comment/string/unrelated longer word can't spuriously trigger
+        // an import, and the mapping itself is one declarative table instead of a growing
+        // if-chain.
+        let knownAPIFragments: [(fragments: [String], frameworks: [String])] = [
+            (["MTL", "MPS"], ["Metal", "MetalPerformanceShaders"]),
+            (["IOSurface"], ["IOSurface"]),
+            (["simd_"], ["simd"]),
+            (["CGImage", "CGRect", "CGSize", "CGFloat"], ["CoreGraphics"]),
+            (["CVPixelBuffer", "CVBuffer"], ["CoreVideo"]),
+            (["CMTime"], ["CoreMedia"]),
+            (["CIImage"], ["CoreImage"]),
+            (["MLModel"], ["CoreML"]),
+            (["DispatchQueue"], ["Dispatch"]),
+            (["OS_xpc_object"], ["XPC"]),
+            (["NSWindow", "NSView", "NSViewController", "NSResponder"], ["AppKit"]),
+            (["LAContext"], ["LocalAuthentication"]),
+            (["NLLanguage", "NLDistanceType"], ["NaturalLanguage"]),
+            (["VNImageCropAndScaleOption", "VNRequest", "VNBarcodeSymbology"], ["Vision"]),
+            (["ACAccount"], ["Accounts"]),
+            (["RBSAssertion", "RBS"], ["RunningBoardServices"]),
+        ]
+        let identifiers = tokenizeIdentifiers(code)
+        for mapping in knownAPIFragments {
+            if identifiers.contains(where: { id in mapping.fragments.contains(where: { id.contains($0) }) }) {
+                imports.formUnion(mapping.frameworks)
+            }
+        }
+
+        // Same idea, but gated on the referencing module not being the module itself
+        // (avoids self-imports for modules that legitimately define these dotted names).
+        let selfGuardedFragments: [(fragments: [String], framework: String)] = [
+            (["Combine."], "Combine"),
+            (["SwiftUI."], "SwiftUI"),
+            (["AVFoundation.", "AVAudio", "AVVideo", "AVDepthData"], "AVFoundation"),
+            (["CoreLocation.", "CLLocation"], "CoreLocation"),
+            (["UAF"], "UnifiedAssetFramework"),
+        ]
+        for mapping in selfGuardedFragments {
+            if currentModule != mapping.framework, mapping.fragments.contains(where: { code.contains($0) }) {
+                imports.insert(mapping.framework)
+            }
+        }
         
         for mod in parser.discoveredNamespaces {
             let pattern = "(?:^|[^.])\\b\(NSRegularExpression.escapedPattern(for: mod))\\."
@@ -6518,12 +6563,32 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
     }
 
     // Mirrors verify_public.py's emit_empty_stub(): a minimal Swift module (source, .swiftmodule,
-    // .swiftinterface, dylib) under LocalFrameworks/<moduleName>.framework/ so `import
+    // .swiftinterface, dylib) under <frameworksDir>/<moduleName>.framework/ so `import
     // <moduleName>` resolves for a private SDK dependency the self-align compile can't otherwise
     // see (no real declarations, but selfAlignInterface only needs the import to succeed, not the
-    // dependency's own symbols to be complete).
-    static func emitEmptyStubFramework(moduleName: String, sdkRoot: String) {
-        let fw = "LocalFrameworks/\(moduleName).framework"
+    // dependency's own symbols to be complete). Always written into selfAlignInterface's own
+    // per-call temp frameworks dir, never the persistent repo-root LocalFrameworks/ -- that
+    // directory is shared with orchestrate.py's private-target builds and can contain a
+    // same-named module (e.g. Combine) that legitimately shadows the real SDK one for private
+    // targets but must never shadow it here (confirmed: SoundAnalysis's self-align compile broke
+    // as soon as LocalFrameworks/Combine.framework was rebuilt by an unrelated `orchestrate.py
+    // Combine` run, because -F search order let our own hand-generated Combine -- which doesn't
+    // emit primary-associated-type syntax for Publisher/Subject -- shadow the real one).
+    static func emitEmptyStubFramework(moduleName: String, sdkRoot: String, frameworksDir: String) {
+        let fw = "\(frameworksDir)/\(moduleName).framework"
+
+        // If a real, already-built framework for this module exists in the project's own
+        // persistent LocalFrameworks/ (built by orchestrate.py's private-target pipeline, e.g.
+        // FeatureFlags), copy it in read-only rather than synthesizing an empty stub -- an empty
+        // stub would be missing every real declaration (e.g. HealthKit's real
+        // `FeatureFlags.FeatureFlagsKey` conformance), causing spurious "no type named X in
+        // module" errors. Mirrors verify_public.py's own emit_empty_stub().
+        let persistentFw = "LocalFrameworks/\(moduleName).framework"
+        if FileManager.default.fileExists(atPath: persistentFw) {
+            try? FileManager.default.copyItem(atPath: persistentFw, toPath: fw)
+            if FileManager.default.fileExists(atPath: fw) { return }
+        }
+
         let modDir = "\(fw)/Modules/\(moduleName).swiftmodule"
         guard (try? FileManager.default.createDirectory(atPath: modDir, withIntermediateDirectories: true)) != nil else { return }
 
@@ -6651,6 +6716,10 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
         // (-undefined dynamic_lookup + -install_name are required for many frameworks to link
         // cleanly against symbols only resolvable at real-dylib load time).
         let installName = "/System/Library/Frameworks/\(parser.defaultModule).framework/Versions/A/\(parser.defaultModule)"
+        // Isolated per-call frameworks dir -- see emitEmptyStubFramework's comment for why this
+        // must never be the persistent repo-root LocalFrameworks/.
+        let selfAlignFrameworksDir = tempDir + "/LocalFrameworks"
+        try? FileManager.default.createDirectory(atPath: selfAlignFrameworksDir, withIntermediateDirectories: true)
         var alreadyStubbedModules = Set<String>()
         var compileSucceeded = false
         for attempt in 1...5 {
@@ -6662,7 +6731,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                 tempInterfacePath,
                 "-enable-library-evolution",
                 "-module-name", parser.defaultModule,
-                "-F", "LocalFrameworks",
+                "-F", selfAlignFrameworksDir,
                 "-sdk", sdkRoot,
                 "-language-mode", "6",
                 "-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup",
@@ -6696,7 +6765,7 @@ static func extractDylibSymbols(dylibPath: String) -> Set<String> {
                     return code
                 }
                 for m in missingModules {
-                    emitEmptyStubFramework(moduleName: m, sdkRoot: sdkRoot)
+                    emitEmptyStubFramework(moduleName: m, sdkRoot: sdkRoot, frameworksDir: selfAlignFrameworksDir)
                 }
                 alreadyStubbedModules.formUnion(missingModules)
             } catch {
