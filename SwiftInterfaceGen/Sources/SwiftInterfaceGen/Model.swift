@@ -71,6 +71,27 @@ class TypeNode {
     // compile the type's own ABI into the primary target's binary).
     var movedFromModule: String? = nil
 
+    // Manually-confirmed generic-parameter letters (and, where known, their constraint) for
+    // private-framework types whose real declaration's own generic signature can't be inferred
+    // from ABI symbols alone -- genuine private-ABI knowledge, not derivable any other way.
+    // Shared by generateCode()'s two separate rendering sites that both need this same fact:
+    // once to build the constrained declaration header (e.g. "<A: XPCService, B: XPCService>"),
+    // once to build a bare unconstrained reference (e.g. "<A, B>") for the synthesized `==`
+    // operator's parameter types.
+    static let manualGenericParameters: [String: [(letter: String, constraint: String)]] = [
+        "BidirectionalXPCServiceClientConnection": [("A", "XPCService"), ("B", "XPCService")],
+        "CatalogAsset": [("A", "AssetMetadata"), ("B", "AssetContents")],
+        "SupportedArgument": [("A", "Equatable")],
+        "ResourceBundleIdentifier": [("A", "ResourceBundle")],
+        "MLShapedArray": [("A", "MLShapedArrayScalar")],
+        "MLShapedArraySlice": [("A", "MLShapedArrayScalar")],
+        "XPCServiceClientConnection": [("A", "XPCService")],
+        "MultiplexedDatagramFlow": [("A", "ManyToManyProtocolHandler")],
+        "MultiplexedStreamFlow": [("A", "ManyToManyProtocolHandler")],
+        "MultiplexingDatagramPath": [("A", "ManyToManyProtocolHandler")],
+        "MultiplexingStreamPath": [("A", "ManyToManyProtocolHandler")],
+    ]
+
     private func isLifetimeSpanType(_ type: String) -> Bool {
         let clean = type.replacingOccurrences(of: "Optional<", with: "")
                         .replacingOccurrences(of: ">", with: "")
@@ -1009,32 +1030,10 @@ class TypeNode {
         
         let typeName = nameOverride ?? name
         var displayTypeName = escapeKeyword(typeName)
-        if typeName == "BidirectionalXPCServiceClientConnection" {
-            displayTypeName += "<A: XPCService, B: XPCService>"
-            inScope.insert("A")
-            inScope.insert("B")
-        } else if typeName == "CatalogAsset" {
-            displayTypeName += "<A: AssetMetadata, B: AssetContents>"
-            inScope.insert("A")
-            inScope.insert("B")
-        } else if typeName == "SupportedArgument" {
-            displayTypeName += "<A: Equatable>"
-            inScope.insert("A")
-        } else if typeName == "ResourceBundleIdentifier" {
-            displayTypeName += "<A: ResourceBundle>"
-            inScope.insert("A")
-        } else if typeName == "MLShapedArray" {
-            displayTypeName += "<A: MLShapedArrayScalar>"
-            inScope.insert("A")
-        } else if typeName == "MLShapedArraySlice" {
-            displayTypeName += "<A: MLShapedArrayScalar>"
-            inScope.insert("A")
-        } else if typeName == "XPCServiceClientConnection" {
-            displayTypeName += "<A: XPCService>"
-            inScope.insert("A")
-        } else if typeName == "MultiplexedDatagramFlow" || typeName == "MultiplexedStreamFlow" || typeName == "MultiplexingDatagramPath" || typeName == "MultiplexingStreamPath" {
-            displayTypeName += "<A: ManyToManyProtocolHandler>"
-            inScope.insert("A")
+        if let manualParams = Self.manualGenericParameters[typeName] {
+            let params = manualParams.map { "\($0.letter): \($0.constraint)" }
+            displayTypeName += "<\(params.joined(separator: ", "))>"
+            for p in manualParams { inScope.insert(p.letter) }
         } else if parser?.defaultModule == "Combine" && isGeneric && (typeName.contains("Sink") || typeName.contains("Record") || typeName.contains("Zip") || typeName.contains("CombineLatest") || typeName.contains("Merge") || typeName.contains("Sequence")) {
             let short = typeName.components(separatedBy: ".").last ?? typeName
             if short == "Sink" {
@@ -2124,12 +2123,9 @@ class TypeNode {
                 lines.append("\(nextIndent)public var debugDescription: Swift.String { get { fatalError() } }")
             }
             let genericParamsList: String
-            if typeName == "BidirectionalXPCServiceClientConnection" {
-                genericParamsList = "<A, B>"
-            } else if typeName == "CatalogAsset" {
-                genericParamsList = "<A, B>"
-            } else if typeName == "XPCServiceClientConnection" {
-                genericParamsList = "<A>"
+            if let manualParams = Self.manualGenericParameters[typeName],
+               ["BidirectionalXPCServiceClientConnection", "CatalogAsset", "XPCServiceClientConnection"].contains(typeName) {
+                genericParamsList = "<\(manualParams.map { $0.letter }.joined(separator: ", "))>"
             } else if isGeneric {
                 let ownCount = getOwnGenericCount(parser: parser)
                 let parentCount = getParentGenericCount(parser: parser)
