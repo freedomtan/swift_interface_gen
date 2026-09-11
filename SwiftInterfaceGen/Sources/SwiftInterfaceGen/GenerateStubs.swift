@@ -1230,4 +1230,104 @@ extension SwiftInterfaceGen {
             if ConfigManager.verbose { print("Generated empty stub for \(modName) at \(filePath)", to: &Self.standardError) }
         }
     }
+
+    class StubNode {
+        var name: String
+        var originalPath: [String] = []
+        var isProtocol: Bool = false
+        var kind: String = "struct"
+        var genericCount: Int = 0
+        var nested: [String: StubNode] = [:]
+        var conformances: [String] = []
+        
+        init(name: String) {
+            self.name = name
+        }
+        
+        func generateSwift(depth: Int) -> String {
+            let indent = String(repeating: "    ", count: depth)
+            var params = ""
+            if genericCount > 0 {
+                let placeholders = ["A", "B", "C", "D", "E", "F"]
+                let p = (0..<genericCount).map { $0 < placeholders.count ? placeholders[$0] : "A\($0)" }
+                params = "<\(p.joined(separator: ", "))>"
+            }
+            
+            var kindKeyword = "struct"
+            if isProtocol || kind == "protocol" {
+                kindKeyword = "protocol"
+            } else if kind == "enum" {
+                kindKeyword = "enum"
+            } else if kind == "class" {
+                kindKeyword = "class"
+            }
+            
+            var inheritance = ""
+            if kindKeyword == "protocol" {
+                let uniqueConformances = Array(Set(conformances)).sorted()
+                if !uniqueConformances.isEmpty {
+                    inheritance = ": " + uniqueConformances.joined(separator: ", ")
+                }
+            } else {
+                var uniqueConformances = Set<String>(conformances)
+                let isNonCopyable = uniqueConformances.contains("~Copyable") || uniqueConformances.contains("any ~Copyable")
+                if kindKeyword == "struct" || kindKeyword == "enum" {
+                    if !isNonCopyable {
+                        uniqueConformances.insert("Codable")
+                        uniqueConformances.insert("Hashable")
+                    }
+                    uniqueConformances.insert("Sendable")
+                }
+                // Codable already implies Decodable + Encodable — declaring both is a
+                // redundant-conformance error. This must run AFTER the unconditional
+                // `insert("Codable")` above (not just the original, possibly-Codable-less
+                // `conformances` check before it), since that insertion is exactly what can
+                // introduce the redundancy in the first place.
+                if uniqueConformances.contains("Codable") {
+                    uniqueConformances.remove("Decodable")
+                    uniqueConformances.remove("Encodable")
+                }
+                if kindKeyword == "class" {
+                    if !uniqueConformances.contains("Sendable") && !uniqueConformances.contains("@unchecked Sendable") {
+                        uniqueConformances.insert("@unchecked Sendable")
+                    }
+                }
+                if isNonCopyable {
+                    uniqueConformances.remove("Codable")
+                    uniqueConformances.remove("Decodable")
+                    uniqueConformances.remove("Encodable")
+                    uniqueConformances.remove("Hashable")
+                    uniqueConformances.remove("Equatable")
+                }
+                let sortedConformances = uniqueConformances.sorted()
+                if !sortedConformances.isEmpty {
+                    inheritance = ": " + sortedConformances.joined(separator: ", ")
+                }
+            }
+            
+            let escapedName = ["Type", "Protocol", "Self", "self"].contains(name) ? "`\(name)`" : name
+            var s = "\(indent)public \(kindKeyword) \(escapedName)\(params)\(inheritance) {\n"
+            if kindKeyword == "struct" || kindKeyword == "class" {
+                s += "\(indent)    public init() {}\n"
+            } else if kindKeyword == "enum" {
+                s += "\(indent)    case case0\n"
+            }
+            // Satisfy Stream's "associatedtype EventType" requirement for types injected with
+            // a native Stream conformance (see the AppleIntelligenceReporting lazySource<A>
+            // conformance hook in generateStubs) — the requirement's actual associated type is
+            // never referenced elsewhere in these stub types, so "Any" is a valid witness.
+            if conformances.contains("Stream") {
+                s += "\(indent)    public typealias EventType = Any\n"
+            }
+            if conformances.contains(where: { $0.contains("ChatLanguageModelResponseStringStreamString") || $0.contains("CompletionLanguageModelResponseStringStreamString") }) {
+                s += "\(indent)    public var text: Swift.String { get { fatalError() } }\n"
+            }
+            
+            for child in nested.values.sorted(by: { $0.name < $1.name }) {
+                s += child.generateSwift(depth: depth + 1)
+            }
+            s += "\(indent)}\n"
+            return s
+        }
+    }
 }
