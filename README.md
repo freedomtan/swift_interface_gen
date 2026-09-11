@@ -55,7 +55,7 @@ If you prefer to run the steps manually:
 ```bash
 cd SwiftInterfaceGen/Sources/SwiftInterfaceGen
 clang++ -O3 -std=c++11 -c DemangleWrapper.cpp -o DemangleWrapper.o
-swiftc -parse-as-library main.swift Parser.swift Model.swift Config.swift String+RegexFree.swift TreeNode.swift GenerateStubs.swift SelfAlign.swift RenderEnrichedType.swift PostProcess/*.swift DemangleWrapper.o -lc++ -o ../../../swift-interface-gen
+swiftc -parse-as-library main.swift Parser.swift Model.swift Config.swift String+RegexFree.swift TreeNode.swift GenerateStubs.swift SelfAlign.swift RenderEnrichedType.swift SymbolCompare.swift PostProcess/*.swift DemangleWrapper.o -lc++ -o ../../../swift-interface-gen
 cd ../../../
 ```
 

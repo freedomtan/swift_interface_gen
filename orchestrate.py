@@ -186,6 +186,7 @@ GENERATOR_SOURCES = [
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/GenerateStubs.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/SelfAlign.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/RenderEnrichedType.swift",
+    "SwiftInterfaceGen/Sources/SwiftInterfaceGen/SymbolCompare.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.cpp",
 ] + POSTPROCESS_SOURCES
 
@@ -226,6 +227,7 @@ def ensure_generator_built():
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/GenerateStubs.swift",
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/SelfAlign.swift",
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/RenderEnrichedType.swift",
+            "SwiftInterfaceGen/Sources/SwiftInterfaceGen/SymbolCompare.swift",
         ] + POSTPROCESS_SOURCES + [
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o",
             "-lc++",
