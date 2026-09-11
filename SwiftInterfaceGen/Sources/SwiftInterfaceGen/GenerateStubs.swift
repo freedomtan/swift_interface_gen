@@ -2,6 +2,14 @@ import Foundation
 
 extension SwiftInterfaceGen {
     static func generateStubs(outputCode: String, currentModule: String, outputDir: String, parser: Parser) {
+        let _profStart = Date()
+        var _profLast = _profStart
+        func _prof(_ label: String) {
+            guard ConfigManager.verbose else { return }
+            let now = Date()
+            print("generateStubs phase [\(label)] took: \(now.timeIntervalSince(_profLast))s", to: &Self.standardError)
+            _profLast = now
+        }
         try? outputCode.write(toFile: "/tmp/finalCode_\(currentModule)_first_run.swift", atomically: true, encoding: .utf8)
         var externalTypes = [String: [(typeName: String, isProtocol: Bool, genericCount: Int)]]()
 
@@ -58,6 +66,7 @@ extension SwiftInterfaceGen {
                 activeExtPrefix = nil
             }
         }
+        _prof("selfDeclaredExtensionTypes scan")
 
         var constraintTypes = Set<String>()
         // 1. Parse 'where' constraints
@@ -199,7 +208,8 @@ extension SwiftInterfaceGen {
                 }
             }
         }
-        
+        _prof("externalTypes regex discovery")
+
         var queue = [String]()
         for (mod, items) in externalTypes {
             for item in items {
@@ -253,7 +263,8 @@ extension SwiftInterfaceGen {
                 }
             }
         }
-        
+        _prof("BFS transitive conformance walk")
+
         var protocolAssociatedTypes = [String: Set<String>]()
         
         let declPattern = "(class|struct|enum|protocol)\\s+([a-zA-Z0-9_$]+)\\s*(?:<[^>]+>)?\\s*:\\s*([^{]+)"
@@ -339,6 +350,8 @@ extension SwiftInterfaceGen {
             }
         }
         
+        _prof("protocolAssociatedTypes regex scans")
+
         let fm = FileManager.default
         try? fm.createDirectory(atPath: outputDir, withIntermediateDirectories: true, attributes: nil)
 
@@ -369,6 +382,7 @@ extension SwiftInterfaceGen {
             if modsToLoad.isEmpty { break }
 
             for mod in modsToLoad {
+                let _depProfStart = Date()
                 processedTbdModules.insert(mod)
                 var tbdContent: String? = nil
                 for searchPath in tbdSearchPaths {
@@ -459,6 +473,9 @@ extension SwiftInterfaceGen {
                     parser.currentPrecomputeModule = savedPrecomputeModule
                     parser.ownTbdSymbols = savedOwnTbdSymbols
                 }
+                if ConfigManager.verbose {
+                    print("  dependency TBD parse+enrich for \(mod) took: \(Date().timeIntervalSince(_depProfStart))s", to: &Self.standardError)
+                }
             }
 
             // Scan every enriched module's real member signatures AND conformances for
@@ -534,6 +551,7 @@ extension SwiftInterfaceGen {
             }
             if !foundNewTypeInThisPass && modsToLoad.isEmpty { break }
         }
+        _prof("transitive dependency TBD parse+enrich loop")
 
         // Collected across ALL modules' hoists below — a protocol hoisted out of ITS OWN
         // module's nested path (e.g. BiomeStreams.LibraryArtifact.DataArtifact ->
@@ -545,6 +563,7 @@ extension SwiftInterfaceGen {
         var fileContentsByModule = [String: String]()
 
         for (mod, items) in externalTypes {
+            let _modProfStart = Date()
             if ConfigManager.verbose { print("Stubbing: \(mod) has \(items.count) items: \(items.map { $0.typeName })", to: &Self.standardError) }
             var fileContent = "import Foundation\n\n"
             let root = StubNode(name: mod)
@@ -820,6 +839,28 @@ extension SwiftInterfaceGen {
             // "import Qualifier" instead of a real declaration).
             var knownStubTypeNames = Set(topLevelTypes.map { $0.name } + topLevelProtocols.map { $0.name })
             var closurePassBudget = 20
+            // Names already declared somewhere in fileContent (via StubNode/renderEnrichedType
+            // emission earlier in this loop, not necessarily reflected in knownStubTypeNames --
+            // see the loop body below for why that distinction matters). Used instead of running
+            // a fresh NSRegularExpression compile+full-string scan for EVERY newly-discovered
+            // name: a large dependency stub (e.g. PromptKit, ~280KB, needing ~18 fixed-point
+            // iterations to converge) could trigger hundreds of those per-name scans against its
+            // own growing content, measured taking several seconds. Scanning once for all
+            // declarations at a time is the same total work done far less often.
+            let declPatternAnyName = "(?:^|\\n)(?:@[A-Za-z0-9_]+\\s+)*(?:public\\s+|open\\s+)?(?:protocol|struct|class|enum|typealias)\\s+([A-Za-z0-9_]+)\\b"
+            let declScanRegex = try? NSRegularExpression(pattern: declPatternAnyName, options: [])
+            func declaredNames(in text: String) -> Set<String> {
+                guard let declScanRegex else { return [] }
+                var names = Set<String>()
+                let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+                for m in declScanRegex.matches(in: text, options: [], range: nsRange) {
+                    if let r = Range(m.range(at: 1), in: text) {
+                        names.insert(String(text[r]))
+                    }
+                }
+                return names
+            }
+            var declaredNamesInFileContent = declaredNames(in: fileContent)
             while closurePassBudget > 0 {
                 closurePassBudget -= 1
                 var newlyFound = [String]()
@@ -892,23 +933,29 @@ extension SwiftInterfaceGen {
                 if newlyFound.isEmpty && newlyFoundObjc.isEmpty && newlyFoundOpaqueStruct.isEmpty { break }
                 for name in Set(newlyFoundObjc) {
                     knownStubTypeNames.insert(name)
-                    fileContent += "public class \(name) {}\n"
+                    let decl = "public class \(name) {}\n"
+                    fileContent += decl
+                    declaredNamesInFileContent.formUnion(declaredNames(in: decl))
                 }
                 for name in Set(newlyFoundOpaqueStruct) {
                     knownStubTypeNames.insert(name)
-                    fileContent += "public struct \(name): Hashable, Codable, Sendable {}\n"
+                    let decl = "public struct \(name): Hashable, Codable, Sendable {}\n"
+                    fileContent += decl
+                    declaredNamesInFileContent.formUnion(declaredNames(in: decl))
                 }
                 for name in Set(newlyFound) {
                     if knownStubTypeNames.contains(name) { continue }
                     knownStubTypeNames.insert(name)
-                    let declPattern = "(?:^|\\n)(?:@[A-Za-z0-9_]+\\s+)*(?:public\\s+|open\\s+)?(?:protocol|struct|class|enum|typealias)\\s+\(name)\\b"
-                    if fileContent.range(of: declPattern, options: .regularExpression) != nil { continue }
+                    if declaredNamesInFileContent.contains(name) { continue }
                     guard let realNode = parser.findTypeNode(module: mod, path: [name]) else { continue }
                     if realNode.kind == "protocol" {
-                        fileContent += "public protocol \(name) {}\n"
+                        let decl = "public protocol \(name) {}\n"
+                        fileContent += decl
+                        declaredNamesInFileContent.formUnion(declaredNames(in: decl))
                     } else {
                         let code = renderEnrichedType(realNode, mod: mod, currentModule: currentModule, parser: parser, selfDeclaredExtensionTypes: selfDeclaredExtensionTypes)
                         fileContent += code + "\n"
+                        declaredNamesInFileContent.formUnion(declaredNames(in: code))
                     }
                 }
             }
@@ -1171,7 +1218,11 @@ extension SwiftInterfaceGen {
             }
 
             fileContentsByModule[mod] = fileContent
+            if ConfigManager.verbose {
+                print("  per-module stub assembly for \(mod) (\(fileContent.count) chars) took: \(Date().timeIntervalSince(_modProfStart))s", to: &Self.standardError)
+            }
         }
+        _prof("per-module stub assembly loop (StubNode build, closure-pass, extraImports)")
 
         // Apply every hoist rename (collected across ALL modules above) to every module's
         // generated text — a protocol hoisted out of ITS OWN module's nested path (e.g.
@@ -1203,6 +1254,7 @@ extension SwiftInterfaceGen {
                 print("Error: Could not write stub file to \(filePath)", to: &Self.standardError)
             }
         }
+        _prof("hoist-rename apply + file writes")
 
         // Emit minimal empty stubs for private-framework modules that were discovered
         // (via discoveredNamespaces) but have no referenced types in the interface
@@ -1229,6 +1281,7 @@ extension SwiftInterfaceGen {
             try? emptyStub.write(toFile: filePath, atomically: true, encoding: .utf8)
             if ConfigManager.verbose { print("Generated empty stub for \(modName) at \(filePath)", to: &Self.standardError) }
         }
+        _prof("empty-stub emission")
     }
 
     class StubNode {
