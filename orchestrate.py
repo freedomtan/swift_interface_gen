@@ -770,6 +770,9 @@ def _merge_stub_sources(prior_text, new_text):
     body = "\n".join(merged_imports) + "\n\n" + "\n".join(merged_decls[n] for n in merged_decls)
     return body
 
+def _stub_source_cache_path(name):
+    return f"LocalFrameworks/{name}.framework/.stub_source.swift"
+
 def build_framework_stub(name, swift_source):
     if name in built:
         with open(swift_source, "r") as f:
@@ -795,7 +798,32 @@ def build_framework_stub(name, swift_source):
             swift_source = merged_path
         else:
             return
+    elif skip_built_deps and is_framework_fully_built(name):
+        # Cross-process cache: `built`/`stub_sources_built` above only catch a re-request
+        # for the same stub WITHIN this process -- every separate orchestrate.py invocation
+        # (e.g. run_regression_tests.py's one-process-per-target loop) starts both empty, so
+        # without this check every dependency stub gets fully recompiled on every single run,
+        # even when its generated source is byte-identical to what's already sitting in
+        # LocalFrameworks/ from a prior run. Persist the exact source that produced what's on
+        # disk (see the write-through below) and compare byte-for-byte before trusting it --
+        # a genuine difference (generator changed, or this run's dependency chain produced a
+        # different scope) must still fall through to a real rebuild, exactly as the
+        # in-process prior_content check above does.
+        cache_path = _stub_source_cache_path(name)
+        if os.path.exists(cache_path):
+            with open(cache_path, "r") as f:
+                cached_content = f.read()
+            with open(swift_source, "r") as f:
+                new_content = f.read()
+            if cached_content == new_content:
+                stub_sources_built[name] = swift_source
+                built.add(name)
+                return
     compile_framework(name, swift_source, is_stub=True)
+    with open(swift_source, "r") as f:
+        built_content = f.read()
+    with open(_stub_source_cache_path(name), "w") as f:
+        f.write(built_content)
     stub_sources_built[name] = swift_source
     built.add(name)
 
