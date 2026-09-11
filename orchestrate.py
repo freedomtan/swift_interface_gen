@@ -185,6 +185,7 @@ GENERATOR_SOURCES = [
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/TreeNode.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/GenerateStubs.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/SelfAlign.swift",
+    "SwiftInterfaceGen/Sources/SwiftInterfaceGen/RenderEnrichedType.swift",
     "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.cpp",
 ] + POSTPROCESS_SOURCES
 
@@ -224,6 +225,7 @@ def ensure_generator_built():
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/TreeNode.swift",
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/GenerateStubs.swift",
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/SelfAlign.swift",
+            "SwiftInterfaceGen/Sources/SwiftInterfaceGen/RenderEnrichedType.swift",
         ] + POSTPROCESS_SOURCES + [
             "SwiftInterfaceGen/Sources/SwiftInterfaceGen/DemangleWrapper.o",
             "-lc++",
