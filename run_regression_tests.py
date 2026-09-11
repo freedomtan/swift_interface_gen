@@ -4,15 +4,15 @@ import subprocess
 import sys
 
 TESTS = [
-    ("CoreAICommon", "test_CoreAICommon.swift"),
-    ("CoreAICompiler", "test_CoreAICompiler.swift"),
-    ("CoreAIDelegates", "test_CoreAIDelegates.swift"),
-    ("ODIE", "test_ODIE.swift"),
-    ("AppleIntelligenceReporting", "test_AppleIntelligenceReporting.swift"),
-    ("UnifiedAssetFramework", "test_UnifiedAssetFramework.swift"),
-    ("ModelCatalog", "test_ModelCatalog.swift"),
-    ("ModelCatalogRuntime", "test_ModelCatalogRuntime.swift"),
-    ("TokenGenerationCore", "test_TokenGenerationCore.swift"),
+    ("CoreAICommon", "tests/test_CoreAICommon.swift"),
+    ("CoreAICompiler", "tests/test_CoreAICompiler.swift"),
+    ("CoreAIDelegates", "tests/test_CoreAIDelegates.swift"),
+    ("ODIE", "tests/test_ODIE.swift"),
+    ("AppleIntelligenceReporting", "tests/test_AppleIntelligenceReporting.swift"),
+    ("UnifiedAssetFramework", "tests/test_UnifiedAssetFramework.swift"),
+    ("ModelCatalog", "tests/test_ModelCatalog.swift"),
+    ("ModelCatalogRuntime", "tests/test_ModelCatalogRuntime.swift"),
+    ("TokenGenerationCore", "tests/test_TokenGenerationCore.swift"),
 ]
 
 

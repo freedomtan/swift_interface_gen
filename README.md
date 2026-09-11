@@ -18,7 +18,7 @@ This tool is primarily used for reverse-engineering and reconstructing the publi
 
 The easiest way to use the tool is via the included `orchestrate.py` tool, which automates the entire compilation and verification process.
 
-1. **Create a Test File** (e.g., `test_TokenGenerationCore.swift`):
+1. **Create a Test File** (e.g., `tests/test_TokenGenerationCore.swift`):
    ```swift
    import TokenGenerationCore
    import Foundation
@@ -27,11 +27,14 @@ The easiest way to use the tool is via the included `orchestrate.py` tool, which
    // Reference layouts and APIs from TokenGenerationCore
    print("Types verified")
    ```
+   The `tests/` directory holds the client programs used to exercise generated
+   frameworks under `LocalFrameworks/` (see `run_regression_tests.py`'s `TESTS`
+   list for the full set).
 
 2. **Run the Orchestration Tool**:
    Pass the target framework name and your test file.
    ```bash
-   ./orchestrate.py TokenGenerationCore test_TokenGenerationCore.swift
+   ./orchestrate.py TokenGenerationCore tests/test_TokenGenerationCore.swift
    ```
 
 The script will automatically:
@@ -82,7 +85,7 @@ swiftc -emit-library -o LocalFrameworks/ModelCatalog.framework/ModelCatalog \
 
 ### 4. Compile Your Client Code
 ```bash
-swiftc -F LocalFrameworks test_ModelCatalog.swift \
+swiftc -F LocalFrameworks tests/test_ModelCatalog.swift \
     -enable-experimental-feature NonescapableTypes -enable-experimental-feature Lifetimes \
     -sdk /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -language-mode 6 \
     -o test_run
