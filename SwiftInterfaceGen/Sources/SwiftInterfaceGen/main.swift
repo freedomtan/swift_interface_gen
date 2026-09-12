@@ -77,7 +77,44 @@ struct SwiftInterfaceGen {
         
         if let stubsIndex = args.firstIndex(of: "--generate-stubs"), stubsIndex + 1 < args.count {
             let outputDir = args[stubsIndex + 1]
-            generateStubs(outputCode: finalCode, currentModule: currentModule, outputDir: outputDir, parser: parser)
+            // A stub-module import cycle (detected below) used to be resolved by the CALLER
+            // (orchestrate.py) killing this process and spawning a fresh one with an updated
+            // SWIFT_INTERFACE_GEN_BUILDING_TARGETS -- which re-parsed every transitively
+            // discovered dependency's own .tbd from scratch, since a new process starts with an
+            // empty Parser. Retrying in-process instead reuses this same `parser`, whose
+            // processedModules guard (see processSymbols()) already makes a repeat
+            // generateStubs() call skip all the expensive demangle/parse work for any dependency
+            // it already processed -- only the (cheap) rendering actually redoes work.
+            // Frozen once, before any retry, and reused for every retry's generateStubs() call
+            // -- see the matching comment on generateStubs()'s selfDeclaredExtensionPaths
+            // parameter (GenerateStubs.swift) for why re-reading parser.selfDeclaredExternalExtensionPaths
+            // fresh on a later retry would be wrong, not just redundant.
+            let frozenSelfDeclaredExtensionPaths = parser.selfDeclaredExternalExtensionPaths
+            let maxCycleRetries = 10
+            for _ in 0..<maxCycleRetries {
+                generateStubs(outputCode: finalCode, currentModule: currentModule, outputDir: outputDir, parser: parser, selfDeclaredExtensionPaths: frozenSelfDeclaredExtensionPaths)
+                let stubModules = ((try? FileManager.default.contentsOfDirectory(atPath: outputDir)) ?? [])
+                    .filter { $0.hasSuffix(".swift") }
+                    .map { String($0.dropLast(".swift".count)) }
+                let cyclicStubModules = findStubImportCycles(outputDir: outputDir, stubModules: stubModules)
+                let currentTargets = Set((ProcessInfo.processInfo.environment["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"] ?? "")
+                    .split(separator: ",").map(String.init))
+                let newCycles = cyclicStubModules.subtracting(currentTargets)
+                if newCycles.isEmpty { break }
+                let allCyclic = currentTargets.union(cyclicStubModules).sorted()
+                print("  Detected stub-module import cycle: \(newCycles.sorted()) -- regenerating with back-references stripped", to: &Self.standardError)
+                setenv("SWIFT_INTERFACE_GEN_BUILDING_TARGETS", allCyclic.joined(separator: ","), 1)
+                try? FileManager.default.removeItem(atPath: outputDir)
+                try? FileManager.default.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
+            }
+            // Report whatever SWIFT_INTERFACE_GEN_BUILDING_TARGETS this process ended up
+            // resolving to (it can grow beyond what the caller originally seeded it with) back
+            // to orchestrate.py via a sidecar file, so its own LATER subprocess invocations for
+            // this same target (the post-dependency-build rescan passes) stay consistent --
+            // otherwise those would regenerate stub content without the back-reference
+            // stripping that made this cycle resolvable, reintroducing the same problem.
+            let finalTargets = ProcessInfo.processInfo.environment["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"] ?? ""
+            try? finalTargets.write(toFile: "\(outputDir)/.circular_targets", atomically: true, encoding: .utf8)
             return
         }
         

@@ -315,61 +315,23 @@ def build_framework(name, is_target=False):
     # instead of empty skeletons) can surface a genuine import CYCLE purely among dependency
     # stub modules themselves (e.g. GenerativeModelsFoundation -> GenerativeModels ->
     # TokenGeneration -> GenerativeModelsFoundation), distinct from the target/currentModule
-    # cycle case above. Detect it by building a directed graph of stub modules' own "import"
-    # lines and running cycle detection; any module found in a cycle gets added to the SAME
-    # circular-module env var and the stub scan is re-run so the generator strips those
-    # back-references too, exactly like it already does for `building`.
-    def find_stub_import_cycles():
-        graph = {}
-        for f in stub_files:
-            mod = f[:-6]
-            deps = set()
-            with open(f"{tmp_stubs_dir}/{f}", "r") as sf:
-                for line in sf:
-                    if line.startswith("import "):
-                        d = line.split()[1].strip()
-                        if d in stub_modules and d != mod:
-                            deps.add(d)
-            graph[mod] = deps
-        in_cycle = set()
-        visited = set()
-        stack = []
-        on_stack = set()
-        def dfs(node):
-            visited.add(node)
-            stack.append(node)
-            on_stack.add(node)
-            for nxt in graph.get(node, ()):
-                if nxt in on_stack:
-                    cycle_start = stack.index(nxt)
-                    in_cycle.update(stack[cycle_start:])
-                elif nxt not in visited:
-                    dfs(nxt)
-            stack.pop()
-            on_stack.remove(node)
-        for node in graph:
-            if node not in visited:
-                dfs(node)
-        return in_cycle
+    # cycle case above. The generator now detects and resolves this internally, in-process
+    # (GenerateStubs.swift's findStubImportCycles + main.swift's --generate-stubs retry loop) --
+    # this used to be done here instead, killing the process and respawning a fresh one on every
+    # detected cycle, which re-parsed every transitively-discovered dependency's own .tbd from
+    # scratch each time (a fresh process starts with an empty Parser). The generator reports back
+    # whatever SWIFT_INTERFACE_GEN_BUILDING_TARGETS it ended up resolving to (it can grow beyond
+    # what we seeded it with) via this sidecar file, so our OWN later subprocess calls for this
+    # same target (the "6.4" rescan passes below) stay consistent -- otherwise those would
+    # regenerate stub content without the back-reference stripping that made the cycle
+    # resolvable in the first place.
+    circular_targets_file = f"{tmp_stubs_dir}/.circular_targets"
+    if os.path.exists(circular_targets_file):
+        with open(circular_targets_file, "r") as f:
+            resolved_targets = f.read().strip()
+        if resolved_targets:
+            stub_gen_env["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"] = resolved_targets
 
-    while True:
-        cyclic_stub_modules = find_stub_import_cycles()
-        current_targets = set(stub_gen_env.get("SWIFT_INTERFACE_GEN_BUILDING_TARGETS", "").split(","))
-        new_cycles = cyclic_stub_modules - current_targets
-        if not new_cycles:
-            break
-        all_cyclic = sorted(building | cyclic_stub_modules | current_targets)
-        all_cyclic = [c for c in all_cyclic if c]
-        print(f"  Detected stub-module import cycle: {sorted(new_cycles)} -- regenerating with back-references stripped")
-        stub_gen_env["SWIFT_INTERFACE_GEN_BUILDING_TARGETS"] = ",".join(all_cyclic)
-        shutil.rmtree(tmp_stubs_dir)
-        os.makedirs(tmp_stubs_dir, exist_ok=True)
-        subprocess.check_call([
-            "./swift-interface-gen", tbd_path, "--generate-stubs", tmp_stubs_dir
-        ], env=stub_gen_env)
-        stub_files = [f for f in os.listdir(tmp_stubs_dir) if f.endswith(".swift")]
-        stub_modules = [f[:-6] for f in stub_files]
-    
     # 4. Run the generator to output the interface file
     interface_file = f"{name}Interface.swift"
     with open(interface_file, "w") as f:

@@ -1,7 +1,7 @@
 import Foundation
 
 extension SwiftInterfaceGen {
-    static func generateStubs(outputCode: String, currentModule: String, outputDir: String, parser: Parser) {
+    static func generateStubs(outputCode: String, currentModule: String, outputDir: String, parser: Parser, selfDeclaredExtensionPaths: Set<String>) {
         let _profStart = Date()
         var _profLast = _profStart
         func _prof(_ label: String) {
@@ -24,7 +24,19 @@ extension SwiftInterfaceGen {
         // name — read it here so the stub declares "associatedtype <Name>" under the same
         // placeholder position instead of a bare "A".
         let primaryAssociatedTypeNames = parser.primaryAssociatedTypeNames
-        var selfDeclaredExtensionTypes = Set<String>(parser.selfDeclaredExternalExtensionPaths)
+        // Caller-frozen, NOT re-read from parser.selfDeclaredExternalExtensionPaths here: that
+        // Set grows continuously as a side effect of parsing more dependencies' own real
+        // symbols (Parser.swift's parse(), on every "(extension in X)" demangled path) --
+        // including growth caused by THIS SAME function's own transitive dependency-parsing
+        // loop below, every time it runs. renderEnrichedType() later does a blanket
+        // word-level `code.replaceWord(leafName, with: "Any")` for every entry in this set,
+        // which is only safe when the set reflects "what was known before generateStubs() was
+        // ever invoked" -- reading it fresh here would let one invocation's own transitive
+        // parsing corrupt a LATER invocation's otherwise-identical rendering of an unrelated
+        // member whose text happens to share a leaf name (e.g. ".Element") with something
+        // newly discovered in between. The caller captures this snapshot exactly once, before
+        // any retry.
+        var selfDeclaredExtensionTypes = selfDeclaredExtensionPaths
         let outputLines = outputCode.components(separatedBy: .newlines)
         var activeExtPrefix: String? = nil
         var currentDepth = 0
@@ -1382,5 +1394,56 @@ extension SwiftInterfaceGen {
             s += "\(indent)}\n"
             return s
         }
+    }
+
+    // Swift doesn't support mutually-importing modules at all -- generateStubs()'s enrichment
+    // (real members instead of empty skeletons) can surface a genuine import CYCLE purely among
+    // dependency stub modules themselves (e.g. GenerativeModelsFoundation -> GenerativeModels ->
+    // TokenGeneration -> GenerativeModelsFoundation). This mirrors orchestrate.py's own
+    // (now-removed) find_stub_import_cycles() -- ported here so the retry it used to require
+    // (killing the process and respawning a fresh one, which re-parses every dependency's TBD
+    // from scratch since a new process starts with an empty Parser) can instead happen in-process
+    // in main()'s --generate-stubs loop, reusing the same already-populated Parser.
+    static func findStubImportCycles(outputDir: String, stubModules: [String]) -> Set<String> {
+        let stubModuleSet = Set(stubModules)
+        var graph = [String: Set<String>]()
+        for mod in stubModules {
+            var deps = Set<String>()
+            if let content = try? String(contentsOfFile: "\(outputDir)/\(mod).swift", encoding: .utf8) {
+                for line in content.components(separatedBy: .newlines) {
+                    guard line.hasPrefix("import ") else { continue }
+                    let rest = line.dropFirst("import ".count).trimmingCharacters(in: .whitespaces)
+                    guard let d = rest.components(separatedBy: .whitespaces).first, !d.isEmpty else { continue }
+                    if stubModuleSet.contains(d) && d != mod {
+                        deps.insert(d)
+                    }
+                }
+            }
+            graph[mod] = deps
+        }
+        var inCycle = Set<String>()
+        var visited = Set<String>()
+        var stack = [String]()
+        var onStack = Set<String>()
+        func dfs(_ node: String) {
+            visited.insert(node)
+            stack.append(node)
+            onStack.insert(node)
+            for next in graph[node] ?? [] {
+                if onStack.contains(next) {
+                    if let cycleStart = stack.firstIndex(of: next) {
+                        inCycle.formUnion(stack[cycleStart...])
+                    }
+                } else if !visited.contains(next) {
+                    dfs(next)
+                }
+            }
+            stack.removeLast()
+            onStack.remove(node)
+        }
+        for node in stubModules where !visited.contains(node) {
+            dfs(node)
+        }
+        return inCycle
     }
 }
